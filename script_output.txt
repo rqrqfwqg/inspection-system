@@ -1,0 +1,40 @@
+1: 
+2: const D={"1": {"label": "GTC A组 + 东停车楼 A组", "cls": "a", "floors": ["负二楼", "一楼", "负一楼"], "total": 69, "high": 56, "low": 13, "morning": {"rooms": [{"楼栋": "GTC", "楼层": "负二楼", "机房名称": "消防配电房", "机房编号": "GE-2F-XFPD-102", "类型": "高频"}, {"楼栋": "GTC", "楼层": "负二楼", "机房名称": "消防配电房", "机房编号": "GE-2F-XFPD-103", "
+3: const maxT=Math.max(...Object.values(D).map(d=>d.total));
+4: const cal=document.getElementById('cal');
+5: for(let day=1;day<=28;day++){
+6:   const d=D[day];
+7:   const hPct=(d.high/maxT*100).toFixed(1),lPct=(d.low/maxT*100).toFixed(1);
+8:   const nm=d.morning.rooms.length, ne=d.evening.rooms.length;
+9:   const c=document.createElement('div');
+10:   c.className=`card ${d.cls}`;
+11:   c.innerHTML=`
+12:     <div class="dnum">第 ${day} 天</div>
+13:     <div class="dlbl ${d.cls}">${d.label}</div>
+14:     <div class="shift-bar">
+15:       <div class="sb sb-m">🌅早班 ${nm}间</div>
+16:       <div class="sb sb-e">🌆晚班 ${ne}间</div>
+17:     </div>
+18:     <div class="bar"><div class="bhi" style="width:${hPct}%"></div><div class="blo" style="width:${lPct}%"></div></div>
+19:     <div class="badges">
+20:       <span class="badge bt">共${d.total}</span>
+21:       <span class="badge bh">★${d.high}</span>
+22:       ${d.low?`<span class="badge bl">☆${d.low}</span>`:''}
+23:     </div>
+24:     <div class="dflr">${d.floors.join(' · ')}</div>`;
+25:   c.onclick=()=>openM(day);
+26:   cal.appendChild(c);
+27: }
+28: function btag(b){
+29:   if(b==='GTC') return '<span class="btag bg">GTC</span>';
+30:   if(b==='东停车楼') return '<span class="btag be">东停</span>';
+31:   return '<span class="btag bw">西停</span>';
+32: }
+33: function renderShift(shift, cls, label){
+34:   const nm=shift.rooms.length;
+35:   let h=`<div class="shift-panel">
+36:     <div class="sp-hdr ${cls}">${label}<span>${nm}间</span></div>
+37:     <div class="sp-body">`;
+38:   for(const [fk,rooms] of Object.entries(shift.grouped)){
+39:     const hi=rooms.filter(r=>r['类型']==='高频').length;
+40:     const lo=rooms.filter(r=>r['类型']==='低频').length;
