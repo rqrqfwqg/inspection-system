@@ -891,4 +891,4 @@ def delete_inspection_plan(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=9527, workers=1, loop="asyncio", lifespan="on")
+    uvicorn.run("main:app", host="0.0.0.0", port=9527, workers=1, loop="asyncio", lifespan="on")
