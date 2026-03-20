@@ -642,17 +642,10 @@ def update_inspection_rule(rule_id: int, rule_data: InspectionRuleUpdate, db: Se
 def _build_plan_data(year: int, month: int, rule: InspectionRule, rooms: List[Room]) -> dict:
     """
     根据规则和机房列表，生成该月的巡查计划数据。
-    返回以日期字符串（YYYY-MM-DD）为 key 的 dict。
-
-    班次分配规则（参考原始 plan_data.json）：
-    - 早班：只巡查高频机房（约28间/天）
-    - 晚班：巡查所有机房（高频约28间 + 低频约22间）
-
-    每月巡查次数：
-    - 高频机房：巡查 N 次（N=rule.high_freq_days），每天早班+晚班都有
-    - 低频机房：巡查 M 次（M=rule.low_freq_times），只在晚班
+    优化：同一楼层的机房集中在一起，不拆分到不同班次
+    
+    每天的巡查任务统一显示，不分早晚班
     """
-    # 每月最多排28天巡查
     total_days = min(28, calendar.monthrange(year, month)[1])
 
     high_rooms = [r for r in rooms if r.room_type == "高频" and r.is_active]
@@ -667,53 +660,106 @@ def _build_plan_data(year: int, month: int, rule: InspectionRule, rooms: List[Ro
             "类型": r.room_type,
         }
 
-    # --- 高频分配：早班+晚班，每天都有 ---
-    # 每间高频机房每月巡查 high_times 次（早班+晚班合计7次），均匀分摊到每天
-    # 每天高频间数 ≈ n_high * high_times / total_days
-    high_times = rule.high_freq_days  # 每月巡查次数（如7次）
-    high_by_day: dict[int, list] = {d: [] for d in range(1, total_days + 1)}
-    n_high = len(high_rooms)
-    if n_high > 0 and high_times > 0:
-        # 计算每天应该巡查多少间高频（早班+晚班合计）
-        # 每间机房巡查 high_times 次，总次数 = n_high * high_times
-        for i, r in enumerate(high_rooms):
-            # 把每间机房的 high_times 次均匀分布到整月
-            start_offset = (i * total_days) // n_high
-            for t in range(high_times):
-                day = ((start_offset + t * total_days // high_times) % total_days) + 1
-                high_by_day[day].append(room_to_dict(r))
+    # 按"楼栋+楼层"分组，同一楼层的机房放一起
+    high_by_floor = {}
+    for r in high_rooms:
+        key = f"{r.building or '未知'}_{r.floor or '未知'}"
+        high_by_floor.setdefault(key, []).append(room_to_dict(r))
+    
+    low_by_floor = {}
+    for r in low_rooms:
+        key = f"{r.building or '未知'}_{r.floor or '未知'}"
+        low_by_floor.setdefault(key, []).append(room_to_dict(r))
 
-    # --- 低频分配：只在晚班，每天都有（轮换） ---
-    low_times = rule.low_freq_times  # 每月巡查次数（如2次）
-    low_by_day: dict[int, list] = {d: [] for d in range(1, total_days + 1)}
-    n_low = len(low_rooms)
-    if n_low > 0 and low_times > 0:
-        for i, r in enumerate(low_rooms):
-            start_offset = (i * total_days) // n_low
-            for t in range(low_times):
-                day = ((start_offset + t * total_days // low_times) % total_days) + 1
-                low_by_day[day].append(room_to_dict(r))
+    # 获取所有楼层组合，按楼栋排序
+    all_floors = list(high_by_floor.keys()) + [k for k in low_by_floor.keys() if k not in high_by_floor]
+    all_floors = sorted(set(all_floors), key=lambda x: (x.split('_')[0], x.split('_')[1]))
+    n_floors = len(all_floors) if all_floors else 1
 
-    # --- 合并每天数据：按班次分配 ---
-    # 早班：部分高频机房
-    # 晚班：剩余高频机房 + 低频机房
-    # 每间高频机房每月7次，约3-4次在早班，3-4次在晚班
+    high_cycle = rule.high_freq_days  # 高频巡查周期（天），如4天一轮
+    low_times = rule.low_freq_times  # 低频每月巡查次数，如1次（月巡1次均摊至每天）
+
     plan_data = {}
+    
+    # 按楼栋分类高频机房
+    # GTC（总控中心）、东停车楼、西停车楼
+    high_gtc = []      # GTC
+    high_east = []     # 东停车楼
+    high_west = []     # 西停车楼
+    high_other = []    # 其他
+    
+    for r in high_rooms:
+        b = r.building or ''
+        if 'GTC' in b.upper() or '总控' in b:
+            high_gtc.append(room_to_dict(r))
+        elif '东' in b and ('停车' in b or '车库' in b):
+            high_east.append(room_to_dict(r))
+        elif '西' in b and ('停车' in b or '车库' in b):
+            high_west.append(room_to_dict(r))
+        else:
+            high_other.append(room_to_dict(r))
+    
+    # 低频机房列表
+    low_rooms_list = []
+    for floor_key, floor_rooms in low_by_floor.items():
+        low_rooms_list.extend(floor_rooms)
+    
+    # ===== 计算每天巡查数量（处理余数） =====
+    
+    # 高频：220间 ÷ 4天周期 = 55间/天，无余数
+    high_per_day = len(high_rooms) // high_cycle if high_cycle > 0 else 0
+    high_remainder = len(high_rooms) % high_cycle  # 高频余数
+    
+    # 低频：295间 ÷ 28天 = 10间/天，余数15间
+    low_per_day = len(low_rooms_list) // total_days if total_days > 0 else 0
+    low_remainder = len(low_rooms_list) % total_days  # 低频余数
+    
+    # 合并所有高频机房
+    all_high = high_gtc + high_other + high_east + high_west
+    
+    # 生成每天的巡查计划
+    # 预先计算每天的高频和低频数量
+    high_daily_list = []  # 记录每天的高频数量
+    low_daily_list = []   # 记录每天的低频数量
+    
+    for day in range(1, total_days + 1):
+        # 高频：每天基础量 + 余数分配
+        high_daily = high_per_day + (1 if (day - 1) < high_remainder else 0)
+        high_daily_list.append(high_daily)
+        
+        # 低频：每天基础量 + 余数分配
+        low_daily = low_per_day + (1 if (day - 1) < low_remainder else 0)
+        low_daily_list.append(low_daily)
+    
+    # 计算累积索引
+    high_cumsum = [0]
+    for h in high_daily_list:
+        high_cumsum.append(high_cumsum[-1] + h)
+    
+    low_cumsum = [0]
+    for l in low_daily_list:
+        low_cumsum.append(low_cumsum[-1] + l)
+    
+    # 生成每天的巡查计划
     for day in range(1, total_days + 1):
         date_str = f"{year}-{month:02d}-{day:02d}"
-
-        # 当天所有高频机房
-        day_high_rooms = high_by_day[day]
-
-        # 早班：每天固定数量的高频（约25间），根据日期轮流
-        # 每天早班巡查不同的高频机房，形成轮换
-        # 高频机房分成2组（因为每月7次奇数，轮换分配）
-        morning_idx = (day - 1) % 2  # 0或1
-        morning_rooms = [r for i, r in enumerate(day_high_rooms) if i % 2 == morning_idx]
-
-        # 晚班：剩余高频 + 低频
-        evening_high = [r for i, r in enumerate(day_high_rooms) if i % 2 != morning_idx]
-        evening_rooms = evening_high + list(low_by_day[day])
+        day_rooms = []
+        
+        # ===== 高频计算 =====
+        high_daily = high_daily_list[day - 1]
+        high_start_idx = high_cumsum[day - 1] % len(all_high)  # 循环使用
+        high_end_idx = high_start_idx + high_daily
+        
+        if high_daily > 0 and high_start_idx < len(all_high):
+            day_rooms.extend(all_high[high_start_idx:min(high_end_idx, len(all_high))])
+        
+        # ===== 低频计算 =====
+        low_daily = low_daily_list[day - 1]
+        low_start_idx = low_cumsum[day - 1]
+        low_end_idx = low_start_idx + low_daily
+        
+        if low_daily > 0 and low_start_idx < len(low_rooms_list):
+            day_rooms.extend(low_rooms_list[low_start_idx:min(low_end_idx, len(low_rooms_list))])
 
         def group_by_floor(room_list):
             grouped = {}
@@ -722,21 +768,25 @@ def _build_plan_data(year: int, month: int, rule: InspectionRule, rooms: List[Ro
                 grouped.setdefault(key, []).append(r)
             return grouped
 
-        high_count = len([r for r in morning_rooms + evening_rooms if r["类型"] == "高频"])
-        low_count  = len([r for r in evening_rooms if r["类型"] == "低频"])  # 低频只在晚班
+        high_count = len([r for r in day_rooms if r["类型"] == "高频"])
+        low_count  = len([r for r in day_rooms if r["类型"] == "低频"])
         floors = sorted(set(
-            f"{r['楼栋']} {r['楼层']}" for r in morning_rooms + evening_rooms
+            f"{r['楼栋']} {r['楼层']}" for r in day_rooms
         ))
 
+        # 不分早晚班，统一显示
         plan_data[date_str] = {
             "date": date_str,
             "day": day,
-            "morning": {"rooms": morning_rooms, "grouped": group_by_floor(morning_rooms)},
-            "evening": {"rooms": evening_rooms, "grouped": group_by_floor(evening_rooms)},
+            "rooms": day_rooms,  # 当天所有机房
+            "grouped": group_by_floor(day_rooms),  # 按楼层分组
             "high": high_count,
             "low": low_count,
-            "total": high_count + low_count,
+            "total": len(day_rooms),
             "floors": floors,
+            # 保留早晚班字段兼容
+            "morning": {"rooms": day_rooms, "grouped": group_by_floor(day_rooms)},
+            "evening": {"rooms": [], "grouped": {}},
         }
 
     return plan_data
@@ -844,6 +894,102 @@ def get_inspection_plan_by_year_month(
         "year": plan.year,
         "month": plan.month,
         "data": json.loads(plan.data) if plan.data else {}
+    }
+
+
+@app.get("/api/inspection-plans/list", response_model=dict)
+def get_inspection_plan_list(
+    year: int,
+    month: int,
+    db: Session = Depends(get_db)
+):
+    """
+    获取巡查计划列表（概要）
+    只返回日期和概要信息，不包含具体房间，减少数据传输
+    """
+    plan = db.query(InspectionPlan).filter(
+        InspectionPlan.year == year,
+        InspectionPlan.month == month
+    ).order_by(InspectionPlan.created_at.desc()).first()
+
+    if not plan:
+        return {"year": year, "month": month, "days": []}
+
+    plan_data = json.loads(plan.data) if plan.data else {}
+    
+    # 只提取概要信息
+    days_list = []
+    for date_str, day_data in plan_data.items():
+        days_list.append({
+            "date": date_str,
+            "day": day_data.get("day"),
+            "high": day_data.get("high", 0),
+            "low": day_data.get("low", 0),
+            "total": day_data.get("total", 0),
+            "floors": day_data.get("floors", []),
+        })
+    
+    # 按日期排序
+    days_list.sort(key=lambda x: x["date"])
+    
+    return {
+        "year": year,
+        "month": month,
+        "plan_id": plan.id,
+        "days": days_list
+    }
+
+
+@app.get("/api/inspection-plans/{plan_id}/day/{date}", response_model=dict)
+def get_inspection_plan_day_detail(
+    plan_id: int,
+    date: str,
+    db: Session = Depends(get_db)
+):
+    """
+    获取某天巡查计划详情
+    返回该天的所有巡查房间
+    """
+    plan = db.query(InspectionPlan).filter(InspectionPlan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="计划不存在")
+    
+    plan_data = json.loads(plan.data) if plan.data else {}
+    day_data = plan_data.get(date)
+    
+    if not day_data:
+        raise HTTPException(status_code=404, detail="该日期没有巡查计划")
+    
+    # 返回完整详情（包含所有房间）
+    # 合并早晚班的房间
+    all_rooms = []
+    morning_rooms = day_data.get("morning", {}).get("rooms", [])
+    evening_rooms = day_data.get("evening", {}).get("rooms", [])
+    
+    # 不区分早晚班，合并显示
+    all_rooms = morning_rooms + evening_rooms
+    
+    # 生成按楼层分组的数据
+    def group_by_floor(room_list):
+        grouped = {}
+        for r in room_list:
+            key = f"{r['楼栋']} {r['楼层']}"
+            if not grouped.get(key):
+                grouped[key] = []
+            grouped[key].append(r)
+        return grouped
+    
+    grouped = group_by_floor(all_rooms)
+    
+    return {
+        "date": date,
+        "day": day_data.get("day"),
+        "rooms": all_rooms,
+        "grouped": grouped,
+        "high": day_data.get("high", 0),
+        "low": day_data.get("low", 0),
+        "total": len(all_rooms),
+        "floors": day_data.get("floors", []),
     }
 
 

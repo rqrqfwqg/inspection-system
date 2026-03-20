@@ -2,6 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
+/* 自定义响应式断点 - 超小屏幕 */
+@custom-variant xs (&:where(@custom, [class~="xs"]));
+
+/* 移动端优化 */
+@media (max-width: 640px) {
+  .container {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+}
+
 @layer base {
   :root {
     --background: 0 0% 100%;

@@ -1,5 +1,5 @@
 // 环境变量配置，未设置时默认本地开发环境
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:9527/api'
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001/api'
 
 import type { User } from '@/types'
 
@@ -284,6 +284,16 @@ class ApiService {
 
   async getInspectionPlanByYearMonth(year: number, month: number) {
     return this.request(`/inspection-plans/by-year-month?year=${year}&month=${month}`)
+  }
+
+  // 获取计划列表（概要）- 懒加载用
+  async getInspectionPlanList(year: number, month: number) {
+    return this.request(`/inspection-plans/list?year=${year}&month=${month}`)
+  }
+
+  // 获取某天计划详情
+  async getInspectionPlanDayDetail(planId: number, date: string) {
+    return this.request(`/inspection-plans/${planId}/day/${date}`)
   }
 
   async getInspectionPlans(params?: { skip?: number; limit?: number }) {

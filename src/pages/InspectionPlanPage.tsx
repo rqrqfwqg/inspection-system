@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { X, Loader2, ChevronLeft, ChevronRight, RefreshCw, Settings, Check, Circle } from 'lucide-react'
+import { X, Loader2, ChevronLeft, ChevronRight, RefreshCw, Settings, Check } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import {
@@ -31,13 +31,25 @@ interface ShiftData {
 interface DayPlan {
   date: string        // YYYY-MM-DD
   day: number
-  morning: ShiftData
-  evening: ShiftData
+  morning?: ShiftData
+  evening?: ShiftData
   high: number
   low: number
   total: number
   floors: string[]
   completed?: boolean  // 每天的完成状态
+  rooms?: Room[]       // 懒加载的房间详情
+  grouped?: { [floor: string]: Room[] }  // 按楼层分组
+}
+
+// 概要列表中的每一天
+interface DaySummary {
+  date: string
+  day: number
+  high: number
+  low: number
+  total: number
+  floors: string[]
 }
 
 interface InspectionRule {
@@ -72,11 +84,16 @@ export default function InspectionPlanPage() {
   const now = new Date()
   const [year, setYear] = useState(now.getFullYear())
   const [month, setMonth] = useState(now.getMonth() + 1)
-  const [planData, setPlanData] = useState<{ [date: string]: DayPlan }>({})
+  // 概要列表（懒加载用）
+  const [planList, setPlanList] = useState<DaySummary[]>([])
+  const [planId, setPlanId] = useState<number | null>(null)
+  // 详情缓存：{ "2026-03-01": DayPlan }
+  const [dayDetails, setDayDetails] = useState<{ [date: string]: DayPlan }>({})
   const [rule, setRule] = useState<InspectionRule | null>(null)
   const [loading, setLoading] = useState(true)
   const [generating, setGenerating] = useState(false)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
   const [showRuleDialog, setShowRuleDialog] = useState(false)
   // 完成状态：{ "2026-03-01": { "roomCode": true, ... } }
   const [completedStatus, setCompletedStatus] = useState<{ [date: string]: { [roomCode: string]: boolean } }>({})
@@ -114,56 +131,58 @@ export default function InspectionPlanPage() {
     return completedStatus[date]?.[roomCode] ?? false
   }, [completedStatus])
 
-  // 判断当天是否全部完成
-  const isDayCompleted = useCallback((date: string, plan: DayPlan) => {
-    if (!plan) return false
-    const dayStatus = completedStatus[date] || {}
-    const allRooms = [
-      ...(plan.morning?.rooms || []),
-      ...(plan.evening?.rooms || [])
-    ]
-    if (allRooms.length === 0) return false
-    return allRooms.every(r => dayStatus[r.机房编号])
-  }, [completedStatus])
   const [ruleForm, setRuleForm] = useState({ high_freq_days: 4, low_freq_times: 2 })
 
+  // 加载计划概要列表（懒加载）
   const loadData = useCallback(async () => {
     setLoading(true)
     try {
-      // 加载规则
-      try {
-        const r = await api.getActiveInspectionRule() as InspectionRule
-        setRule(r)
-        setRuleForm({ high_freq_days: r.high_freq_days, low_freq_times: r.low_freq_times })
-      } catch {
-        // 暂无规则
+      // 并行加载规则和计划列表（概要）
+      const [ruleData, listRes] = await Promise.all([
+        api.getActiveInspectionRule().catch(() => null),
+        api.getInspectionPlanList(year, month).catch(() => ({ days: [], plan_id: null }))
+      ]) as [InspectionRule | null, { days: DaySummary[], plan_id: number | null }]
+
+      if (ruleData) {
+        setRule(ruleData)
+        setRuleForm({ high_freq_days: ruleData.high_freq_days, low_freq_times: ruleData.low_freq_times })
       }
 
-      // 加载当月计划
-      const res = await api.getInspectionPlans({ limit: 100 }) as Array<{ year: number; month: number; id: number }>
-      const matched = Array.isArray(res) ? res.find(p => p.year === year && p.month === month) : null
-
-      if (matched) {
-        // 使用新的按年月查询接口获取计划
-        const planRes = await api.getInspectionPlanByYearMonth(year, month) as { year?: number; month?: number; data?: { [k: string]: DayPlan } }
-        if (planRes?.year === year && planRes?.month === month && planRes?.data) {
-          setPlanData(planRes.data)
-        } else {
-          // 如果查询失败，重新生成
-          await api.generateInspectionPlan(year, month, true)
-          const fresh = await api.getInspectionPlanByYearMonth(year, month) as { data?: { [k: string]: DayPlan } }
-          setPlanData(fresh?.data ?? {})
-        }
-      } else {
-        setPlanData({})
-      }
+      setPlanList(listRes.days || [])
+      setPlanId(listRes.plan_id || null)
+      // 清空详情缓存
+      setDayDetails({})
     } catch (err) {
       console.error('加载巡查计划失败', err)
-      setPlanData({})
+      setPlanList([])
+      setPlanId(null)
     } finally {
       setLoading(false)
     }
   }, [year, month])
+
+  // 加载某天详情（点击日期时）
+  const loadDayDetail = useCallback(async (date: string) => {
+    if (!planId) return null
+    
+    // 如果缓存中有，直接返回
+    if (dayDetails[date]) {
+      return dayDetails[date]
+    }
+    
+    setDetailLoading(true)
+    try {
+      const detail = await api.getInspectionPlanDayDetail(planId, date) as DayPlan
+      // 缓存起来
+      setDayDetails(prev => ({ ...prev, [date]: detail }))
+      return detail
+    } catch (err) {
+      console.error('加载详情失败', err)
+      return null
+    } finally {
+      setDetailLoading(false)
+    }
+  }, [planId, dayDetails])
 
   useEffect(() => { loadData() }, [loadData])
 
@@ -216,140 +235,66 @@ export default function InspectionPlanPage() {
     }
   }
 
-  // ========== 统计 ==========
-  const highRooms = new Set<string>()
-  const lowRooms = new Set<string>()
-  let totalInspections = 0
-  Object.values(planData).forEach(day => {
-    totalInspections += day.total || 0
-    for (const shift of [day.morning, day.evening]) {
-      if (!shift?.rooms) continue
-      for (const room of shift.rooms) {
-        if (room.类型 === '高频') highRooms.add(room.机房编号)
-        else lowRooms.add(room.机房编号)
-      }
-    }
-  })
+  // ========== 统计（从概要计算）==========
+  const totalInspections = planList.reduce((sum, d) => sum + (d.total || 0), 0)
 
   // ========== 日历格生成 ==========
   const firstDow = getFirstDayOfWeek(year, month)    // 0=周一
   const daysInMonth = getDaysInMonth(year, month)
   const totalCells = Math.ceil((firstDow + daysInMonth) / 7) * 7
-  const maxTotal = Math.max(...Object.values(planData).map(d => d.total || 0), 1)
+  const maxTotal = Math.max(...planList.map(d => d.total || 0), 1)
 
-  const selectedPlan = selectedDate ? planData[selectedDate] : null
+  // 获取选中的详情（从缓存或空）
+  const selectedPlan = selectedDate ? dayDetails[selectedDate] || null : null
 
-  // ========== 渲染机房列表 ==========
-  const getBuildingTag = (building: string) => {
-    if (building === 'GTC') return <Badge className="bg-blue-600 hover:bg-blue-600 text-[10px] px-1">GTC</Badge>
-    if (building === '东停车楼') return <Badge className="bg-green-600 hover:bg-green-600 text-[10px] px-1">东停</Badge>
-    return <Badge className="bg-yellow-600 hover:bg-yellow-600 text-[10px] px-1">西停</Badge>
+  // 点击日期加载详情
+  const handleDateClick = async (dateStr: string) => {
+    setSelectedDate(dateStr)
+    await loadDayDetail(dateStr)
   }
 
-  const renderShiftPanel = (shift: ShiftData, cls: string, label: string) => (
-    <div className="border rounded-lg overflow-hidden">
-      <div className={cn(
-        'px-3 py-2 font-semibold text-sm flex justify-between items-center',
-        cls === 'm' ? 'bg-orange-50 text-orange-800' : 'bg-blue-50 text-blue-800'
-      )}>
-        <span>{label}</span>
-        <span>{shift?.rooms?.length ?? 0}间</span>
-      </div>
-      <div className="p-2 max-h-[50vh] overflow-y-auto">
-        {shift?.rooms?.length ? Object.entries(shift.grouped ?? {}).map(([floor, rooms]) => (
-          <div key={floor} className="mb-3 last:mb-0">
-            <div className="text-xs font-semibold text-gray-700 px-2 py-1 bg-gray-100 rounded mb-1">{floor}</div>
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="bg-slate-700 text-white">
-                  <th className="px-2 py-1 text-center w-12">状态</th>
-                  <th className="px-2 py-1 text-left">机房</th>
-                  <th className="px-2 py-1 text-left">编号</th>
-                  <th className="px-2 py-1 text-left">类型</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rooms.map(room => {
-                  const completed = selectedDate ? isRoomCompleted(selectedDate, room.机房编号) : false
-                  return (
-                    <tr key={room.机房编号} className={cn(
-                      "border-b border-slate-100",
-                      completed ? "bg-green-50" : ""
-                    )}>
-                      <td className="px-1 py-1 text-center">
-                        <button
-                          onClick={() => selectedDate && toggleRoomComplete(selectedDate, room.机房编号)}
-                          className={cn(
-                            "p-1 rounded hover:bg-gray-200 transition-colors",
-                            completed ? "text-green-600" : "text-gray-400"
-                          )}
-                          title={completed ? "点击标记为未完成" : "点击标记为已完成"}
-                        >
-                          {completed ? <Check className="w-4 h-4" /> : <Circle className="w-4 h-4" />}
-                        </button>
-                      </td>
-                      <td className="px-2 py-1">{getBuildingTag(room.楼栋)} {room.机房名称}</td>
-                      <td className="px-2 py-1 text-gray-500">{room.机房编号}</td>
-                      <td className="px-2 py-1">
-                        <Badge variant={room.类型 === '高频' ? 'destructive' : 'secondary'}>
-                          {room.类型 === '高频' ? '★高频' : '☆低频'}
-                        </Badge>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )) : (
-          <p className="text-xs text-gray-400 text-center py-4">本班次无巡查任务</p>
-        )}
-      </div>
-    </div>
-  )
+
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3 sm:space-y-4">
       {/* ===== 页眉 ===== */}
-      <div className="flex items-start justify-between flex-wrap gap-3">
+      <div className="flex items-start justify-between flex-wrap gap-2 sm:gap-3">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">月度巡查计划</h1>
-          <p className="text-gray-500 mt-1 text-sm">
+          <h1 className="text-xl sm:text-2xl md:text-3xl font-bold text-gray-900">月度巡查计划</h1>
+          <p className="text-gray-500 mt-0.5 sm:mt-1 text-xs sm:text-sm">
             {rule
               ? `高频每月 ${rule.high_freq_days} 次 · 低频每月 ${rule.low_freq_times} 次`
               : '暂无巡查规则，请先配置规则'}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => setShowRuleDialog(true)}>
-            <Settings className="w-4 h-4 mr-1" /> 规则配置
+        <div className="flex items-center gap-1.5 sm:gap-2">
+          <Button variant="outline" size="sm" className="text-xs sm:text-sm px-2 sm:px-4" onClick={() => setShowRuleDialog(true)}>
+            <Settings className="w-3 h-3 sm:w-4 sm:h-4 mr-1" /> <span className="hidden xs:inline">规则配置</span>
           </Button>
           <Button
             size="sm"
             onClick={() => handleGenerate(false)}
             disabled={generating || loading}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white"
+            className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs sm:text-sm px-2 sm:px-4"
           >
             {generating
-              ? <><Loader2 className="w-4 h-4 mr-1 animate-spin" />生成中...</>
-              : <><RefreshCw className="w-4 h-4 mr-1" />生成计划</>}
+              ? <><Loader2 className="w-3 h-3 sm:w-4 sm:h-4 mr-1 animate-spin" />生成中</>
+              : <><RefreshCw className="w-3 h-3 sm:w-4 sm:h-4 mr-1" />生成</>}
           </Button>
         </div>
       </div>
 
       {/* ===== 统计卡片 ===== */}
-      {(Object.keys(planData).length > 0 || loading) && (
-        <div className="flex gap-3 flex-wrap">
+      {(planList.length > 0 || loading) && (
+        <div className="flex gap-2 sm:gap-3 flex-wrap">
           {[
-            { label: '巡查天数', value: daysInMonth, color: 'text-slate-800' },
-            { label: '高频机房', value: highRooms.size, color: 'text-red-600' },
-            { label: '低频机房', value: lowRooms.size, color: 'text-slate-600' },
+            { label: '巡查天数', value: planList.length, color: 'text-slate-800' },
             { label: '月总巡查次', value: totalInspections, color: 'text-indigo-600' },
           ].map(item => (
-            <Card key={item.label} className="min-w-[100px] flex-1">
-              <CardContent className="pt-4 pb-3 text-center">
-                <div className={cn('text-2xl font-bold', item.color)}>{item.value}</div>
-                <div className="text-xs text-gray-500 mt-1">{item.label}</div>
+            <Card key={item.label} className="min-w-[80px] sm:min-w-[100px] flex-1">
+              <CardContent className="pt-3 pb-2 sm:pt-4 sm:pb-3 text-center">
+                <div className={cn('text-lg sm:text-2xl font-bold', item.color)}>{item.value}</div>
+                <div className="text-[10px] sm:text-xs text-gray-500 mt-0.5 sm:mt-1">{item.label}</div>
               </CardContent>
             </Card>
           ))}
@@ -357,10 +302,10 @@ export default function InspectionPlanPage() {
       )}
 
       {/* ===== 月份导航 ===== */}
-      <div className="flex items-center justify-between">
-        <Button variant="ghost" size="icon" onClick={prevMonth}><ChevronLeft className="w-5 h-5" /></Button>
-        <h2 className="text-xl font-bold text-slate-800">{year} 年 {month} 月</h2>
-        <Button variant="ghost" size="icon" onClick={nextMonth}><ChevronRight className="w-5 h-5" /></Button>
+      <div className="flex items-center justify-between px-2">
+        <Button variant="ghost" size="icon" className="h-8 w-8 sm:h-10 sm:w-10" onClick={prevMonth}><ChevronLeft className="w-4 h-4 sm:w-5 sm:h-5" /></Button>
+        <h2 className="text-base sm:text-xl font-bold text-slate-800">{year} 年 {month} 月</h2>
+        <Button variant="ghost" size="icon" className="h-8 w-8 sm:h-10 sm:w-10" onClick={nextMonth}><ChevronRight className="w-4 h-4 sm:w-5 sm:h-5" /></Button>
       </div>
 
       {/* ===== 日历主体 ===== */}
@@ -371,83 +316,70 @@ export default function InspectionPlanPage() {
         </CardContent></Card>
       ) : (
         <div className="rounded-xl border overflow-hidden shadow-sm">
-          {/* 星期行 */}
+          {/* 星期行 - 响应式 */}
           <div className="grid grid-cols-7 bg-slate-800">
             {WEEKDAYS.map(w => (
-              <div key={w} className="py-2 text-center text-xs font-semibold text-slate-300">周{w}</div>
+              <div key={w} className="py-1.5 sm:py-2 text-[10px] sm:text-xs font-semibold text-slate-300">周{w}</div>
             ))}
           </div>
-          {/* 日期格子 - 固定高度 grid，对齐 */}
+          {/* 日期格子 - 响应式高度 */}
           <div className="grid grid-cols-7 auto-rows-fr">
             {Array.from({ length: totalCells }).map((_, idx) => {
               const dayNum = idx - firstDow + 1
               const isValid = dayNum >= 1 && dayNum <= daysInMonth
               const dateStr = isValid ? `${year}-${String(month).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}` : ''
-              const plan = isValid ? planData[dateStr] : null
+              // 从概要列表中查找
+              const plan = isValid ? planList.find(d => d.date === dateStr) : null
               const isToday = dateStr === `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
               const hPct = plan ? (plan.high / maxTotal) * 100 : 0
               const lPct = plan ? (plan.low / maxTotal) * 100 : 0
-              const dayCompleted = plan ? isDayCompleted(dateStr, plan) : false
 
               return (
                 <div
                   key={idx}
-                  onClick={() => isValid && plan && setSelectedDate(dateStr)}
+                  onClick={() => isValid && plan && handleDateClick(dateStr)}
                   className={cn(
-                    'min-h-[100px] p-2 border-r border-b border-slate-100 transition-all flex flex-col',
+                    'min-h-[60px] sm:min-h-[80px] md:min-h-[100px] p-1 sm:p-2 border-r border-b border-slate-100 transition-all flex flex-col',
                     isValid && plan ? 'cursor-pointer hover:bg-blue-50' : '',
                     isValid && !plan ? 'bg-gray-50 cursor-default' : '',
                     !isValid ? 'bg-slate-50 cursor-default' : '',
-                    selectedDate === dateStr ? 'ring-2 ring-inset ring-blue-500' : '',
-                    dayCompleted && isValid ? 'bg-green-50' : ''
+                    selectedDate === dateStr ? 'ring-2 ring-inset ring-blue-500' : ''
                   )}
                 >
                   {isValid && (
                     <>
                       {/* 日期数字 + 完成状态 */}
-                      <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center justify-between mb-0.5 sm:mb-1">
                         <div className={cn(
-                          'text-sm font-bold w-6 h-6 flex items-center justify-center rounded-full',
+                          'text-xs sm:text-sm font-bold w-5 h-5 sm:w-6 sm:h-6 flex items-center justify-center rounded-full',
                           isToday ? 'bg-blue-600 text-white' : 'text-slate-700'
                         )}>
                           {dayNum}
                         </div>
-                        {plan && dayCompleted && (
-                          <Check className="w-4 h-4 text-green-600" />
-                        )}
                       </div>
 
                       {plan ? (
                         <>
-                          {/* 早晚班数量 */}
-                          <div className="flex gap-0.5 mb-1 text-[9px]">
-                            <span className="flex-1 bg-orange-50 text-orange-700 border border-orange-100 rounded px-0.5 text-center">
-                              早{plan.morning?.rooms?.length ?? 0}
-                            </span>
-                            <span className="flex-1 bg-blue-50 text-blue-700 border border-blue-100 rounded px-0.5 text-center">
-                              晚{plan.evening?.rooms?.length ?? 0}
-                            </span>
-                          </div>
                           {/* 高低频进度条 */}
-                          <div className="h-1 bg-gray-200 rounded-full mb-1 flex overflow-hidden">
+                          <div className="h-0.5 sm:h-1 bg-gray-200 rounded-full mb-0.5 sm:mb-1 flex overflow-hidden">
                             <div className="h-full bg-red-400" style={{ width: `${hPct}%` }} />
                             <div className="h-full bg-slate-400" style={{ width: `${lPct}%` }} />
                           </div>
-                          {/* 徽章 */}
+                          {/* 徽章 - 响应式 */}
                           <div className="flex gap-0.5 flex-wrap mt-auto">
-                            <Badge variant="outline" className="bg-slate-800 text-white text-[9px] px-1 py-0">
+                            <Badge variant="outline" className="bg-slate-800 text-white text-[8px] sm:text-[9px] px-0.5 sm:px-1 py-0">
                               {plan.total}
                             </Badge>
                             {plan.high > 0 && (
-                              <Badge variant="destructive" className="text-[9px] px-1 py-0">★{plan.high}</Badge>
+                              <Badge variant="destructive" className="text-[8px] sm:text-[9px] px-0.5 sm:px-1 py-0">★{plan.high}</Badge>
                             )}
                             {plan.low > 0 && (
-                              <Badge variant="secondary" className="text-[9px] px-1 py-0">☆{plan.low}</Badge>
+                              <Badge variant="secondary" className="text-[8px] sm:text-[9px] px-0.5 sm:px-1 py-0">☆{plan.low}</Badge>
                             )}
                           </div>
                         </>
                       ) : (
-                        <div className="text-[10px] text-gray-300 mt-auto">无任务</div>
+                        <div className="text-[8px] sm:text-[10px] text-gray-300 mt-auto hidden xs:block">无任务</div>
                       )}
                     </>
                   )}
@@ -461,41 +393,89 @@ export default function InspectionPlanPage() {
       {/* ===== 详情弹窗 ===== */}
       <Dialog open={!!selectedDate} onOpenChange={open => !open && setSelectedDate(null)}>
         {selectedPlan && (
-          <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+          <DialogContent className="w-[95vw] sm:max-w-4xl max-h-[90vh] overflow-y-auto p-3 sm:p-6">
             <DialogHeader>
-              <DialogTitle className="flex justify-between items-center bg-gradient-to-r from-blue-700 to-blue-500 text-white py-3 px-6 rounded-t-lg -mx-6 -mt-6 mb-4">
+              <DialogTitle className="flex justify-between items-center bg-gradient-to-r from-blue-700 to-blue-500 text-white py-2 px-3 sm:py-3 sm:px-6 rounded-t-lg -mx-3 -mt-3 sm:-mx-6 sm:-mt-6 mb-3 sm:mb-4 text-sm sm:text-base">
                 <span>
-                  {year}年{month}月{selectedPlan.day}日 &nbsp;·&nbsp; 共 {selectedPlan.total} 间机房
+                  {year}年{month}月{selectedPlan.day}日 &nbsp;·&nbsp; 共 {selectedPlan.total} 间
                 </span>
                 <button onClick={() => setSelectedDate(null)} className="text-white/80 hover:text-white">
-                  <X className="w-5 h-5" />
+                  <X className="w-4 h-4 sm:w-5 sm:h-5" />
                 </button>
               </DialogTitle>
             </DialogHeader>
 
-            {/* 汇总卡片 */}
-            <div className="flex gap-3 flex-wrap mb-5">
-              {[
-                { label: '合计', value: selectedPlan.total, color: 'text-slate-800' },
-                { label: '★高频', value: selectedPlan.high, color: 'text-red-600' },
-                { label: '☆低频', value: selectedPlan.low, color: 'text-slate-600' },
-                { label: '早班', value: selectedPlan.morning?.rooms?.length ?? 0, color: 'text-amber-600' },
-                { label: '晚班', value: selectedPlan.evening?.rooms?.length ?? 0, color: 'text-blue-600' },
-              ].map(item => (
-                <Card key={item.label} className="flex-1 min-w-[70px]">
-                  <CardContent className="pt-3 pb-2 text-center">
-                    <div className={cn('text-xl font-bold', item.color)}>{item.value}</div>
-                    <div className="text-[10px] text-gray-500 mt-1">{item.label}</div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
+            {/* 加载中显示 */}
+            {detailLoading ? (
+              <div className="flex items-center justify-center py-8 sm:py-12">
+                <Loader2 className="w-6 h-6 sm:w-8 sm:h-8 animate-spin text-blue-600" />
+                <span className="ml-2 text-sm text-gray-500">加载中...</span>
+              </div>
+            ) : selectedPlan ? (
+              <>
+                {/* 汇总卡片 */}
+                <div className="flex gap-2 sm:gap-3 mb-3 sm:mb-5">
+                  {[
+                    { label: '合计', value: selectedPlan.total, color: 'text-slate-800' },
+                    { label: '★高频', value: selectedPlan.high, color: 'text-red-600' },
+                    { label: '☆低频', value: selectedPlan.low, color: 'text-slate-600' },
+                  ].map(item => (
+                    <Card key={item.label} className="flex-1 min-w-[60px] sm:min-w-[70px]">
+                      <CardContent className="pt-2 pb-1.5 sm:pt-3 sm:pb-2 text-center">
+                        <div className={cn('text-base sm:text-xl font-bold', item.color)}>{item.value}</div>
+                        <div className="text-[9px] sm:text-[10px] text-gray-500 mt-0.5 sm:mt-1">{item.label}</div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
 
-            {/* 早晚班详情 */}
-            <div className="grid md:grid-cols-2 gap-4">
-              {renderShiftPanel(selectedPlan.morning, 'm', '🌅 早班')}
-              {renderShiftPanel(selectedPlan.evening, 'e', '🌆 晚班')}
-            </div>
+                {/* 机房列表 - 不分早晚班 - 响应式 */}
+                {selectedPlan.rooms && selectedPlan.rooms.length > 0 ? (
+                  <div className="space-y-2 sm:space-y-3">
+                    {Object.entries(selectedPlan.grouped || {}).map(([floor, rooms]) => (
+                      <div key={floor}>
+                        <div className="font-medium text-xs sm:text-sm text-gray-700 mb-1.5 sm:mb-2 flex items-center gap-1.5 sm:gap-2">
+                          <span className="bg-slate-200 px-1.5 sm:px-2 py-0.5 rounded text-xs">{floor}</span>
+                          <span className="text-[10px] sm:text-xs text-gray-400">({rooms.length}间)</span>
+                        </div>
+                        <div className="grid grid-cols-1 xs:grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1.5 sm:gap-2">
+                          {(rooms as Room[]).map((room, idx) => (
+                            <div
+                              key={idx}
+                              onClick={() => selectedDate && toggleRoomComplete(selectedDate, room.机房编号)}
+                              className={cn(
+                                'p-1.5 sm:p-2 rounded border cursor-pointer transition-all',
+                                selectedDate && isRoomCompleted(selectedDate, room.机房编号)
+                                  ? 'bg-green-50 border-green-300'
+                                  : 'bg-white border-gray-200 hover:border-blue-300'
+                              )}
+                            >
+                              <div className="flex items-center justify-between">
+                                <span className="text-xs sm:text-sm font-medium truncate">{room.机房名称}</span>
+                                {selectedDate && isRoomCompleted(selectedDate, room.机房编号) && (
+                                  <Check className="w-3 h-3 sm:w-4 sm:h-4 text-green-600 flex-shrink-0" />
+                                )}
+                              </div>
+                              <div className="text-[10px] sm:text-xs text-gray-500 mt-0.5 sm:mt-1 truncate">
+                                {room.机房编号}
+                              </div>
+                              <div className={cn(
+                                'text-[10px] sm:text-xs mt-0.5 sm:mt-1',
+                                room.类型 === '高频' ? 'text-red-600' : 'text-gray-500'
+                              )}>
+                                {room.类型 === '高频' ? '★高频' : '☆低频'}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-6 sm:py-8 text-gray-400 text-sm">暂无巡查任务</div>
+                )}
+              </>
+            ) : null}
           </DialogContent>
         )}
       </Dialog>
