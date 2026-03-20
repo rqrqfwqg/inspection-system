@@ -282,6 +282,10 @@ class ApiService {
     return this.request('/inspection-plans/current')
   }
 
+  async getInspectionPlanByYearMonth(year: number, month: number) {
+    return this.request(`/inspection-plans/by-year-month?year=${year}&month=${month}`)
+  }
+
   async getInspectionPlans(params?: { skip?: number; limit?: number }) {
     const query = new URLSearchParams()
     if (params?.skip !== undefined) query.set('skip', String(params.skip))

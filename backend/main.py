@@ -822,6 +822,31 @@ def get_current_inspection_plan(db: Session = Depends(get_db)):
         "data": json.loads(plan.data) if plan.data else {}
     }
 
+
+@app.get("/api/inspection-plans/by-year-month", response_model=dict)
+def get_inspection_plan_by_year_month(
+    year: int,
+    month: int,
+    db: Session = Depends(get_db)
+):
+    """根据年份和月份获取巡查计划"""
+    plan = db.query(InspectionPlan).filter(
+        InspectionPlan.year == year,
+        InspectionPlan.month == month
+    ).order_by(InspectionPlan.created_at.desc()).first()
+
+    if not plan:
+        return {}
+
+    return {
+        "id": plan.id,
+        "name": plan.name,
+        "year": plan.year,
+        "month": plan.month,
+        "data": json.loads(plan.data) if plan.data else {}
+    }
+
+
 @app.get("/api/inspection-plans", response_model=List[InspectionPlanResponse])
 def get_inspection_plans(
     skip: int = 0,

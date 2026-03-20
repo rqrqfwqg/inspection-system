@@ -144,14 +144,14 @@ export default function InspectionPlanPage() {
       const matched = Array.isArray(res) ? res.find(p => p.year === year && p.month === month) : null
 
       if (matched) {
-        // 获取当前月计划（如果是当月直接取 /current，否则重新生成一次即可复用结构）
-        const currentRes = await api.getCurrentInspectionPlan() as { year?: number; month?: number; data?: { [k: string]: DayPlan } }
-        if (currentRes?.year === year && currentRes?.month === month && currentRes?.data) {
-          setPlanData(currentRes.data)
+        // 使用新的按年月查询接口获取计划
+        const planRes = await api.getInspectionPlanByYearMonth(year, month) as { year?: number; month?: number; data?: { [k: string]: DayPlan } }
+        if (planRes?.year === year && planRes?.month === month && planRes?.data) {
+          setPlanData(planRes.data)
         } else {
-          // 非当月，先生成再取
+          // 如果查询失败，重新生成
           await api.generateInspectionPlan(year, month, true)
-          const fresh = await api.getCurrentInspectionPlan() as { data?: { [k: string]: DayPlan } }
+          const fresh = await api.getInspectionPlanByYearMonth(year, month) as { data?: { [k: string]: DayPlan } }
           setPlanData(fresh?.data ?? {})
         }
       } else {
