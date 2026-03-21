@@ -1,5 +1,5 @@
-// 环境变量配置，未设置时默认本地开发环境
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:5001/api'
+// 环境变量配置，默认指向云服务器Nginx反向代理
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://106.54.20.90:8888/api'
 
 import type { User } from '@/types'
 

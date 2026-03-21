@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Header
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Header, Request
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -65,6 +66,12 @@ os.makedirs(SHIFT_IMG_DIR, exist_ok=True)
 
 # 挂载静态文件目录
 app.mount("/uploads", StaticFiles(directory=os.path.join(BASE_DIR, "uploads")), name="uploads")
+
+# 挂载前端打包文件
+DIST_DIR = os.path.join(os.path.dirname(BASE_DIR), "dist")
+DIST_ASSETS_DIR = os.path.join(DIST_DIR, "assets")
+if os.path.exists(DIST_ASSETS_DIR):
+    app.mount("/assets", StaticFiles(directory=DIST_ASSETS_DIR), name="assets")
 
 # 注册 CAD 路由
 app.include_router(cad_router)
@@ -1059,6 +1066,25 @@ def delete_inspection_plan(
     db.delete(plan)
     db.commit()
     return {"message": "删除成功"}
+
+# ==================== 前端 SPA 静态服务 ====================
+
+@app.get("/vite.svg")
+def serve_vite_svg():
+    """返回 vite.svg 图标"""
+    svg_path = os.path.join(DIST_DIR, "vite.svg")
+    if os.path.exists(svg_path):
+        return FileResponse(svg_path, media_type="image/svg+xml")
+    return FileResponse(os.path.join(DIST_DIR, "index.html"), media_type="text/html")
+
+@app.get("/{full_path:path}")
+def serve_spa(request: Request, full_path: str):
+    """SPA fallback：所有未匹配路由返回 index.html"""
+    index_path = os.path.join(DIST_DIR, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path, media_type="text/html")
+    return {"error": "前端文件未找到，请先执行 npm run build"}
+
 
 if __name__ == "__main__":
     import uvicorn
