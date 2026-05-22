@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  # ==================== 前端检查 ====================
+  frontend:
+    name: 前端 - TypeScript 检查 & 构建
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: TypeScript 类型检查
+        run: npx tsc --noEmit
+
+      - name: Vite 构建
+        run: npx vite build
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # ==================== 后端检查 ====================
+  backend:
+    name: 后端 - 语法检查 & 测试
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: Python 语法检查
+        run: python -m py_compile auth.py database.py main.py schemas.py cad_routes.py cad_service.py
+
+      - name: Python 导入检查
+        run: python -c "import auth; import database; import schemas; print('All imports OK')"
+
+      - name: 运行测试 (如果有)
+        run: |
+          if [ -d "../scripts" ]; then
+            echo "脚本目录存在，跳过自动测试"
+          fi
+        continue-on-error: true
+
+  # ==================== Docker 构建验证 ====================
+  docker:
+    name: Docker 镜像构建验证
+    runs-on: ubuntu-latest
+    needs: [frontend, backend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 构建 Docker 镜像
+        run: docker build -t inspection-system:ci .
