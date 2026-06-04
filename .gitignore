@@ -59,3 +59,7 @@ stop.bat
 update_system.sh
 linux.sh
 启动系统.bat
+
+# Backend temp
+backend/run.bat
+backend/test_frontend_api.html
