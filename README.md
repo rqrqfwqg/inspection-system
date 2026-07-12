@@ -1,6 +1,6 @@
-# 用户管理系统
+# 项目管理部运维系统
 
-一个现代化的用户管理后台系统，基于 React + TypeScript + Vite + Tailwind CSS + shadcn/ui 构建。
+一个现代化的项目管理部运维系统，基于 React + TypeScript + Vite + Tailwind CSS + shadcn/ui 构建。
 
 ## 功能特性
 

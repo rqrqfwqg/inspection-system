@@ -57,7 +57,7 @@ export default function LoginPage() {
               </svg>
             </div>
           </div>
-          <CardTitle className="text-2xl font-bold">广州白云机场巡查系统</CardTitle>
+          <CardTitle className="text-2xl font-bold">项目管理部运维系统</CardTitle>
           <CardDescription>
             输入您的账号信息以登录系统
           </CardDescription>

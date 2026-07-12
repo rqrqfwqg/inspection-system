@@ -27,6 +27,7 @@ from schemas import (
 )
 from auth import verify_password, get_password_hash, create_access_token, decode_token
 from cad_routes import router as cad_router
+from asset_routes import router as asset_router, seed_assets
 
 from contextlib import asynccontextmanager
 
@@ -43,6 +44,11 @@ async def lifespan(app_instance):
     # 启动时初始化数据库
     init_db()
     db = next(get_db())
+    # 初始化分系统资料管理种子数据
+    try:
+        seed_assets(db)
+    except Exception as e:
+        print(f"[初始化] 资料管理种子数据写入失败（可忽略，首次运行后已存在）：{e}")
     admin = db.query(User).filter(User.email == "admin@example.com").first()
     if not admin:
         admin = User(
@@ -58,7 +64,7 @@ async def lifespan(app_instance):
     db.close()
     yield
 
-app = FastAPI(title="广州白云机场巡查系统 API", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="项目管理部运维系统 API", version="2.0.0", lifespan=lifespan)
 
 # CORS 配置
 app.add_middleware(
@@ -87,6 +93,8 @@ if os.path.exists(DIST_ASSETS_DIR):
 
 # 注册 CAD 路由
 app.include_router(cad_router)
+# 注册分系统资料管理路由
+app.include_router(asset_router)
 
 # ==================== 鉴权工具 ====================
 
@@ -143,7 +151,7 @@ def health_check():
     """健康检查端点（Docker 存活探针）"""
     return {
         "status": "ok",
-        "service": "广州白云机场巡查系统",
+        "service": "项目管理部运维系统",
         "version": "2.0.0",
         "timestamp": datetime.now(timezone.utc).isoformat()
     }

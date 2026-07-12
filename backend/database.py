@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Boolean, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Boolean, ForeignKey, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime, timezone
@@ -118,3 +118,97 @@ class InspectionPlan(Base):
     data = Column(Text, nullable=False)  # JSON字符串，存储完整的巡查计划数据
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+
+
+# =====================================================================
+# 分系统资料管理模块（资产管理）
+# =====================================================================
+
+class Subsystem(Base):
+    """子系统字典：电力/消防/弱电/制冷/照明（可维护）"""
+    __tablename__ = "subsystems"
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String, unique=True, index=True, nullable=False)  # power/fire/weak/refrig/lighting
+    name = Column(String, nullable=False)
+    icon = Column(String, default="")          # 图标标识（lucide 名称）
+    sort_order = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+
+
+class Device(Base):
+    """设备主表 / 全局设备台账（检索主键 = device_code）"""
+    __tablename__ = "devices"
+
+    id = Column(Integer, primary_key=True, index=True)
+    device_code = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=False)
+    subsystem_id = Column(Integer, ForeignKey("subsystems.id"), nullable=True)
+    room_id = Column(Integer, ForeignKey("rooms.id"), nullable=True)  # 所在机房（复用 rooms）
+    building = Column(String, default="")
+    floor = Column(String, default="")
+    location_desc = Column(String, default="")          # 位置描述
+    parent_device_id = Column(Integer, nullable=True)   # 设备层级（如回路→配电柜）
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+
+
+class DataTable(Base):
+    """资料表元数据：每个子系统下的一张或多张资料表"""
+    __tablename__ = "data_tables"
+
+    id = Column(Integer, primary_key=True, index=True)
+    subsystem_id = Column(Integer, ForeignKey("subsystems.id"), nullable=False)
+    code = Column(String, nullable=False)   # 表标识，如 lighting_fixtures
+    name = Column(String, nullable=False)   # 中文名，如"灯具台账"
+    description = Column(String, default="")
+    sort_order = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+
+
+class FieldDef(Base):
+    """字段定义（动态字段）：每张资料表的列由它定义，非硬编码"""
+    __tablename__ = "field_defs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    table_id = Column(Integer, ForeignKey("data_tables.id"), nullable=False)
+    key = Column(String, nullable=False)     # 字段标识，如 rated_power
+    label = Column(String, nullable=False)   # 显示名，如"额定功率"
+    type = Column(String, default="text")    # text/number/date/select/device_ref
+    options = Column(JSON, default=list)      # select 的可选项列表
+    is_required = Column(Boolean, default=False)
+    is_relation_key = Column(Boolean, default=False)  # 关联键：值为 device_code，记录据此挂载到设备
+    sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+
+
+class Record(Base):
+    """资料记录：字段值存 JSON（{key: value}）"""
+    __tablename__ = "records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    table_id = Column(Integer, ForeignKey("data_tables.id"), nullable=False)
+    device_code = Column(String, index=True, default="")  # 冗余索引列，加速聚合（由关联键填充）
+    data = Column(JSON, default=dict)        # 动态字段值
+    created_by = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+
+
+class DeviceRelation(Base):
+    """设备关联关系图：设备间的物理/逻辑链路"""
+    __tablename__ = "device_relations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    from_code = Column(String, index=True, nullable=False)  # 起点 device_code
+    to_code = Column(String, index=True, nullable=False)    # 终点 device_code
+    relation_type = Column(String, default="关联")  # 供电/控制/管路连接/送风/信号
+    subsystem_id = Column(Integer, ForeignKey("subsystems.id"), nullable=True)
+    meta = Column(JSON, default=dict)          # 附加属性，如距离/长度/线径
+    created_at = Column(DateTime, default=datetime.now(timezone.utc))

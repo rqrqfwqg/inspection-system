@@ -6,6 +6,10 @@ import {
   ClipboardList,
   CalendarClock,
   Calendar,
+  Search,
+  FileSpreadsheet,
+  Boxes,
+  SlidersHorizontal,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/contexts/AuthContext'
@@ -27,6 +31,11 @@ export default function Sidebar({ isOpen, onToggle }: SidebarProps) {
     // { icon: FileDigit, label: 'CAD处理', path: '/cad', adminOnly: false }, // 暂时隐藏CAD菜单
     { icon: Users, label: '用户管理', path: '/users', adminOnly: true },
     { icon: Settings, label: '系统设置', path: '/settings', adminOnly: false },
+    // 分系统资料管理
+    { icon: Search, label: '资料检索', path: '/asset/search', adminOnly: false },
+    { icon: FileSpreadsheet, label: '资料台账', path: '/asset/ledger', adminOnly: false },
+    { icon: Boxes, label: '设备台账', path: '/asset/devices', adminOnly: false },
+    { icon: SlidersHorizontal, label: '资料配置', path: '/asset/settings', adminOnly: true },
   ].filter(item => !item.adminOnly || isAdmin)
 
   return (
@@ -54,7 +63,7 @@ export default function Sidebar({ isOpen, onToggle }: SidebarProps) {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
               </svg>
             </div>
-            <span className="font-bold text-gray-900">值班管理系统</span>
+            <span className="font-bold text-gray-900">项目管理部运维系统</span>
           </div>
           <button
             onClick={onToggle}

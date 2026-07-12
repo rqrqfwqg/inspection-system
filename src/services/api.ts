@@ -372,6 +372,20 @@ class ApiService {
     return this.request<T>(endpoint)
   }
 
+  async post<T>(endpoint: string, body?: unknown): Promise<T> {
+    return this.request<T>(endpoint, {
+      method: 'POST',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    })
+  }
+
+  async put<T>(endpoint: string, body?: unknown): Promise<T> {
+    return this.request<T>(endpoint, {
+      method: 'PUT',
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    })
+  }
+
   async delete<T>(endpoint: string): Promise<T> {
     return this.request<T>(endpoint, { method: 'DELETE' })
   }

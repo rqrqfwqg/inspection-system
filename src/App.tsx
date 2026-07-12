@@ -9,6 +9,10 @@ import ShiftHandoverPage from '@/pages/ShiftHandoverPage'
 import DutyBoardPage from '@/pages/DutyBoardPage'
 import InspectionPlanPage from '@/pages/InspectionPlanPage'
 import CADPage from '@/pages/CADPage'
+import AssetSearchPage from '@/pages/asset/AssetSearchPage'
+import AssetLedgerPage from '@/pages/asset/AssetLedgerPage'
+import DeviceLedgerPage from '@/pages/asset/DeviceLedgerPage'
+import AssetSettingsPage from '@/pages/asset/AssetSettingsPage'
 import MainLayout from '@/components/layout/MainLayout'
 
 // 路由守卫：未登录跳转登录页
@@ -47,6 +51,10 @@ function AppRoutes() {
         <Route path="users" element={<UsersPage />} />
         <Route path="shift-handover" element={<ShiftHandoverPage />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="asset/search" element={<AssetSearchPage />} />
+        <Route path="asset/ledger" element={<AssetLedgerPage />} />
+        <Route path="asset/devices" element={<DeviceLedgerPage />} />
+        <Route path="asset/settings" element={<AssetSettingsPage />} />
       </Route>
 
       {/* 404 → 首页 */}
