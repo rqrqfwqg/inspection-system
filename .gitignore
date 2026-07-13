@@ -42,11 +42,8 @@ logs/
 .DS_Store
 Thumbs.db
 
-# Uploads
+# Uploads（运行时产生，非源码，不进仓库）
 uploads/
-
-# Docker
-data/
 
 # Temporary scripts and outputs
 commit_msg.txt

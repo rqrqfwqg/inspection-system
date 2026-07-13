@@ -1,0 +1,25 @@
+# inspection-system · systemd 单元（可选，用于开机自启 + 崩溃自愈）
+# 用法（在服务器上，需 root）：
+#   sudo cp deploy/inspection.service /etc/systemd/system/inspection.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now inspection
+# 之后可用： sudo systemctl status|restart|stop inspection
+#
+# 注意：把下方 User 改成你实际登录用户名；WorkingDirectory 改成代码实际路径。
+[Unit]
+Description=Inspection System (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/inspection-system/backend
+Environment=DEV_MODE=false
+Environment=PORT=9527
+EnvironmentFile=/home/ubuntu/inspection-system/backend/.env
+ExecStart=/home/ubuntu/inspection-system/backend/venv/bin/python main.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

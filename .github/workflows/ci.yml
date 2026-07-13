@@ -70,5 +70,5 @@ jobs:
           fi
         continue-on-error: true
 
-  # 说明：Docker 镜像构建验证已移至服务器侧 deploy/server-setup.sh，
-  # GitHub 免费 runner 默认无 docker daemon，故不在 CI 内执行。
+  # 说明：本仓库不依赖容器化；部署由服务器侧 deploy/server-setup.sh 负责，
+  # CI 仅做前端类型检查+构建、后端语法+导入检查等代码质量门禁。
