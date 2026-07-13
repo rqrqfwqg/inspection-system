@@ -1,5 +1,5 @@
 // 分系统资料管理 · 前端 API 封装
-// 挂载前缀：/api/assets
+// 挂载前缀：/assets（相对 API 前缀，最终请求 /ops/api/assets，与后端 asset_router 一致）
 import * as XLSX from 'xlsx'
 import { api } from '@/services/api'
 import type {

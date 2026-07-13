@@ -1,8 +1,9 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Header, Request
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, status, UploadFile, File, Header, Request
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
+from sqlalchemy import text as sa_text
 from typing import List, Optional
 from datetime import datetime, date, timezone
 import calendar
@@ -28,14 +29,13 @@ from schemas import (
 from auth import verify_password, get_password_hash, create_access_token, decode_token
 from cad_routes import router as cad_router
 from asset_routes import router as asset_router, seed_assets
+from dependencies import get_current_user, require_admin, AUTH_DISABLED
 
 from contextlib import asynccontextmanager
 
 # 加载 .env 环境变量（必须在所有 os.getenv 调用之前）
 load_dotenv()
 
-# 开发模式：设置环境变量 DEV_MODE=true 可跳过认证
-DEV_MODE = os.getenv("DEV_MODE", "false").lower() in ("true", "1")
 # 默认管理员初始密码（首次启动创建时使用，应通过环境变量覆盖）
 DEFAULT_ADMIN_PASSWORD = os.getenv("ADMIN_INIT_PASSWORD", "ChangeMe123!")
 
@@ -61,6 +61,23 @@ async def lifespan(app_instance):
         db.add(admin)
         db.commit()
         print(f"[初始化] 已创建管理员账号 admin@example.com，请立即修改默认密码")
+
+    # 上传路径命名空间迁移：/uploads/ -> /ops/uploads/（幂等，可与迁移脚本并存）
+    try:
+        db.execute(sa_text(
+            "UPDATE users SET avatar = REPLACE(avatar, '/uploads/', '/ops/uploads/') "
+            "WHERE avatar LIKE '/uploads/%'"
+        ))
+        db.execute(sa_text(
+            "UPDATE shift_tasks SET images = REPLACE(images, '/uploads/', '/ops/uploads/') "
+            "WHERE images LIKE '%/uploads/%'"
+        ))
+        db.commit()
+        print("[迁移] 上传路径已命名为 /ops/uploads/（幂等）")
+    except Exception as e:
+        db.rollback()
+        print(f"[迁移] 上传路径命名空间迁移跳过：{e}")
+
     db.close()
     yield
 
@@ -82,71 +99,25 @@ SHIFT_IMG_DIR = os.path.join(BASE_DIR, "uploads", "shift_images")
 os.makedirs(AVATAR_DIR, exist_ok=True)
 os.makedirs(SHIFT_IMG_DIR, exist_ok=True)
 
-# 挂载静态文件目录
-app.mount("/uploads", StaticFiles(directory=os.path.join(BASE_DIR, "uploads")), name="uploads")
+# 挂载静态文件目录（上传统一命名空间到 /ops/uploads，避免与其他系统冲突）
+app.mount("/ops/uploads", StaticFiles(directory=os.path.join(BASE_DIR, "uploads")), name="ops-uploads")
 
-# 挂载前端打包文件
+# 挂载前端打包文件（静态资源统一命名空间到 /ops/assets）
 DIST_DIR = os.path.join(os.path.dirname(BASE_DIR), "dist")
 DIST_ASSETS_DIR = os.path.join(DIST_DIR, "assets")
 if os.path.exists(DIST_ASSETS_DIR):
-    app.mount("/assets", StaticFiles(directory=DIST_ASSETS_DIR), name="assets")
+    app.mount("/ops/assets", StaticFiles(directory=DIST_ASSETS_DIR), name="ops-assets")
 
-# 注册 CAD 路由
-app.include_router(cad_router)
-# 注册分系统资料管理路由
-app.include_router(asset_router)
+# 顶层 API 路由器：所有业务接口统一收口到 /ops/api
+api_router = APIRouter(prefix="/ops/api")
 
-# ==================== 鉴权工具 ====================
-
-def get_current_user(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> User:
-    """获取当前登录用户（生产模式需有效 token，DEV_MODE=true 时可跳过）"""
-    # 开发模式下找不到管理员时自动创建一个
-    if DEV_MODE:
-        admin = db.query(User).filter(User.role == "admin").first()
-        if admin:
-            return admin
-        admin = User(
-            email="admin@system.local",
-            name="开发管理员",
-            phone="00000000000",
-            password_hash=get_password_hash("dev123456"),
-            role="admin"
-        )
-        db.add(admin)
-        db.commit()
-        db.refresh(admin)
-        return admin
-
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
-
-    token = authorization[7:]
-    payload = decode_token(token)
-    if not payload:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录已过期，请重新登录")
-
-    user_id = payload.get("user_id")
-    if not user_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="令牌格式错误")
-
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在")
-
-    if not user.is_active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账户已被禁用，请联系管理员")
-
-    return user
-
-def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    """要求当前用户是管理员"""
-    if current_user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-    return current_user
+# 子路由仅保留子路径前缀，由 api_router 拼装为 /ops/api/cad、/ops/api/assets
+api_router.include_router(cad_router)      # /ops/api/cad/...
+api_router.include_router(asset_router)    # /ops/api/assets/...
 
 # ==================== 健康检查 ====================
 
-@app.get("/api/health")
+@api_router.get("/health")
 def health_check():
     """健康检查端点（Docker 存活探针）"""
     return {
@@ -181,8 +152,17 @@ login_limiter = LoginRateLimiter()
 
 # ==================== 认证接口（无需登录） ====================
 
-@app.post("/api/auth/login", response_model=Token)
+@api_router.post("/auth/login", response_model=Token)
 def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
+    # 免鉴权模式（内网开放）：忽略密码，直接返回 admin + 占位 token（兼容前端旧调用）
+    if AUTH_DISABLED:
+        admin = get_current_user(None, db)
+        return Token(
+            access_token="ops-bypass-token",
+            token_type="bearer",
+            user=UserResponse.model_validate(admin),
+        )
+
     # 登录限流
     client_ip = request.client.host if request.client else "unknown"
     if not login_limiter.is_allowed(client_ip):
@@ -198,7 +178,7 @@ def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db))
     access_token = create_access_token(data={"sub": user.email, "user_id": user.id})
     return Token(access_token=access_token, token_type="bearer", user=UserResponse.model_validate(user))
 
-@app.post("/api/auth/register", response_model=UserResponse)
+@api_router.post("/auth/register", response_model=UserResponse)
 def register(user_data: UserCreate, db: Session = Depends(get_db)):
     """注册/创建用户（仅供管理员在用户管理页面调用，不对外开放自注册）"""
     if db.query(User).filter(User.email == user_data.email).first():
@@ -222,7 +202,7 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
 
 # ==================== 用户管理接口 ====================
 
-@app.get("/api/users", response_model=List[UserResponse])
+@api_router.get("/users", response_model=List[UserResponse])
 def get_users(
     skip: int = 0,
     limit: int = 100,
@@ -248,12 +228,12 @@ def get_users(
         )
     return query.offset(skip).limit(limit).all()
 
-@app.get("/api/users/me", response_model=UserResponse)
+@api_router.get("/users/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_user)):
     """获取当前登录用户信息"""
     return UserResponse.model_validate(current_user)
 
-@app.get("/api/users/{user_id}", response_model=UserResponse)
+@api_router.get("/users/{user_id}", response_model=UserResponse)
 def get_user(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -264,7 +244,7 @@ def get_user(user_id: int, db: Session = Depends(get_db), current_user: User = D
             raise HTTPException(status_code=403, detail="无权查看该用户信息")
     return UserResponse.model_validate(user)
 
-@app.put("/api/users/{user_id}", response_model=UserResponse)
+@api_router.put("/users/{user_id}", response_model=UserResponse)
 def update_user(user_id: int, user_data: UserUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -279,7 +259,7 @@ def update_user(user_id: int, user_data: UserUpdate, db: Session = Depends(get_d
     db.refresh(user)
     return UserResponse.model_validate(user)
 
-@app.delete("/api/users/{user_id}")
+@api_router.delete("/users/{user_id}")
 def delete_user(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     """删除用户，仅管理员可操作，同时清理关联排班记录"""
     if user_id == current_user.id:
@@ -301,7 +281,7 @@ def delete_user(user_id: int, db: Session = Depends(get_db), current_user: User 
     db.commit()
     return {"success": True, "message": "用户及关联排班记录已删除"}
 
-@app.post("/api/users/change-password")
+@api_router.post("/users/change-password")
 def change_password(data: UserPasswordUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """修改密码：普通用户只能改自己的，管理员可改任意人的"""
     if current_user.role != "admin" and current_user.id != data.user_id:
@@ -317,9 +297,9 @@ def change_password(data: UserPasswordUpdate, db: Session = Depends(get_db), cur
 
 # ==================== 头像上传接口 ====================
 
-@app.post("/api/upload/avatar")
+@api_router.post("/upload/avatar")
 async def upload_avatar(file: UploadFile = File(...), current_user: User = Depends(get_current_user)):
-    """上传用户头像"""
+    """上传用户头像（命名空间 /ops/uploads）"""
     allowed_types = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"]
     if file.content_type not in allowed_types:
         raise HTTPException(status_code=400, detail="只支持 JPG, PNG, GIF, WEBP 格式的图片")
@@ -331,12 +311,12 @@ async def upload_avatar(file: UploadFile = File(...), current_user: User = Depen
     file_path = os.path.join(AVATAR_DIR, unique_filename)
     with open(file_path, "wb") as f:
         f.write(content)
-    avatar_url = f"/uploads/avatars/{unique_filename}"
+    avatar_url = f"/ops/uploads/avatars/{unique_filename}"
     return {"success": True, "avatar_url": avatar_url, "message": "头像上传成功"}
 
 # ==================== 排班管理接口 ====================
 
-@app.get("/api/duty-schedules", response_model=List[DutyScheduleResponse])
+@api_router.get("/duty-schedules", response_model=List[DutyScheduleResponse])
 def get_duty_schedules(
     date: Optional[str] = None,
     department: Optional[str] = None,
@@ -353,7 +333,7 @@ def get_duty_schedules(
         query = query.filter(DutySchedule.shift_type == shift_type)
     return query.all()
 
-@app.post("/api/duty-schedules", response_model=DutyScheduleResponse)
+@api_router.post("/duty-schedules", response_model=DutyScheduleResponse)
 def create_duty_schedule(schedule_data: DutyScheduleCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     schedule = DutySchedule(**schedule_data.model_dump())
     db.add(schedule)
@@ -361,14 +341,14 @@ def create_duty_schedule(schedule_data: DutyScheduleCreate, db: Session = Depend
     db.refresh(schedule)
     return DutyScheduleResponse.model_validate(schedule)
 
-@app.post("/api/duty-schedules/batch")
+@api_router.post("/duty-schedules/batch")
 def create_duty_schedules_batch(data: DutyScheduleBatch, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     schedules = [DutySchedule(**s.model_dump()) for s in data.schedules]
     db.add_all(schedules)
     db.commit()
     return {"success": True, "message": f"成功创建 {len(schedules)} 条排班记录"}
 
-@app.put("/api/duty-schedules/{schedule_id}", response_model=DutyScheduleResponse)
+@api_router.put("/duty-schedules/{schedule_id}", response_model=DutyScheduleResponse)
 def update_duty_schedule(schedule_id: int, schedule_data: DutyScheduleCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     schedule = db.query(DutySchedule).filter(DutySchedule.id == schedule_id).first()
     if not schedule:
@@ -379,7 +359,7 @@ def update_duty_schedule(schedule_id: int, schedule_data: DutyScheduleCreate, db
     db.refresh(schedule)
     return DutyScheduleResponse.model_validate(schedule)
 
-@app.delete("/api/duty-schedules/{schedule_id}")
+@api_router.delete("/duty-schedules/{schedule_id}")
 def delete_duty_schedule(schedule_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     schedule = db.query(DutySchedule).filter(DutySchedule.id == schedule_id).first()
     if not schedule:
@@ -390,7 +370,7 @@ def delete_duty_schedule(schedule_id: int, db: Session = Depends(get_db), curren
 
 # ==================== 交接班任务接口 ====================
 
-@app.get("/api/shift-tasks", response_model=List[ShiftTaskResponse])
+@api_router.get("/shift-tasks", response_model=List[ShiftTaskResponse])
 def get_shift_tasks(
     date: Optional[str] = None,
     shift: Optional[str] = None,
@@ -415,7 +395,7 @@ def get_shift_tasks(
         query = query.filter(ShiftTask.department == department)
     return query.order_by(ShiftTask.created_at.desc()).all()
 
-@app.post("/api/shift-tasks", response_model=ShiftTaskResponse)
+@api_router.post("/shift-tasks", response_model=ShiftTaskResponse)
 def create_shift_task(task_data: ShiftTaskCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     data_dict = task_data.model_dump()
     # 若未指定部门，自动使用创建者的部门
@@ -427,7 +407,7 @@ def create_shift_task(task_data: ShiftTaskCreate, db: Session = Depends(get_db),
     db.refresh(task)
     return ShiftTaskResponse.model_validate(task)
 
-@app.put("/api/shift-tasks/{task_id}", response_model=ShiftTaskResponse)
+@api_router.put("/shift-tasks/{task_id}", response_model=ShiftTaskResponse)
 def update_shift_task(task_id: int, task_data: ShiftTaskUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     task = db.query(ShiftTask).filter(ShiftTask.id == task_id).first()
     if not task:
@@ -445,7 +425,7 @@ def update_shift_task(task_id: int, task_data: ShiftTaskUpdate, db: Session = De
     db.refresh(task)
     return ShiftTaskResponse.model_validate(task)
 
-@app.delete("/api/shift-tasks/{task_id}")
+@api_router.delete("/shift-tasks/{task_id}")
 def delete_shift_task(task_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     task = db.query(ShiftTask).filter(ShiftTask.id == task_id).first()
     if not task:
@@ -465,7 +445,7 @@ def delete_shift_task(task_id: int, db: Session = Depends(get_db), current_user:
     db.commit()
     return {"success": True, "message": "任务已删除"}
 
-@app.post("/api/shift-tasks/handover", response_model=ShiftTaskResponse)
+@api_router.post("/shift-tasks/handover", response_model=ShiftTaskResponse)
 def handover_shift_task(data: ShiftHandoverRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """交班：将任务迁移到下一班次（修改shift/date/handover_count），原任务删除"""
     task = db.query(ShiftTask).filter(ShiftTask.id == data.task_id).first()
@@ -491,9 +471,9 @@ def handover_shift_task(data: ShiftHandoverRequest, db: Session = Depends(get_db
     db.refresh(new_task)
     return ShiftTaskResponse.model_validate(new_task)
 
-@app.post("/api/shift-tasks/{task_id}/upload-image")
+@api_router.post("/shift-tasks/{task_id}/upload-image")
 async def upload_shift_image(task_id: int, file: UploadFile = File(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """上传交接班任务图片"""
+    """上传交接班任务图片（命名空间 /ops/uploads）"""
     task = db.query(ShiftTask).filter(ShiftTask.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -510,14 +490,14 @@ async def upload_shift_image(task_id: int, file: UploadFile = File(...), db: Ses
     file_path = os.path.join(SHIFT_IMG_DIR, unique_filename)
     with open(file_path, "wb") as f:
         f.write(content)
-    img_url = f"/uploads/shift_images/{unique_filename}"
+    img_url = f"/ops/uploads/shift_images/{unique_filename}"
     current_images = json.loads(task.images) if task.images else []
     current_images.append(img_url)
     task.images = json.dumps(current_images)
     db.commit()
     return {"success": True, "image_url": img_url, "images": current_images}
 
-@app.delete("/api/shift-tasks/{task_id}/images")
+@api_router.delete("/shift-tasks/{task_id}/images")
 def delete_shift_image(task_id: int, image_url: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """删除交接班任务的某张图片"""
     task = db.query(ShiftTask).filter(ShiftTask.id == task_id).first()
@@ -537,7 +517,7 @@ def delete_shift_image(task_id: int, image_url: str, db: Session = Depends(get_d
 
 # ==================== 统计接口 ====================
 
-@app.get("/api/stats/dashboard")
+@api_router.get("/stats/dashboard")
 def get_dashboard_stats(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     """真实统计数据"""
     today = datetime.now().strftime("%Y-%m-%d")
@@ -585,7 +565,7 @@ def get_dashboard_stats(db: Session = Depends(get_db), current_user: User = Depe
 
 # ==================== 机房管理接口 ====================
 
-@app.get("/api/rooms", response_model=List[RoomResponse])
+@api_router.get("/rooms", response_model=List[RoomResponse])
 def get_rooms(
     room_type: Optional[str] = None,
     building: Optional[str] = None,
@@ -602,7 +582,7 @@ def get_rooms(
         q = q.filter(Room.is_active == is_active)
     return q.order_by(Room.building, Room.floor, Room.code).all()
 
-@app.post("/api/rooms", response_model=RoomResponse)
+@api_router.post("/rooms", response_model=RoomResponse)
 def create_room(room_data: RoomCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     """新增机房"""
     if db.query(Room).filter(Room.code == room_data.code).first():
@@ -613,7 +593,7 @@ def create_room(room_data: RoomCreate, db: Session = Depends(get_db), current_us
     db.refresh(room)
     return room
 
-@app.post("/api/rooms/batch", response_model=dict)
+@api_router.post("/rooms/batch", response_model=dict)
 def batch_import_rooms(payload: RoomBatchImport, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     """批量导入机房（已存在的按编号更新）"""
     created, updated = 0, 0
@@ -630,7 +610,7 @@ def batch_import_rooms(payload: RoomBatchImport, db: Session = Depends(get_db), 
     db.commit()
     return {"success": True, "created": created, "updated": updated, "total": created + updated}
 
-@app.put("/api/rooms/{room_id}", response_model=RoomResponse)
+@api_router.put("/rooms/{room_id}", response_model=RoomResponse)
 def update_room(room_id: int, room_data: RoomUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     """更新机房信息"""
     room = db.query(Room).filter(Room.id == room_id).first()
@@ -643,7 +623,7 @@ def update_room(room_id: int, room_data: RoomUpdate, db: Session = Depends(get_d
     db.refresh(room)
     return room
 
-@app.delete("/api/rooms/{room_id}")
+@api_router.delete("/rooms/{room_id}")
 def delete_room(room_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     """删除机房"""
     room = db.query(Room).filter(Room.id == room_id).first()
@@ -655,12 +635,12 @@ def delete_room(room_id: int, db: Session = Depends(get_db), current_user: User 
 
 # ==================== 巡查规则接口 ====================
 
-@app.get("/api/inspection-rules", response_model=List[InspectionRuleResponse])
+@api_router.get("/inspection-rules", response_model=List[InspectionRuleResponse])
 def get_inspection_rules(db: Session = Depends(get_db)):
     """获取所有巡查规则"""
     return db.query(InspectionRule).order_by(InspectionRule.id).all()
 
-@app.get("/api/inspection-rules/active", response_model=InspectionRuleResponse)
+@api_router.get("/inspection-rules/active", response_model=InspectionRuleResponse)
 def get_active_rule(db: Session = Depends(get_db)):
     """获取当前生效的巡查规则"""
     rule = db.query(InspectionRule).filter(InspectionRule.is_active == True).first()
@@ -668,7 +648,7 @@ def get_active_rule(db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="未找到生效的巡查规则")
     return rule
 
-@app.post("/api/inspection-rules", response_model=InspectionRuleResponse)
+@api_router.post("/inspection-rules", response_model=InspectionRuleResponse)
 def create_inspection_rule(rule_data: InspectionRuleCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     """新增巡查规则"""
     rule = InspectionRule(**rule_data.model_dump())
@@ -677,7 +657,7 @@ def create_inspection_rule(rule_data: InspectionRuleCreate, db: Session = Depend
     db.refresh(rule)
     return rule
 
-@app.put("/api/inspection-rules/{rule_id}", response_model=InspectionRuleResponse)
+@api_router.put("/inspection-rules/{rule_id}", response_model=InspectionRuleResponse)
 def update_inspection_rule(rule_id: int, rule_data: InspectionRuleUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     """更新巡查规则"""
     rule = db.query(InspectionRule).filter(InspectionRule.id == rule_id).first()
@@ -696,7 +676,7 @@ def _build_plan_data(year: int, month: int, rule: InspectionRule, rooms: List[Ro
     """
     根据规则和机房列表，生成该月的巡查计划数据。
     优化：同一楼层的机房集中在一起，不拆分到不同班次
-    
+
     每天的巡查任务统一显示，不分早晚班
     """
     total_days = min(28, calendar.monthrange(year, month)[1])
@@ -718,7 +698,7 @@ def _build_plan_data(year: int, month: int, rule: InspectionRule, rooms: List[Ro
     for r in high_rooms:
         key = f"{r.building or '未知'}_{r.floor or '未知'}"
         high_by_floor.setdefault(key, []).append(room_to_dict(r))
-    
+
     low_by_floor = {}
     for r in low_rooms:
         key = f"{r.building or '未知'}_{r.floor or '未知'}"
@@ -733,14 +713,14 @@ def _build_plan_data(year: int, month: int, rule: InspectionRule, rooms: List[Ro
     low_times = rule.low_freq_times  # 低频每月巡查次数，如1次（月巡1次均摊至每天）
 
     plan_data = {}
-    
+
     # 按楼栋分类高频机房
     # GTC（总控中心）、东停车楼、西停车楼
     high_gtc = []      # GTC
     high_east = []     # 东停车楼
     high_west = []     # 西停车楼
     high_other = []    # 其他
-    
+
     for r in high_rooms:
         b = r.building or ''
         if 'GTC' in b.upper() or '总控' in b:
@@ -751,66 +731,66 @@ def _build_plan_data(year: int, month: int, rule: InspectionRule, rooms: List[Ro
             high_west.append(room_to_dict(r))
         else:
             high_other.append(room_to_dict(r))
-    
+
     # 低频机房列表
     low_rooms_list = []
     for floor_key, floor_rooms in low_by_floor.items():
         low_rooms_list.extend(floor_rooms)
-    
+
     # ===== 计算每天巡查数量（处理余数） =====
-    
+
     # 高频：220间 ÷ 4天周期 = 55间/天，无余数
     high_per_day = len(high_rooms) // high_cycle if high_cycle > 0 else 0
     high_remainder = len(high_rooms) % high_cycle  # 高频余数
-    
+
     # 低频：295间 ÷ 28天 = 10间/天，余数15间
     low_per_day = len(low_rooms_list) // total_days if total_days > 0 else 0
     low_remainder = len(low_rooms_list) % total_days  # 低频余数
-    
+
     # 合并所有高频机房
     all_high = high_gtc + high_other + high_east + high_west
-    
+
     # 生成每天的巡查计划
     # 预先计算每天的高频和低频数量
     high_daily_list = []  # 记录每天的高频数量
     low_daily_list = []   # 记录每天的低频数量
-    
+
     for day in range(1, total_days + 1):
         # 高频：每天基础量 + 余数分配
         high_daily = high_per_day + (1 if (day - 1) < high_remainder else 0)
         high_daily_list.append(high_daily)
-        
+
         # 低频：每天基础量 + 余数分配
         low_daily = low_per_day + (1 if (day - 1) < low_remainder else 0)
         low_daily_list.append(low_daily)
-    
+
     # 计算累积索引
     high_cumsum = [0]
     for h in high_daily_list:
         high_cumsum.append(high_cumsum[-1] + h)
-    
+
     low_cumsum = [0]
     for l in low_daily_list:
         low_cumsum.append(low_cumsum[-1] + l)
-    
+
     # 生成每天的巡查计划
     for day in range(1, total_days + 1):
         date_str = f"{year}-{month:02d}-{day:02d}"
         day_rooms = []
-        
+
         # ===== 高频计算 =====
         high_daily = high_daily_list[day - 1]
         high_start_idx = high_cumsum[day - 1] % len(all_high)  # 循环使用
         high_end_idx = high_start_idx + high_daily
-        
+
         if high_daily > 0 and high_start_idx < len(all_high):
             day_rooms.extend(all_high[high_start_idx:min(high_end_idx, len(all_high))])
-        
+
         # ===== 低频计算 =====
         low_daily = low_daily_list[day - 1]
         low_start_idx = low_cumsum[day - 1]
         low_end_idx = low_start_idx + low_daily
-        
+
         if low_daily > 0 and low_start_idx < len(low_rooms_list):
             day_rooms.extend(low_rooms_list[low_start_idx:min(low_end_idx, len(low_rooms_list))])
 
@@ -845,7 +825,7 @@ def _build_plan_data(year: int, month: int, rule: InspectionRule, rooms: List[Ro
     return plan_data
 
 
-@app.post("/api/inspection-plans/generate", response_model=dict)
+@api_router.post("/inspection-plans/generate", response_model=dict)
 def generate_inspection_plan(req: GeneratePlanRequest, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     """根据机房表和规则，自动生成指定年月的巡查计划"""
     # 获取规则
@@ -905,7 +885,7 @@ def generate_inspection_plan(req: GeneratePlanRequest, db: Session = Depends(get
     }
 
 
-@app.get("/api/inspection-plans/current", response_model=dict)
+@api_router.get("/inspection-plans/current", response_model=dict)
 def get_current_inspection_plan(db: Session = Depends(get_db)):
     """获取当前月份的巡查计划"""
     now = datetime.now()
@@ -926,7 +906,7 @@ def get_current_inspection_plan(db: Session = Depends(get_db)):
     }
 
 
-@app.get("/api/inspection-plans/by-year-month", response_model=dict)
+@api_router.get("/inspection-plans/by-year-month", response_model=dict)
 def get_inspection_plan_by_year_month(
     year: int,
     month: int,
@@ -950,7 +930,7 @@ def get_inspection_plan_by_year_month(
     }
 
 
-@app.get("/api/inspection-plans/list", response_model=dict)
+@api_router.get("/inspection-plans/list", response_model=dict)
 def get_inspection_plan_list(
     year: int,
     month: int,
@@ -969,7 +949,7 @@ def get_inspection_plan_list(
         return {"year": year, "month": month, "days": []}
 
     plan_data = json.loads(plan.data) if plan.data else {}
-    
+
     # 只提取概要信息
     days_list = []
     for date_str, day_data in plan_data.items():
@@ -981,10 +961,10 @@ def get_inspection_plan_list(
             "total": day_data.get("total", 0),
             "floors": day_data.get("floors", []),
         })
-    
+
     # 按日期排序
     days_list.sort(key=lambda x: x["date"])
-    
+
     return {
         "year": year,
         "month": month,
@@ -993,7 +973,7 @@ def get_inspection_plan_list(
     }
 
 
-@app.get("/api/inspection-plans/{plan_id}/day/{date}", response_model=dict)
+@api_router.get("/inspection-plans/{plan_id}/day/{date}", response_model=dict)
 def get_inspection_plan_day_detail(
     plan_id: int,
     date: str,
@@ -1006,22 +986,22 @@ def get_inspection_plan_day_detail(
     plan = db.query(InspectionPlan).filter(InspectionPlan.id == plan_id).first()
     if not plan:
         raise HTTPException(status_code=404, detail="计划不存在")
-    
+
     plan_data = json.loads(plan.data) if plan.data else {}
     day_data = plan_data.get(date)
-    
+
     if not day_data:
         raise HTTPException(status_code=404, detail="该日期没有巡查计划")
-    
+
     # 返回完整详情（包含所有房间）
     # 合并早晚班的房间
     all_rooms = []
     morning_rooms = day_data.get("morning", {}).get("rooms", [])
     evening_rooms = day_data.get("evening", {}).get("rooms", [])
-    
+
     # 不区分早晚班，合并显示
     all_rooms = morning_rooms + evening_rooms
-    
+
     # 生成按楼层分组的数据
     def group_by_floor(room_list):
         grouped = {}
@@ -1031,9 +1011,9 @@ def get_inspection_plan_day_detail(
                 grouped[key] = []
             grouped[key].append(r)
         return grouped
-    
+
     grouped = group_by_floor(all_rooms)
-    
+
     return {
         "date": date,
         "day": day_data.get("day"),
@@ -1046,7 +1026,7 @@ def get_inspection_plan_day_detail(
     }
 
 
-@app.get("/api/inspection-plans", response_model=List[InspectionPlanResponse])
+@api_router.get("/inspection-plans", response_model=List[InspectionPlanResponse])
 def get_inspection_plans(
     skip: int = 0,
     limit: int = 100,
@@ -1057,7 +1037,7 @@ def get_inspection_plans(
     plans = db.query(InspectionPlan).order_by(InspectionPlan.created_at.desc()).offset(skip).limit(limit).all()
     return plans
 
-@app.post("/api/inspection-plans", response_model=InspectionPlanResponse)
+@api_router.post("/inspection-plans", response_model=InspectionPlanResponse)
 def create_inspection_plan(
     plan_data: InspectionPlanCreate,
     db: Session = Depends(get_db),
@@ -1077,7 +1057,7 @@ def create_inspection_plan(
     db.refresh(plan)
     return plan
 
-@app.put("/api/inspection-plans/{plan_id}", response_model=InspectionPlanResponse)
+@api_router.put("/inspection-plans/{plan_id}", response_model=InspectionPlanResponse)
 def update_inspection_plan(
     plan_id: int,
     plan_data: InspectionPlanUpdate,
@@ -1098,7 +1078,7 @@ def update_inspection_plan(
     db.refresh(plan)
     return plan
 
-@app.delete("/api/inspection-plans/{plan_id}")
+@api_router.delete("/inspection-plans/{plan_id}")
 def delete_inspection_plan(
     plan_id: int,
     db: Session = Depends(get_db),
@@ -1113,23 +1093,44 @@ def delete_inspection_plan(
     db.commit()
     return {"message": "删除成功"}
 
-# ==================== 前端 SPA 静态服务 ====================
 
-@app.get("/vite.svg")
+# 注册顶层 API 路由器（/ops/api 收口）
+app.include_router(api_router)
+
+# ==================== 前端 SPA 静态服务（/ops 命名空间） ====================
+
+@app.get("/ops/vite.svg")
 def serve_vite_svg():
-    """返回 vite.svg 图标"""
+    """返回 vite.svg 图标（命名空间 /ops）"""
     svg_path = os.path.join(DIST_DIR, "vite.svg")
     if os.path.exists(svg_path):
         return FileResponse(svg_path, media_type="image/svg+xml")
     return FileResponse(os.path.join(DIST_DIR, "index.html"), media_type="text/html")
 
-@app.get("/{full_path:path}")
-def serve_spa(request: Request, full_path: str):
-    """SPA fallback：所有未匹配路由返回 index.html"""
+@app.get("/ops")
+@app.get("/ops/")
+def serve_ops_index():
+    """SPA 入口（命名空间 /ops）"""
     index_path = os.path.join(DIST_DIR, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path, media_type="text/html")
     return {"error": "前端文件未找到，请先执行 npm run build"}
+
+@app.get("/ops/{full_path:path}")
+def serve_ops_spa(full_path: str):
+    """SPA fallback：仅兜底 /ops 空间内未匹配路由，返回 index.html（避免吞掉其它顶层路由）"""
+    index_path = os.path.join(DIST_DIR, "index.html")
+    candidate = os.path.join(DIST_DIR, full_path)
+    if os.path.isfile(candidate):
+        return FileResponse(candidate)
+    if os.path.exists(index_path):
+        return FileResponse(index_path, media_type="text/html")
+    return {"error": "前端文件未找到，请先执行 npm run build"}
+
+@app.get("/")
+def root_redirect():
+    """直连 IP:9527 时友好跳转到 /ops/（永久重定向，便于浏览器/代理缓存）"""
+    return RedirectResponse("/ops/", status_code=301)
 
 
 if __name__ == "__main__":

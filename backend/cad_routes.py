@@ -15,7 +15,7 @@ from pathlib import Path
 from cad_service import CADService, parse_cad, extract_cad_text, cad_to_json
 
 
-router = APIRouter(prefix="/api/cad", tags=["CAD文件处理"])
+router = APIRouter(prefix="/cad", tags=["CAD文件处理"])
 
 # 上传目录：基于文件所在目录的绝对路径，与 main.py 保持一致
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

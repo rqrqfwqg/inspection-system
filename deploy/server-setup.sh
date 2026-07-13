@@ -43,6 +43,8 @@ fi
 export JWT_SECRET_KEY="${JWT_SECRET_KEY:-$(openssl rand -hex 32)}"
 export ADMIN_INIT_PASSWORD="${ADMIN_INIT_PASSWORD:-ChangeMe123!}"
 export DEV_MODE=false
+# 取消登录（内网开放 / 自动 admin）：运维系统整体命名空间化到 /ops，无需登录
+export DISABLE_AUTH=true
 export PORT=9527
 
 # ----------------------------------------------------------
@@ -79,15 +81,22 @@ npm install -q
 npm run build
 
 # ----------------------------------------------------------
+# 5) 上传路径命名空间幂等迁移（/uploads/ → /ops/uploads/，可重复执行）
+#    注：后端启动时 lifespan 也会自动执行该迁移，这里再显式跑一次作为运维入口。
+# ----------------------------------------------------------
+echo "[*] 上传路径命名空间迁移（/uploads/ → /ops/uploads/）..."
+cd "$ROOT/backend"
+# shellcheck disable=SC1091
+source venv/bin/activate
+python migrate_uploads.py || echo "[警告] 迁移脚本未执行（库表可能尚未初始化，后端启动时会自动迁移）"
+
+# ----------------------------------------------------------
 # 5) 启动后端进程（nohup 保活，端口 9527）
 # ----------------------------------------------------------
 echo "[*] 启动后端进程..."
 pkill -f "main.py" 2>/dev/null || true
 sleep 1
 
-cd "$ROOT/backend"
-# shellcheck disable=SC1091
-source venv/bin/activate
 nohup python main.py > server.log 2>&1 &
 echo $! > server.pid
 echo "[ok] 后端已启动，PID=$(cat server.pid)，日志: backend/server.log"
@@ -96,7 +105,7 @@ echo "[ok] 后端已启动，PID=$(cat server.pid)，日志: backend/server.log"
 # 6) 健康检查
 # ----------------------------------------------------------
 sleep 5
-if curl -fsS "http://localhost:${PORT}/api/health" >/dev/null 2>&1; then
+if curl -fsS "http://localhost:${PORT}/ops/api/health" >/dev/null 2>&1; then
   echo "[ok] 健康检查通过 ✅"
 else
   echo "[!] 健康检查未通过，请查看 backend/server.log"
@@ -104,8 +113,9 @@ fi
 
 echo ""
 echo "============================================================"
-echo " 访问地址:  http://<本机公网IP>:9527"
-echo " 管理员:    admin / ${ADMIN_INIT_PASSWORD}"
+echo " 访问地址:  http://<本机公网IP>:9527/ops/"
+echo " 命名空间:  前端 /ops/ · API /ops/api · 上传 /ops/uploads"
+echo " 管理员:    内网开放，免登录（自动 admin）"
 echo " 数据库:    backend/app.db（已就位，重启不丢）"
 echo " 停止:      kill \$(cat backend/server.pid)"
 echo " 重启:      bash deploy/server-setup.sh"

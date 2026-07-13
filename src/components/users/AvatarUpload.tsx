@@ -2,6 +2,7 @@ import React, { useRef, useState, useEffect } from 'react'
 import { X, Upload } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useToast } from '@/hooks/use-toast'
+import { API_BASE } from '@/config'
 
 interface AvatarUploadProps {
   value?: string
@@ -63,7 +64,7 @@ export default function AvatarUpload({ value, onChange, name }: AvatarUploadProp
       const headers: Record<string, string> = {}
       if (token) headers['Authorization'] = `Bearer ${token}`
 
-      const response = await fetch('/api/upload/avatar', {
+      const response = await fetch(`${API_BASE}/upload/avatar`, {
         method: 'POST',
         headers,
         body: formData,

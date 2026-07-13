@@ -15,6 +15,7 @@ Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/inspection-system/backend
 Environment=DEV_MODE=false
+Environment=DISABLE_AUTH=true
 Environment=PORT=9527
 EnvironmentFile=/home/ubuntu/inspection-system/backend/.env
 ExecStart=/home/ubuntu/inspection-system/backend/venv/bin/python main.py

@@ -1,5 +1,7 @@
 // 环境变量配置：开发环境走 Vite proxy 到 localhost:9527，生产环境指向实际 API
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api'
+// 默认使用 /ops/api（见 src/config.ts，与后端 api_router(prefix="/ops/api") 一致）
+import { API_BASE } from '@/config'
+const API_BASE_URL = import.meta.env.VITE_API_URL || API_BASE
 
 import type { User } from '@/types'
 

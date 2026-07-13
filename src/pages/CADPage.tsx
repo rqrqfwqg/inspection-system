@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Upload, FileText, Layers, Box, Type, Download, Trash2 } from 'lucide-react'
 import { api } from '@/services/api'
+import { API_BASE } from '@/config'
 import { useToast } from '@/hooks/use-toast'
 import { Toaster } from '@/components/ui/toaster'
 
@@ -55,7 +56,7 @@ export default function CADPage() {
       const formData = new FormData()
       formData.append('file', file)
 
-      const response = await fetch('/api/cad/upload', {
+      const response = await fetch(`${API_BASE}/cad/upload`, {
         method: 'POST',
         body: formData
       })
@@ -121,7 +122,7 @@ export default function CADPage() {
   // 导出 JSON
   const exportJSON = useCallback(async (fileId: string) => {
     try {
-      const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:9527/api'
+      const API_BASE_URL = import.meta.env.VITE_API_URL || API_BASE
       const response = await fetch(`${API_BASE_URL}/cad/export/json/${fileId}?download=true`)
       const blob = await response.blob()
       const url = window.URL.createObjectURL(blob)

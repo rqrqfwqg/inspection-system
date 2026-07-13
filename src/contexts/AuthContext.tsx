@@ -1,5 +1,4 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
-import { api } from '@/services/api'
+import { createContext, useContext, useState, ReactNode } from 'react'
 
 export interface User {
   id: number
@@ -24,66 +23,33 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [isLoading, setIsLoading] = useState(true)
-  const [user, setUser] = useState<User | null>(null)
+  // 取消登录（内网开放）：启动即视为已登录 admin，不再读 localStorage token / 不再调 getMe
+  const [user] = useState<User | null>({
+    id: 0,
+    email: 'admin@system.local',
+    name: '系统管理员',
+    department: '系统',
+    role: 'admin',
+  })
+  const isLoading = false
+  const isAuthenticated = true
 
-  // 验证 token 并获取用户信息
-  const refreshUser = async () => {
-    const token = localStorage.getItem('token')
-    if (!token) {
-      setUser(null)
-      return
-    }
-    try {
-      const fresh = await api.getMe() as User
-      setUser(fresh)
-      localStorage.setItem('user', JSON.stringify(fresh))
-    } catch {
-      // token 无效，清除
-      api.setToken(null)
-      localStorage.removeItem('user')
-      setUser(null)
-    }
-  }
-
-  useEffect(() => {
-    const init = async () => {
-      const token = localStorage.getItem('token')
-      if (token) {
-        // 有 token 时才尝试获取用户信息
-        const storedUser = localStorage.getItem('user')
-        if (storedUser) {
-          try { setUser(JSON.parse(storedUser)) } catch { /* ignore */ }
-        }
-        await refreshUser()
-      }
-      setIsLoading(false)
-    }
-    init()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const login = async (phone: string, password: string): Promise<boolean> => {
-    try {
-      const data = await api.login(phone, password)
-      setUser(data.user as User)
-      localStorage.setItem('user', JSON.stringify(data.user))
-      return true
-    } catch (error) {
-      console.error('登录失败:', error)
-      return false
-    }
+  // 保留签名兼容旧调用；实际不再跳转、不再请求后端
+  const login = async (_phone: string, _password: string): Promise<boolean> => {
+    return true
   }
 
   const logout = () => {
-    api.logout()
-    localStorage.removeItem('user')
-    setUser(null)
+    // 取消登录：无操作
+  }
+
+  const refreshUser = async () => {
+    // 取消登录：无需刷新（保留签名兼容）
   }
 
   return (
     <AuthContext.Provider value={{
-      isAuthenticated: user !== null,
+      isAuthenticated,
       isLoading,
       login,
       logout,

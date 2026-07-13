@@ -1,6 +1,6 @@
 """分系统资料管理 · API 路由 + 种子数据
 
-挂载前缀：/api/assets
+挂载前缀：/assets（最终由 main.py 的 api_router(prefix="/ops/api") 拼装为 /ops/api/assets）
 核心能力：
   - 设备全局检索（输入设备编号 → 聚合该设备跨子系统全部资料 + 关联追溯）
   - 子系统 / 资料表 / 字段定义 / 记录 / 设备 / 关联 的增删查改
@@ -13,7 +13,7 @@ import os
 from datetime import datetime, timezone
 
 from database import (
-    get_db, Subsystem, Device, DataTable, FieldDef, Record, DeviceRelation,
+    get_db, User, Subsystem, Device, DataTable, FieldDef, Record, DeviceRelation,
 )
 from asset_schemas import (
     SubsystemCreate, SubsystemUpdate, SubsystemResponse,
@@ -25,42 +25,10 @@ from asset_schemas import (
     BulkRecordCreate, BulkRecordItem,
     SearchResult,
 )
-from auth import decode_token
-from database import User
+# 鉴权统一收口到 dependencies（消除与 main.py 的重复实现）
+from dependencies import get_current_user as _get_current_user, require_admin as _require_admin
 
-router = APIRouter(prefix="/api/assets", tags=["assets"])
-
-# ========================= 鉴权（与 main.py 保持一致） =========================
-DEV_MODE = os.getenv("DEV_MODE", "false").lower() in ("true", "1")
-
-from fastapi import Header
-
-def _get_current_user(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> User:
-    if DEV_MODE:
-        admin = db.query(User).filter(User.role == "admin").first()
-        if admin:
-            return admin
-        admin = User(email="admin@system.local", name="开发管理员", phone="00000000000",
-                     password_hash="x", role="admin")
-        db.add(admin); db.commit(); db.refresh(admin)
-        return admin
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
-    payload = decode_token(authorization[7:])
-    if not payload:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录已过期，请重新登录")
-    user_id = payload.get("user_id")
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在")
-    if not user.is_active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账户已被禁用，请联系管理员")
-    return user
-
-def _require_admin(current_user: User = Depends(_get_current_user)) -> User:
-    if current_user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
-    return current_user
+router = APIRouter(prefix="/assets", tags=["assets"])
 
 
 # ========================= 工具函数 =========================
