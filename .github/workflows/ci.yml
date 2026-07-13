@@ -70,13 +70,5 @@ jobs:
           fi
         continue-on-error: true
 
-  # ==================== Docker 构建验证 ====================
-  docker:
-    name: Docker 镜像构建验证
-    runs-on: ubuntu-latest
-    needs: [frontend, backend]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 构建 Docker 镜像
-        run: docker build -t inspection-system:ci .
+  # 说明：Docker 镜像构建验证已移至服务器侧 deploy/server-setup.sh，
+  # GitHub 免费 runner 默认无 docker daemon，故不在 CI 内执行。
