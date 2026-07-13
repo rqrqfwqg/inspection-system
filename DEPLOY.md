@@ -40,6 +40,26 @@ PORT=9527
 > ⚠️ 生产环境**务必** `DEV_MODE=false`，否则任何人可绕过登录。
 > `docker-compose.yml` 已默认 `DEV_MODE=false` 并带 healthcheck，环境变量以 `backend/.env` 或 compose environment 为准（两者同时存在时系统环境变量优先）。
 
+## 4.5 迁移已录入的真实数据（推荐）
+本地开发机已录入 **1608 条台账记录 + 314 条关联边**（`backend/app.db`，SQLite 单文件、`journal_mode=delete` 可整体拷贝）。**无需重跑导入脚本**，直接把该文件传到服务器即可：
+
+```bash
+# ① 在你本地（能 SSH 的终端）把数据库推到服务器家目录
+scp "C:/Users/yan/WorkBuddy/2026-05-21-13-28-45/inspection-system/backend/app.db" <用户>@82.156.62.59:~/app.db
+
+# ② 也把代码拉到服务器（若尚未 clone）
+ssh <用户>@82.156.62.59
+git clone https://github.com/rqrqfwqg/inspection-system.git
+cd inspection-system
+mkdir -p data
+mv ~/app.db data/app.db        # 关键：必须在 docker compose up 之前放好
+
+# ③ 一键拉起（会自动装 Docker / 注入密钥 / 构建启动）
+bash deploy/server-setup.sh
+```
+> 注意：必须**先**把 `app.db` 放进 `./data/` 再启动容器。若先 `up`、目录为空，Docker 会把 `data/app.db` 建成空目录并覆盖，导致数据丢失。脚本已做校验：缺库会提示先 scp。
+> 数据库含真实台账，请勿误提交到 Git（`.gitignore` 已忽略 `*.db`）。
+
 ## 5. 构建并启动
 ```bash
 docker compose up -d --build
