@@ -281,8 +281,12 @@ def delete_record(tid: int, rid: int, db: Session = Depends(get_db), _: User = D
 
 @router.get("/devices", response_model=List[DeviceResponse])
 def list_devices(q: Optional[str] = None, subsystem_id: Optional[int] = None,
+                 include_inactive: bool = False,
                  db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
     query = db.query(Device)
+    if not include_inactive:
+        # 软删除（is_active=False）默认不出现在活动列表（决策 Q6：仅保留历史，不在前台展示）
+        query = query.filter(Device.is_active == True)
     if subsystem_id:
         query = query.filter(Device.subsystem_id == subsystem_id)
     if q:
