@@ -1377,12 +1377,33 @@ def seed_assets(db: Session):
         ("light_source", "光源类型", "select", ["LED", "荧光", "卤素"], False, False),
         ("install_date", "安装日期", "date", [], False, False),
         ("location", "安装位置", "text", [], False, False),
+        ("device_name", "设备名称", "text", [], False, False),
+        ("category", "设备类别", "select", [], False, False),
+        ("brand_model", "品牌型号", "text", [], False, False),
+        ("building", "楼栋", "text", [], False, False),
+        ("floor", "楼层", "text", [], False, False),
+        ("use_dept", "使用部门", "text", [], False, False),
+        ("responsible", "维护责任人", "text", [], False, False),
+        ("transfer_no", "移交编号", "text", [], False, False),
+        ("recv_date", "接收日期", "date", [], False, False),
+        ("remark", "备注", "text", [], False, False),
     ])
     # 电力系统
     t_power_panel = add_table("power", "power_panels", "配电柜", [
         ("panel_code", "配电柜编号", "device_ref", [], True, True),
         ("capacity", "容量", "text", [], False, False),
         ("incoming", "进线方式", "text", [], False, False),
+        ("device_name", "设备名称", "text", [], False, False),
+        ("category", "设备类别", "select", ["配电箱", "配电柜", "控制箱", "UPS"], False, False),
+        ("brand_model", "品牌型号", "text", [], False, False),
+        ("location", "安装位置", "text", [], False, False),
+        ("building", "楼栋", "text", [], False, False),
+        ("floor", "楼层", "text", [], False, False),
+        ("use_dept", "使用部门", "text", [], False, False),
+        ("responsible", "维护责任人", "text", [], False, False),
+        ("transfer_no", "移交编号", "text", [], False, False),
+        ("recv_date", "接收日期", "date", [], False, False),
+        ("remark", "备注", "text", [], False, False),
     ])
     # 给排水系统（新增）
     t_water = add_table("water", "water_equipment", "给排水设备", [
@@ -1390,6 +1411,16 @@ def seed_assets(db: Session):
         ("equip_type", "设备类型", "select", ["给水泵", "排水泵", "阀门", "水箱", "管道"], False, False),
         ("spec", "规格参数", "text", [], False, False),
         ("location", "安装位置", "text", [], False, False),
+        ("device_name", "设备名称", "text", [], False, False),
+        ("category", "设备类别", "select", [], False, False),
+        ("brand_model", "品牌型号", "text", [], False, False),
+        ("building", "楼栋", "text", [], False, False),
+        ("floor", "楼层", "text", [], False, False),
+        ("use_dept", "使用部门", "text", [], False, False),
+        ("responsible", "维护责任人", "text", [], False, False),
+        ("transfer_no", "移交编号", "text", [], False, False),
+        ("recv_date", "接收日期", "date", [], False, False),
+        ("remark", "备注", "text", [], False, False),
     ])
     # 暖通系统（新增）
     t_hvac = add_table("hvac", "hvac_equipment", "暖通设备", [
@@ -1397,6 +1428,16 @@ def seed_assets(db: Session):
         ("equip_type", "设备类型", "select", ["风机盘管", "新风机组", "空调机组", "风管"], False, False),
         ("capacity", "容量/功率", "text", [], False, False),
         ("location", "安装位置", "text", [], False, False),
+        ("device_name", "设备名称", "text", [], False, False),
+        ("category", "设备类别", "select", [], False, False),
+        ("brand_model", "品牌型号", "text", [], False, False),
+        ("building", "楼栋", "text", [], False, False),
+        ("floor", "楼层", "text", [], False, False),
+        ("use_dept", "使用部门", "text", [], False, False),
+        ("responsible", "维护责任人", "text", [], False, False),
+        ("transfer_no", "移交编号", "text", [], False, False),
+        ("recv_date", "接收日期", "date", [], False, False),
+        ("remark", "备注", "text", [], False, False),
     ])
 
     # ==================== 真实台账字段（源自现场 Excel，可被 Excel 直接导入） ====================
@@ -1556,6 +1597,112 @@ def seed_assets(db: Session):
         ("desc", "问题描述", "text", [], False, False),
         ("status", "处理状态", "select", ["待处理", "处理中", "已闭环"], False, False),
         ("responsible", "责任人", "text", [], False, False),
+        ("remark", "备注", "text", [], False, False),
+    ])
+
+
+    # ==================== 基础台账（源自固定资产主档导入，与数据表管理 1:1） ====================
+    # 弱电系统 · 视频监控台账
+    add_table("weak", "weak_cctv", "视频监控台账", [
+        ("monitor_code", "设备编号", "device_ref", [], True, True),
+        ("device_name", "设备名称", "text", [], False, False),
+        ("category", "设备类别", "select", ["视频监控设备", "摄像头"], False, False),
+        ("brand_model", "品牌型号", "text", [], False, False),
+        ("location", "安装位置", "text", [], False, False),
+        ("building", "楼栋", "text", [], False, False),
+        ("floor", "楼层", "text", [], False, False),
+        ("use_dept", "使用部门", "text", [], False, False),
+        ("responsible", "维护责任人", "text", [], False, False),
+        ("transfer_no", "移交编号", "text", [], False, False),
+        ("recv_date", "接收日期", "date", [], False, False),
+        ("remark", "备注", "text", [], False, False),
+    ])
+
+    # 弱电系统 · 门禁道闸台账
+    add_table("weak", "weak_access_gate", "门禁道闸台账", [
+        ("device_code", "设备编号", "device_ref", [], True, True),
+        ("device_name", "设备名称", "text", [], False, False),
+        ("category", "设备类别", "select", ["门禁", "道闸", "停车场系统"], False, False),
+        ("brand_model", "品牌型号", "text", [], False, False),
+        ("location", "安装位置", "text", [], False, False),
+        ("building", "楼栋", "text", [], False, False),
+        ("floor", "楼层", "text", [], False, False),
+        ("use_dept", "使用部门", "text", [], False, False),
+        ("responsible", "维护责任人", "text", [], False, False),
+        ("transfer_no", "移交编号", "text", [], False, False),
+        ("recv_date", "接收日期", "date", [], False, False),
+        ("remark", "备注", "text", [], False, False),
+    ])
+
+    # 弱电系统 · 网络设备台账
+    add_table("weak", "weak_network", "网络设备台账", [
+        ("net_code", "设备编号", "device_ref", [], True, True),
+        ("device_name", "设备名称", "text", [], False, False),
+        ("category", "设备类别", "select", ["交换机", "机柜", "存储/服务器", "终端/工控", "其他"], False, False),
+        ("brand_model", "品牌型号", "text", [], False, False),
+        ("location", "安装位置", "text", [], False, False),
+        ("building", "楼栋", "text", [], False, False),
+        ("floor", "楼层", "text", [], False, False),
+        ("use_dept", "使用部门", "text", [], False, False),
+        ("responsible", "维护责任人", "text", [], False, False),
+        ("transfer_no", "移交编号", "text", [], False, False),
+        ("recv_date", "接收日期", "date", [], False, False),
+        ("remark", "备注", "text", [], False, False),
+    ])
+
+    # 消防系统 · 消防设备台账
+    add_table("fire", "fire_equipment", "消防设备台账", [
+        ("equip_code", "设备编号", "device_ref", [], True, True),
+        ("device_name", "设备名称", "text", [], False, False),
+        ("category", "设备类别", "select", ["气体灭火", "报警设备", "控制设备", "消防水炮", "消防设备"], False, False),
+        ("brand_model", "品牌型号", "text", [], False, False),
+        ("location", "安装位置", "text", [], False, False),
+        ("building", "楼栋", "text", [], False, False),
+        ("floor", "楼层", "text", [], False, False),
+        ("use_dept", "使用部门", "text", [], False, False),
+        ("responsible", "维护责任人", "text", [], False, False),
+        ("transfer_no", "移交编号", "text", [], False, False),
+        ("recv_date", "接收日期", "date", [], False, False),
+        ("remark", "备注", "text", [], False, False),
+    ])
+
+    # 其他系统 · 其他设备台账
+    add_table("other", "other_equipment", "其他设备台账", [
+        ("equip_code", "设备编号", "device_ref", [], True, True),
+        ("device_name", "设备名称", "text", [], False, False),
+        ("category", "设备类别", "select", ["电视机", "电梯", "扶梯", "饮水设备", "热水设备", "音响设备", "环境监控", "其他设备"], False, False),
+        ("brand_model", "品牌型号", "text", [], False, False),
+        ("location", "安装位置", "text", [], False, False),
+        ("building", "楼栋", "text", [], False, False),
+        ("floor", "楼层", "text", [], False, False),
+        ("use_dept", "使用部门", "text", [], False, False),
+        ("responsible", "维护责任人", "text", [], False, False),
+        ("transfer_no", "移交编号", "text", [], False, False),
+        ("recv_date", "接收日期", "date", [], False, False),
+        ("remark", "备注", "text", [], False, False),
+        ("asset_code", "资产编码", "text", [], False, False),
+        ("owner_unit", "产权单位", "text", [], False, False),
+        ("contract_no", "合同号", "text", [], False, False),
+        ("builder", "承建/供货单位", "text", [], False, False),
+        ("serial_no", "序列号", "text", [], False, False),
+        ("price_tax", "资产原值(含税)", "number", [], False, False),
+        ("proj_manager", "项目负责人", "text", [], False, False),
+        ("warranty_end", "质保期至", "date", [], False, False),
+    ])
+
+    # 其他系统 · 电梯扶梯台账（源自《电梯清单》维保台账 + 固定资产主档）
+    add_table("other", "elevator_escalator", "电梯扶梯台账", [
+        ("elevator_code", "设备编号", "device_ref", [], True, True),
+        ("device_name", "设备名称", "text", [], False, False),
+        ("category", "设备类别", "select", ["垂直电梯", "自动扶梯"], False, False),
+        ("maint_code", "维保编号", "text", [], False, False),
+        ("maint_cycle", "保养周期", "text", ["双周保", "月保", "季保", "年保"], False, False),
+        ("location", "位置/区域", "text", [], False, False),
+        ("brand_model", "品牌型号", "text", [], False, False),
+        ("serial_no", "出厂编号", "text", [], False, False),
+        ("responsible", "维护责任人", "text", [], False, False),
+        ("use_dept", "使用部门", "text", [], False, False),
+        ("transfer_no", "移交编号", "text", [], False, False),
         ("remark", "备注", "text", [], False, False),
     ])
 
