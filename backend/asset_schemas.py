@@ -90,6 +90,8 @@ class DataTableResponse(DataTableBase):
     updated_at: Any
     subsystem_name: Optional[str] = None
     field_count: int = 0
+    record_count: int = 0      # 该表现存记录行数（列表/卡片统计用，与 field_count 同为只读聚合）
+    relation_key_label: Optional[str] = None  # is_relation_key 字段的中文名（记录归属设备用，展示用）
     model_config = ConfigDict(from_attributes=True)
 
 

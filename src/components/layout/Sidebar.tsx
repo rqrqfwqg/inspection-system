@@ -35,7 +35,7 @@ export default function Sidebar({ isOpen, onToggle }: SidebarProps) {
     { icon: Settings, label: '系统设置', path: '/settings', adminOnly: false },
     // 分系统资料管理
     { icon: Search, label: '资料检索', path: '/asset/search', adminOnly: false },
-    { icon: FileSpreadsheet, label: '资料台账', path: '/asset/ledger', adminOnly: false },
+    { icon: FileSpreadsheet, label: '数据表管理', path: '/asset/ledger', adminOnly: false },
     { icon: Boxes, label: '设备台账', path: '/asset/devices', adminOnly: false },
     { icon: Network, label: '资产可视化', path: '/asset-viz', adminOnly: false },
     { icon: QrCode, label: '二维码标签', path: '/asset/qr-labels', adminOnly: false },

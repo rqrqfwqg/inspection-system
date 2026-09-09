@@ -65,6 +65,8 @@ export interface DataTable {
   updated_at: string
   subsystem_name?: string | null
   field_count?: number
+  record_count?: number
+  relation_key_label?: string | null
 }
 
 export interface DataTablePayload {

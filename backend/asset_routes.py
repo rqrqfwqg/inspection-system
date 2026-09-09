@@ -282,6 +282,9 @@ def list_tables(subsystem_id: Optional[int] = None, db: Session = Depends(get_db
         d = DataTableResponse.model_validate(t)
         d.subsystem_name = _subsystem_name(db, t.subsystem_id)
         d.field_count = db.query(FieldDef).filter(FieldDef.table_id == t.id).count()
+        d.record_count = db.query(Record).filter(Record.table_id == t.id).count()
+        rk = db.query(FieldDef).filter(FieldDef.table_id == t.id, FieldDef.is_relation_key == True).first()
+        d.relation_key_label = rk.label if rk else None
         result.append(d)
     return result
 
@@ -293,6 +296,9 @@ def get_table(tid: int, db: Session = Depends(get_db), _: User = Depends(_get_cu
     d = DataTableResponse.model_validate(t)
     d.subsystem_name = _subsystem_name(db, t.subsystem_id)
     d.field_count = db.query(FieldDef).filter(FieldDef.table_id == t.id).count()
+    d.record_count = db.query(Record).filter(Record.table_id == t.id).count()
+    rk = db.query(FieldDef).filter(FieldDef.table_id == t.id, FieldDef.is_relation_key == True).first()
+    d.relation_key_label = rk.label if rk else None
     return d
 
 @router.post("/tables", response_model=DataTableResponse)
