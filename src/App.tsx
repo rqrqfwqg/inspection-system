@@ -12,6 +12,8 @@ import AssetSearchPage from '@/pages/asset/AssetSearchPage'
 import AssetLedgerPage from '@/pages/asset/AssetLedgerPage'
 import DeviceLedgerPage from '@/pages/asset/DeviceLedgerPage'
 import AssetSettingsPage from '@/pages/asset/AssetSettingsPage'
+import QrLabelPage from '@/pages/asset/QrLabelPage'
+import ScanDevicePage from '@/pages/asset/ScanDevicePage'
 import AssetsLayout from '@/features/assets/AssetsLayout'
 import MainLayout from '@/components/layout/MainLayout'
 
@@ -32,6 +34,8 @@ function AppRoutes() {
         <Route path="asset/ledger" element={<AssetLedgerPage />} />
         <Route path="asset/devices" element={<DeviceLedgerPage />} />
         <Route path="asset/settings" element={<AssetSettingsPage />} />
+        <Route path="asset/qr-labels" element={<QrLabelPage />} />
+        <Route path="qr/:code" element={<ScanDevicePage />} />
         <Route path="asset-viz" element={<AssetsLayout />} />
       </Route>
 

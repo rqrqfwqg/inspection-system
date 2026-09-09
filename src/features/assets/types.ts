@@ -189,3 +189,21 @@ export interface ImportBatch {
   finished_at?: string
   [key: string]: unknown
 }
+
+/** 支持导入的模板类型（GET /import/templates） */
+export interface ImportTemplate {
+  key: string
+  desc: string
+}
+
+/** 单次上传导入结果（POST /import） */
+export interface ImportResult {
+  filename?: string
+  template?: string
+  rows?: number
+  accessory_rows?: number
+  dry_run?: boolean
+  batches?: Array<{ segment: string; rows: number; accessories?: number }>
+  warnings?: string[]
+  errors?: string[]
+}

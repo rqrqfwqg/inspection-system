@@ -210,6 +210,27 @@ class Record(Base):
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
 
+class RelationType(Base):
+    """关联类型字典（P1 新增）：统一 relation_type 文本为受控字典。
+
+    relation_type 列存 code（英文主键）；label 为展示中文名（供电/取电/所在机房…）。
+    kind 分类：power=供配电链路（用于上游供电遍历） / cooling=冷源 /
+               locate=位置归属 / control / signal / pipe / network / other。
+    direction 约定（P1）：power/cooling 类 from_code=上游（供电方/冷源），
+                          to_code=下游（受电方/用冷方）。历史数据见
+                         scripts/normalize_relations.py 归一。
+    """
+    __tablename__ = "relation_types"
+
+    code = Column(String, primary_key=True)              # power_supply / locate_in_room ...
+    label = Column(String, nullable=False, unique=True, index=True)  # 中文展示名
+    kind = Column(String, default="other", index=True)   # power/cooling/locate/control/signal/pipe/network/other
+    direction = Column(String, default="none")           # forward(from=上游→to=下游) / none / bidirectional
+    description = Column(Text, default="")
+    sort_order = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+
+
 class DeviceRelation(Base):
     """设备关联关系图：设备间的物理/逻辑链路"""
     __tablename__ = "device_relations"
@@ -217,9 +238,11 @@ class DeviceRelation(Base):
     id = Column(Integer, primary_key=True, index=True)
     from_code = Column(String, index=True, nullable=False)  # 起点 device_code
     to_code = Column(String, index=True, nullable=False)    # 终点 device_code
-    relation_type = Column(String, default="关联")  # 供电/控制/管路连接/送风/信号
+    # relation_type 存 relation_types.label（受控中文名，如 供电/所在机房）。
+    # P1 起 create 接口经 LEGACY_RELATION_MAP 归一，不再落裸文本。
+    relation_type = Column(String, default="关联")
     subsystem_id = Column(Integer, ForeignKey("subsystems.id"), nullable=True)
-    meta = Column(JSON, default=dict)          # 附加属性，如距离/长度/线径
+    meta = Column(JSON, default=dict)          # 附加属性，如回路/线径/端口/VLAN/距离
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
 
 
@@ -406,3 +429,19 @@ class BaProblem(Base):
     source_batch_id = Column(Integer, ForeignKey("import_batches.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+
+
+class DevicePhoto(Base):
+    """设备现场照片（扫码补录 P0：手机拍照/相册上传，URL 落此表，按设备聚合展示）。
+
+    与动态 records 解耦——现场核验照片具有高频查看与审计诉求，独立成表最干净；
+    文件本体存 backend/uploads/assets/photos/，url 为 /ops/uploads/... 可公开访问。
+    """
+    __tablename__ = "device_photos"
+
+    id = Column(Integer, primary_key=True, index=True)
+    device_code = Column(String, index=True, nullable=False)  # canonical device_code
+    url = Column(String, default="")                          # /ops/uploads/assets/photos/xxx.jpg
+    note = Column(String, default="")                         # 拍摄说明（如“柜内铭牌”“背面接线”）
+    created_by = Column(String, default="")                   # 上传人（免鉴权模式记设备名/工号）
+    created_at = Column(DateTime, default=datetime.now(timezone.utc))

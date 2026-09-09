@@ -5,17 +5,21 @@
   - 设备全局检索（输入设备编号 → 聚合该设备跨子系统全部资料 + 关联追溯）
   - 子系统 / 资料表 / 字段定义 / 记录 / 设备 / 关联 的增删查改
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from sqlalchemy import text as sa_text, func
 from typing import Optional, List, Dict, Any
 import os
+import io
+import uuid
+import openpyxl
 from datetime import datetime, timezone
 
 from database import (
     get_db, User, Subsystem, Device, DataTable, FieldDef, Record, DeviceRelation,
     BaSystemMap, EquipmentCategory, DeviceAlias, ImportBatch,
-    FixedAsset, DeviceArchive, DeviceAccessory, BaProblem, Room,
+    FixedAsset, DeviceArchive, DeviceAccessory, BaProblem, Room, DevicePhoto,
+    RelationType,
 )
 from asset_schemas import (
     SubsystemCreate, SubsystemUpdate, SubsystemResponse,
@@ -24,13 +28,103 @@ from asset_schemas import (
     FieldDefCreate, FieldDefUpdate, FieldDefResponse,
     RecordCreate, RecordUpdate, RecordResponse,
     DeviceRelationCreate, DeviceRelationUpdate, DeviceRelationResponse,
+    RelationTypeResponse,
     BulkRecordCreate, BulkRecordItem,
-    SearchResult,
+    SearchResult, DevicePhotoResponse,
 )
 # 鉴权统一收口到 dependencies（消除与 main.py 的重复实现）
 from dependencies import get_current_user as _get_current_user, require_admin as _require_admin
+# 数据导入引擎：把上传的 Excel 解析并落库（自包含，避免循环依赖）
+from import_engine import import_workbook, detect_template, TEMPLATE_INFO
 
 router = APIRouter(prefix="/assets", tags=["assets"])
+
+
+# ========================= 关联类型字典（P1） =========================
+
+# code 为受控主键（device_relations.relation_type 落库用 code）；
+# label 为展示中文名；kind 供上游遍历/前端分组着色。
+RELATION_TYPE_SEED: List[Dict[str, Any]] = [
+    # --- 供配电链路（kind=power，direction=forward：from=上游供电方 → to=下游受电方）---
+    {"code": "power_supply",     "label": "供电",     "kind": "power",   "direction": "forward",
+     "description": "上游设备为下游设备供电（如配电柜→用电设备）", "sort_order": 10},
+    {"code": "power_dist",       "label": "供配电",   "kind": "power",   "direction": "forward",
+     "description": "上级配电设施向下级配电/受电设备供配电", "sort_order": 11},
+    {"code": "power_take",       "label": "取电",     "kind": "power",   "direction": "forward",
+     "description": "设备自上级配电点取电（供电链上游追溯）", "sort_order": 12},
+    {"code": "parent_dist",      "label": "上级配电", "kind": "power",   "direction": "forward",
+     "description": "指向本设备的上级配电柜/母线（上游）", "sort_order": 13},
+    # --- 冷源链路（kind=cooling：from=冷源主机 → to=用冷末端）---
+    {"code": "cooling_source",   "label": "冷源",     "kind": "cooling", "direction": "forward",
+     "description": "冷水机组/冷源为空调末端提供冷量", "sort_order": 20},
+    # --- 位置归属（kind=locate，无向）---
+    {"code": "locate_in_room",   "label": "所在机房", "kind": "locate",  "direction": "none",
+     "description": "设备安装于某机房/房间内（现场补录自动建立）", "sort_order": 30},
+    # --- 网络链路（kind=network：网络接线关系）---
+    {"code": "net_link",         "label": "网络",     "kind": "network", "direction": "none",
+     "description": "设备经网络线缆/端口互联（交换机→设备）", "sort_order": 40},
+    # --- 控制/信号/管路等 ---
+    {"code": "ctrl_signal",      "label": "控制",     "kind": "control", "direction": "none",
+     "description": "控制设备与被控设备间信号/控制关系", "sort_order": 50},
+    {"code": "pipe_link",        "label": "管路连接", "kind": "pipe",    "direction": "none",
+     "description": "设备间水/风/冷媒管路连接", "sort_order": 60},
+    {"code": "accessory_of",     "label": "配件从属", "kind": "accessory","direction": "none",
+     "description": "配件/附属设备从属于主设备", "sort_order": 70},
+    {"code": "other_link",       "label": "关联",     "kind": "other",   "direction": "none",
+     "description": "未归类的一般关联", "sort_order": 99},
+]
+
+# 历史文本（device_relations.relation_type 现存值）→ 受控 label 的兼容映射
+LEGACY_RELATION_MAP: Dict[str, str] = {
+    "供电": "power_supply", "供配电": "power_dist", "上级配电": "parent_dist",
+    "取电": "power_take", "冷源": "cooling_source", "所在机房": "locate_in_room",
+    "网络": "net_link", "控制": "ctrl_signal", "管路连接": "pipe_link",
+    "配件从属": "accessory_of", "关联": "other_link",
+}
+# code → label（与 RELATION_TYPE_SEED 一致，供反查）
+RELATION_CODE_LABEL: Dict[str, str] = {r["code"]: r["label"] for r in RELATION_TYPE_SEED}
+RELATION_LABEL_KIND: Dict[str, str] = {r["label"]: r["kind"] for r in RELATION_TYPE_SEED}
+
+
+def _seed_relation_types(db: Session):
+    """幂等写入 relation_types 字典（P1）。"""
+    for row in RELATION_TYPE_SEED:
+        exists = db.query(RelationType).filter(RelationType.code == row["code"]).first()
+        if exists:
+            # 只同步可展示字段，不覆盖人工改动标记
+            exists.label = row["label"]; exists.kind = row["kind"]
+            exists.direction = row["direction"]
+            exists.description = row["description"]; exists.sort_order = row["sort_order"]
+            exists.is_active = True
+        else:
+            db.add(RelationType(**row))
+    db.commit()
+
+
+def _canonical_relation_label(raw: str) -> str:
+    """任意输入（code / 受控 label / 历史文本 / 空）→ 受控 label。
+
+    列存 label（中文展示名），保证既有 UI（RelationGraph / search.edges.type）
+    零回归；code 仅作字典主键与前端 API 透传。
+    """
+    s = (raw or "").strip()
+    if not s:
+        return RELATION_CODE_LABEL["other_link"]
+    if s in RELATION_CODE_LABEL.values():       # 已是合法 label
+        return s
+    if s in LEGACY_RELATION_MAP:                # 历史文本 → code → label
+        return RELATION_CODE_LABEL.get(LEGACY_RELATION_MAP[s], RELATION_CODE_LABEL["other_link"])
+    if s in RELATION_CODE_LABEL:                # 传的是 code
+        return RELATION_CODE_LABEL[s]
+    return RELATION_CODE_LABEL["other_link"]    # 未知 → 兜底「关联」
+
+
+def _relation_type_meta(db: Session) -> Dict[str, Dict[str, Any]]:
+    """{code: {label, kind, direction}} —— 前端着色/遍历判向用。"""
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in db.query(RelationType).filter(RelationType.is_active == True).all():
+        out[r.code] = {"label": r.label, "kind": r.kind, "direction": r.direction}
+    return out
 
 
 # ========================= 工具函数 =========================
@@ -328,17 +422,28 @@ def delete_record(tid: int, rid: int, db: Session = Depends(get_db), _: User = D
 @router.get("/devices", response_model=List[DeviceResponse])
 def list_devices(q: Optional[str] = None, subsystem_id: Optional[int] = None,
                  include_inactive: bool = False,
+                 building: Optional[str] = None, floor: Optional[str] = None,
+                 limit: int = 200, skip: int = 0,
                  db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """设备台账列表（扫码标签 P0 增强：支持 building/floor 过滤与 limit/skip 分页，向后兼容）。
+
+    limit 上限 1000：标签打印页一次最多取一批，避免大响应阻塞移动端。
+    """
     query = db.query(Device)
     if not include_inactive:
         # 软删除（is_active=False）默认不出现在活动列表（决策 Q6：仅保留历史，不在前台展示）
         query = query.filter(Device.is_active == True)
     if subsystem_id:
         query = query.filter(Device.subsystem_id == subsystem_id)
+    if building:
+        query = query.filter(Device.building == building)
+    if floor:
+        query = query.filter(Device.floor == floor)
     if q:
         like = f"%{q}%"
         query = query.filter((Device.device_code.like(like)) | (Device.name.like(like)) | (Device.location_desc.like(like)))
-    rows = query.order_by(Device.device_code).limit(200).all()
+    limit = max(1, min(int(limit), 1000))
+    rows = query.order_by(Device.device_code).offset(max(0, int(skip))).limit(limit).all()
     result = []
     for d in rows:
         r = DeviceResponse.model_validate(d)
@@ -358,16 +463,109 @@ def create_device(data: DeviceCreate, db: Session = Depends(get_db), _: User = D
 
 @router.put("/devices/{did}", response_model=DeviceResponse)
 def update_device(did: int, data: DeviceUpdate, db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """更新设备（含扫码补录位置：room_id / building / floor / location_desc）。
+
+    room_id 非空时校验机房存在，避免写入孤儿外键。
+    """
     obj = db.query(Device).filter(Device.id == did).first()
     if not obj:
         raise HTTPException(status_code=404, detail="设备不存在")
-    for k, v in data.model_dump(exclude_unset=True).items():
+    payload = data.model_dump(exclude_unset=True)
+    if payload.get("room_id") is not None:
+        room = db.query(Room).filter(Room.id == payload["room_id"]).first()
+        if not room:
+            raise HTTPException(status_code=400, detail=f"机房不存在（id={payload['room_id']}）")
+        # 机房级联写回楼栋/楼层，保证 devices 位置与 rooms 一致（扫码补录 P0）
+        payload.setdefault("building", room.building)
+        payload.setdefault("floor", room.floor)
+    for k, v in payload.items():
         setattr(obj, k, v)
     obj.updated_at = datetime.now(timezone.utc)
     db.commit(); db.refresh(obj)
     r = DeviceResponse.model_validate(obj)
     r.subsystem_name = _subsystem_name(db, obj.subsystem_id)
     return r
+
+
+# ========================= 设备现场照片（扫码补录 P0） =========================
+
+# 照片目录：backend/uploads/assets/photos（同源 /ops/uploads 静态托管）
+_PHOTO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads", "assets", "photos")
+os.makedirs(_PHOTO_DIR, exist_ok=True)
+_ALLOWED_IMG = {"image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"}
+
+
+def _resolve_device_by_code_or_alias(db: Session, code: str) -> Optional[Device]:
+    """设备编号（可带别名）→ devices 记录；alias 先反查 canonical。"""
+    alias = db.query(DeviceAlias).filter(DeviceAlias.alias_code == code).first()
+    if alias:
+        code = alias.canonical_code
+    return db.query(Device).filter(Device.device_code == code).first()
+
+
+@router.post("/devices/{did}/photos", response_model=DevicePhotoResponse)
+async def upload_device_photo(
+    did: int,
+    file: UploadFile = File(...),
+    note: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """上传设备现场照片（multipart file，单张 ≤10MB；note 为拍摄说明）。
+
+    文件落 backend/uploads/assets/photos/{uuid}.{ext}，返回 /ops/uploads/... URL。
+    """
+    dev = db.query(Device).filter(Device.id == did).first()
+    if not dev:
+        raise HTTPException(status_code=404, detail="设备不存在")
+    if file.content_type not in _ALLOWED_IMG:
+        raise HTTPException(status_code=400, detail="仅支持 JPG/PNG/GIF/WEBP 图片")
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="图片不能超过 10MB")
+    ext = os.path.splitext(file.filename or "photo.jpg")[1] or ".jpg"
+    fname = f"{uuid.uuid4().hex}{ext.lower()}"
+    file_path = os.path.join(_PHOTO_DIR, fname)
+    with open(file_path, "wb") as f:
+        f.write(content)
+    photo = DevicePhoto(
+        device_code=dev.device_code,
+        url=f"/ops/uploads/assets/photos/{fname}",
+        note=(note or "").strip(),
+    )
+    db.add(photo)
+    db.commit()
+    db.refresh(photo)
+    return DevicePhotoResponse.model_validate(photo)
+
+
+@router.get("/devices/{did}/photos", response_model=List[DevicePhotoResponse])
+def list_device_photos(did: int, db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    dev = db.query(Device).filter(Device.id == did).first()
+    if not dev:
+        raise HTTPException(status_code=404, detail="设备不存在")
+    rows = db.query(DevicePhoto).filter(DevicePhoto.device_code == dev.device_code)\
+        .order_by(DevicePhoto.created_at.desc()).all()
+    return [DevicePhotoResponse.model_validate(p) for p in rows]
+
+
+@router.delete("/photos/{pid}")
+def delete_device_photo(pid: int, db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    photo = db.query(DevicePhoto).filter(DevicePhoto.id == pid).first()
+    if not photo:
+        raise HTTPException(status_code=404, detail="照片不存在")
+    # 删除文件本体（失败不阻断：孤儿文件可忽略，DB 为主）
+    if photo.url:
+        rel = photo.url.lstrip("/")
+        full = os.path.join(os.path.dirname(os.path.abspath(__file__)), rel)
+        try:
+            if os.path.exists(full):
+                os.remove(full)
+        except Exception:
+            pass
+    db.delete(photo)
+    db.commit()
+    return {"success": True, "message": "照片已删除"}
 
 @router.delete("/devices/{did}")
 def delete_device(did: int, db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
@@ -389,6 +587,13 @@ def delete_device(did: int, db: Session = Depends(get_db), _: User = Depends(_ge
 
 # ========================= 设备关联 =========================
 
+@router.get("/relation-types", response_model=List[RelationTypeResponse])
+def list_relation_types(db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """关联类型字典（P1）：前端建边下拉/链着色数据源。"""
+    return (db.query(RelationType).filter(RelationType.is_active == True)
+            .order_by(RelationType.sort_order, RelationType.code).all())
+
+
 @router.get("/relations", response_model=List[DeviceRelationResponse])
 def list_relations(from_code: Optional[str] = None, to_code: Optional[str] = None,
                    db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
@@ -399,9 +604,38 @@ def list_relations(from_code: Optional[str] = None, to_code: Optional[str] = Non
         q = q.filter(DeviceRelation.to_code == to_code)
     return q.order_by(DeviceRelation.id.desc()).all()
 
+
 @router.post("/relations", response_model=DeviceRelationResponse)
 def create_relation(data: DeviceRelationCreate, db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
-    obj = DeviceRelation(**data.model_dump())
+    """现场/桌面建边（P1 起受控）：两端编号经别名桥接解析 → 设备必须存在 → 防自环 → 类型归一。
+
+    relation_type 接受 code/label/历史文本任一种，落库统一为受控 label。
+    """
+    from_code = (data.from_code or "").strip()
+    to_code = (data.to_code or "").strip()
+    if not from_code or not to_code:
+        raise HTTPException(status_code=400, detail="from_code / to_code 均必填")
+
+    f_dev = _resolve_device_by_code_or_alias(db, from_code)
+    t_dev = _resolve_device_by_code_or_alias(db, to_code)
+    missing = [c for c, d in ((from_code, f_dev), (to_code, t_dev)) if d is None]
+    if missing:
+        raise HTTPException(status_code=404,
+                            detail=f"设备不存在（可先在设备台账登记）：{', '.join(missing)}")
+    f_code, t_code = f_dev.device_code, t_dev.device_code
+    if f_code == t_code:
+        raise HTTPException(status_code=400, detail="不能建立设备到自身的关联")
+
+    rtype = _canonical_relation_label(data.relation_type)
+    dup = (db.query(DeviceRelation).filter(
+        DeviceRelation.from_code == f_code, DeviceRelation.to_code == t_code,
+        DeviceRelation.relation_type == rtype).first())
+    if dup:
+        raise HTTPException(status_code=409, detail=f"相同关联已存在（{f_code} → {t_code} · {rtype}）")
+
+    obj = DeviceRelation(
+        from_code=f_code, to_code=t_code, relation_type=rtype,
+        subsystem_id=data.subsystem_id, meta=data.meta or {})
     db.add(obj); db.commit(); db.refresh(obj)
     return obj
 
@@ -418,10 +652,115 @@ def update_relation(rid: int, data: DeviceRelationUpdate, db: Session = Depends(
     obj = db.query(DeviceRelation).filter(DeviceRelation.id == rid).first()
     if not obj:
         raise HTTPException(status_code=404, detail="关联不存在")
-    for k, v in data.model_dump(exclude_unset=True).items():
+    upd = data.model_dump(exclude_unset=True)
+    if "relation_type" in upd and upd["relation_type"]:
+        upd["relation_type"] = _canonical_relation_label(upd["relation_type"])
+    if "from_code" in upd and upd["from_code"]:
+        d = _resolve_device_by_code_or_alias(db, upd["from_code"])
+        if not d:
+            raise HTTPException(status_code=404, detail=f"设备不存在：{upd['from_code']}")
+        upd["from_code"] = d.device_code
+    if "to_code" in upd and upd["to_code"]:
+        d = _resolve_device_by_code_or_alias(db, upd["to_code"])
+        if not d:
+            raise HTTPException(status_code=404, detail=f"设备不存在：{upd['to_code']}")
+        upd["to_code"] = d.device_code
+    if obj.from_code == obj.to_code:
+        raise HTTPException(status_code=400, detail="不能建立设备到自身的关联")
+    for k, v in upd.items():
         setattr(obj, k, v)
     db.commit(); db.refresh(obj)
     return obj
+
+
+# ========================= 上游供电/冷源链遍历（P1） =========================
+# 语义：relation_types.direction=forward（power/cooling）时 from=上游(供电方/冷源) → to=下游(受电方/用冷)。
+# 遍历方向参数 side：
+#   up   —— 沿「我 → 上游」反查（to_code==我 的边，取 from_code），找供电来源/上级配电
+#   down —— 沿「我 → 下游」追踪（from_code==我 的边，取 to_code），找受电分支
+#   both —— 双向
+_POWER_KINDS = {"power", "cooling"}
+
+
+def _chain_bfs(db: Session, start_code: str, side: str, depth: int) -> Dict[str, Any]:
+    """按 kind∈{power,cooling} 受控边做有向 BFS；跳过 locate/network 等非能源链路。"""
+    label_kind = RELATION_LABEL_KIND  # label → kind
+    nodes: List[Dict[str, Any]] = []
+    visited: Dict[str, int] = {start_code: 0}
+    frontier = [start_code]
+    edges: List[Dict[str, Any]] = []
+    for hop in range(1, depth + 1):
+        nxt: List[str] = []
+        for cur in frontier:
+            rels = db.query(DeviceRelation).filter(
+                (DeviceRelation.from_code == cur) | (DeviceRelation.to_code == cur)).all()
+            for r in rels:
+                kind = label_kind.get(r.relation_type)
+                if kind not in _POWER_KINDS:
+                    continue  # 只沿 供电/供配电/上级配电/取电/冷源 链走
+                if r.to_code == cur:            # cur 是下游 → from_code 是上游
+                    other, edge_side = r.from_code, "up"
+                elif r.from_code == cur:        # cur 是上游 → to_code 是下游
+                    other, edge_side = r.to_code, "down"
+                else:
+                    continue
+                if side == "up" and edge_side != "up":
+                    continue
+                if side == "down" and edge_side != "down":
+                    continue
+                if other in visited:
+                    continue
+                visited[other] = hop
+                edges.append({"rid": r.id, "from": r.from_code, "to": r.to_code,
+                              "type": r.relation_type, "side": edge_side, "depth": hop})
+                nxt.append(other)
+        frontier = nxt
+        if not frontier:
+            break
+    # 补齐节点名（含起点）
+    codes = list(visited.keys())
+    dev_map: Dict[str, Device] = {}
+    if codes:
+        for d in db.query(Device).filter(Device.device_code.in_(codes)).all():
+            dev_map[d.device_code] = d
+    for c, dpt in visited.items():
+        d = dev_map.get(c)
+        nodes.append({
+            "device_code": c,
+            "name": d.name if d else "",
+            "depth": dpt,
+            "role": "start" if dpt == 0 else ("上游" if side == "up" else "下游"),
+        })
+    return {"start_code": start_code, "depth": depth, "nodes": nodes, "edges": edges}
+
+
+@router.get("/devices/{did}/power-chain")
+def device_power_chain(did: int, side: str = "up", depth: int = 2,
+                       db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """上游供电/冷源链遍历（默认向上最多 2 跳；depth 1..5）。
+
+    沿 power/cooling 受控边（供电/供配电/上级配电/取电/冷源）回溯上游来源设备。
+    手机端扫码后展示「这台电是谁给的」；桌面图谱复用同语义。
+    """
+    dev = db.query(Device).filter(Device.id == did).first()
+    if not dev:
+        raise HTTPException(status_code=404, detail="设备不存在")
+    side = side if side in ("up", "down", "both") else "up"
+    depth = max(1, min(5, int(depth)))
+    # side=both 由两次单向 BFS 合成，避免 side 语义污染
+    if side == "both":
+        up = _chain_bfs(db, dev.device_code, "up", depth)
+        down = _chain_bfs(db, dev.device_code, "down", depth)
+        merged = {n["device_code"]: {**n, "role": "上游"} for n in up["nodes"]}
+        for n in down["nodes"]:
+            if n["device_code"] in merged:
+                continue
+            merged[n["device_code"]] = {**n, "role": "下游"}
+        return {"start_code": dev.device_code, "depth": depth, "side": side,
+                "nodes": list(merged.values()),
+                "edges": up["edges"] + down["edges"]}
+    return {"start_code": dev.device_code, "depth": depth, "side": side,
+            **_chain_bfs(db, dev.device_code, side, depth)}
 
 
 # ========================= 批量建记录（Excel 导入落库） =========================
@@ -517,6 +856,7 @@ def search_device(code: str, depth: int = 2, db: Session = Depends(get_db), _: U
                 "from": r.from_code,
                 "to": r.to_code,
                 "type": r.relation_type,
+                "kind": RELATION_LABEL_KIND.get(r.relation_type, "other"),
                 "subsystem_code": sub.code if sub else None,
             })
 
@@ -958,6 +1298,9 @@ def seed_assets(db: Session):
     已确认决策（2026-07-12）：子系统扩至 7 个（补充给排水 water / 暖通 hvac）。
     重复执行安全：各实体均按唯一键 get_or_create，不会重复写入。
     """
+    # ---- 关联类型字典（P1）----
+    _seed_relation_types(db)
+
     # ---- 子系统（7 个，幂等；历史 refriger→hvac 合并，补齐 other）----
     # 历史兼容：若库中存在旧 code "refrig"，将其引用合并到 hvac（暖通）后删除，保证 7 码齐全。
     _refrig = db.query(Subsystem).filter(Subsystem.code == "refrig").first()
@@ -1267,7 +1610,7 @@ def seed_assets(db: Session):
     add_device("WP-1F-01", "给水泵1F-01", "water", building="GTC", floor="1F", location_desc="1F水泵房")
     add_device("FCU-3F-01", "风机盘管3F-01", "hvac", building="GTC", floor="3F", location_desc="3F-A区")
 
-    # ---- 关联（幂等 get-or-create）----
+    # ---- 关联（幂等 get-or-create；P1 方向约定：forward 边 from=上游供电方/冷源 → to=下游受电/用冷）----
     def add_rel(f, t, typ, sub_code, meta=None):
         r = db.query(DeviceRelation).filter(
             DeviceRelation.from_code == f, DeviceRelation.to_code == t,
@@ -1279,13 +1622,13 @@ def seed_assets(db: Session):
         db.add(r); db.commit(); db.refresh(r)
         return r
 
-    add_rel("L-3F-A-001", "CB-L-A01", "供电", "power")
-    add_rel("CB-L-A01", "PD-3F-A", "上级配电", "power")
-    add_rel("AHU-2F-01", "CB-R-01", "供配电", "power")
-    add_rel("AHU-2F-01", "CH-01", "冷源", "refrig", {"pipe_length": "18m"})
-    add_rel("FM-3F-A01", "PD-3F-A", "取电", "power")
-    add_rel("WP-1F-01", "CB-R-01", "供配电", "power")
-    add_rel("FCU-3F-01", "CH-01", "冷源", "refrig")
+    add_rel("CB-L-A01", "L-3F-A-001", "供电", "power")        # 照明回路A → 走道筒灯
+    add_rel("PD-3F-A", "CB-L-A01", "上级配电", "power")       # 配电柜 → 照明回路A
+    add_rel("CB-R-01", "AHU-2F-01", "供配电", "power")        # 制冷回路01 → 空调风柜
+    add_rel("CH-01", "AHU-2F-01", "冷源", "refrig", {"pipe_length": "18m"})  # 冷水机组 → 风柜
+    add_rel("PD-3F-A", "FM-3F-A01", "取电", "power")          # 配电柜 → 烟感探测器
+    add_rel("CB-R-01", "WP-1F-01", "供配电", "power")         # 制冷回路01 → 给水泵
+    add_rel("CH-01", "FCU-3F-01", "冷源", "refrig")           # 冷水机组 → 风机盘管
 
     # ---- 记录（仅当该表尚无记录时写入示例）----
     def add_record_if_empty(table, data, by):
@@ -1553,4 +1896,60 @@ def list_import_batches(
             "started_at": started,
             "finished_at": started,
         })
+    return result
+
+
+@router.get("/import/templates")
+def list_import_templates(_: User = Depends(_get_current_user)):
+    """返回支持导入的模板类型与说明，供前端上传页展示。"""
+    return [
+        {"key": k, "desc": v}
+        for k, v in TEMPLATE_INFO.items()
+    ]
+
+
+@router.post("/import")
+async def import_assets_file(
+    file: UploadFile = File(...),
+    source_type: Optional[str] = Form(None),
+    dry_run: bool = Form(False),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_require_admin),
+):
+    """上传 Excel 并导入（支持固定资产清单 / 设备档案 / BA系统 / 机房 四种模板，自动识别）。
+
+    - 自动识别模板（source_type 可强制指定：fixed_assets / device_archive / ba_system / rooms）。
+    - dry_run=true 仅解析计数并校验，不落库（便于上传前预演）。
+    - 幂等：同文件重复导入按 device_code / 主键 upsert，不产生重复行。
+    - 鉴权：需 admin（本环境 AUTH_DISABLED 下自动放行）。
+    """
+    filename = file.filename or "upload.xlsx"
+    if not filename.lower().endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx / .xls 文件")
+    content = await file.read()
+    if len(content) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="文件过大（上限 50MB）")
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"无法解析 Excel：{e}")
+
+    imported_by = "admin"
+    if current_user is not None:
+        imported_by = current_user.name or current_user.email or "admin"
+
+    try:
+        # dry_run 时引擎内部 rollback；非 dry_run 由引擎逐批次提交
+        result = import_workbook(
+            db, wb, imported_by=imported_by, source_type=source_type,
+            filename=filename, dry_run=dry_run,
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"导入失败：{e}")
+    finally:
+        wb.close()
+
+    result["filename"] = filename
+    result["dry_run"] = dry_run
     return result

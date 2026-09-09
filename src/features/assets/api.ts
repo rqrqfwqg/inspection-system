@@ -1,6 +1,7 @@
 // T3GTC 资产可视化系统 —— API 客户端
 // 基于项目既有 ApiService（src/services/api.ts）发送请求，不改动后端。
 import { api } from '@/services/api'
+import { API_BASE } from '@/config'
 import type {
   Subsystem,
   AreaNode,
@@ -14,6 +15,8 @@ import type {
   ImportBatch,
   DeviceHierarchyNode,
   BaSystemNode,
+  ImportResult,
+  ImportTemplate,
 } from './types'
 
 const BASE = '/assets'
@@ -97,6 +100,47 @@ export async function getImportBatches(): Promise<ImportBatch[]> {
   } catch {
     return []
   }
+}
+
+/** GET /import/templates —— 支持导入的模板类型与说明。 */
+export async function getImportTemplates(): Promise<ImportTemplate[]> {
+  try {
+    return await api.get<ImportTemplate[]>(`${BASE}/import/templates`)
+  } catch {
+    return []
+  }
+}
+
+/**
+ * POST /import —— 上传 Excel 并导入（自动识别模板；dryRun 仅校验不落库）。
+ * 用 FormData + fetch 直传（与 src/services/api.ts 的 uploadShiftImage 同模式），
+ * 不经过 ApiService.request 的 JSON 序列化。
+ */
+export async function uploadImport(
+  file: File,
+  opts: { sourceType?: string; dryRun?: boolean } = {},
+): Promise<ImportResult> {
+  const formData = new FormData()
+  formData.append('file', file)
+  if (opts.sourceType) formData.append('source_type', opts.sourceType)
+  if (opts.dryRun) formData.append('dry_run', 'true')
+
+  const headers: Record<string, string> = {}
+  const token = (api as unknown as { _token?: string | null })._token
+  if (token) headers['Authorization'] = `Bearer ${token}`
+
+  const response = await fetch(`${API_BASE}${BASE}/import`, {
+    method: 'POST',
+    headers,
+    body: formData,
+  })
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: '导入失败' }))
+    const detail = error?.detail
+    const msg = typeof detail === 'string' ? detail : JSON.stringify(detail)
+    throw new Error(msg || '导入失败')
+  }
+  return response.json()
 }
 
 /** GET /trees/device?parent= —— 设备层级树逐级下钻（按子系统分组 → 主设备 → 配件/子设备） */

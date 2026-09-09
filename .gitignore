@@ -60,3 +60,7 @@ linux.sh
 # Backend temp
 backend/run.bat
 backend/test_frontend_api.html
+
+# DB 备份与本地一次性 QA 脚本（不进版本库）
+backend/app.db.bak.*
+backend/_test_import_engine.py

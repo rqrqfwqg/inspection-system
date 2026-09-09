@@ -177,6 +177,19 @@ class DeviceRelationResponse(DeviceRelationBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+# ==================== 关联类型字典（P1：供配电/网络结构化） ====================
+
+class RelationTypeResponse(BaseModel):
+    code: str
+    label: str
+    kind: str = "other"
+    direction: str = "none"
+    description: str = ""
+    sort_order: int = 0
+    is_active: bool = True
+    model_config = ConfigDict(from_attributes=True)
+
+
 # ==================== 搜索结果 ====================
 
 class SearchResult(BaseModel):
@@ -203,3 +216,15 @@ class BulkRecordItem(BaseModel):
 
 class BulkRecordCreate(BaseModel):
     records: List[BulkRecordItem] = []
+
+
+# ==================== 设备现场照片（扫码补录 P0） ====================
+
+class DevicePhotoResponse(BaseModel):
+    id: int
+    device_code: str
+    url: str
+    note: str = ""
+    created_by: str = ""
+    created_at: Any = None
+    model_config = ConfigDict(from_attributes=True)
