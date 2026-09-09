@@ -1136,4 +1136,7 @@ def root_redirect():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "9527"))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, workers=1, loop="asyncio", lifespan="on")
+    # 默认只监听本机：生产由 nginx 443 反代，后端端口不对公网暴露。
+    # 需直连调试时用 BACKEND_HOST=0.0.0.0 显式放开（务必同时收紧防火墙）。
+    host = os.getenv("BACKEND_HOST", "127.0.0.1")
+    uvicorn.run("main:app", host=host, port=port, workers=1, loop="asyncio", lifespan="on")
