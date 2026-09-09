@@ -1378,48 +1378,11 @@ def seed_assets(db: Session):
         ("install_date", "安装日期", "date", [], False, False),
         ("location", "安装位置", "text", [], False, False),
     ])
-    t_light_circuit = add_table("lighting", "lighting_circuits", "照明控制回路", [
-        ("circuit_code", "回路编号", "device_ref", [], True, True),
-        ("panel", "所属配电箱", "text", [], False, False),
-        ("control_zone", "控制区域", "text", [], False, False),
-        ("load", "回路负载", "text", [], False, False),
-    ])
     # 电力系统
-    t_power_circuit = add_table("power", "power_circuits", "配电回路", [
-        ("circuit_code", "回路编号", "device_ref", [], True, True),
-        ("panel", "配电柜", "text", [], False, False),
-        ("cable", "电缆型号", "text", [], False, False),
-        ("current", "额定电流", "text", [], False, False),
-        ("length", "电缆长度", "text", [], False, False),
-    ])
     t_power_panel = add_table("power", "power_panels", "配电柜", [
         ("panel_code", "配电柜编号", "device_ref", [], True, True),
         ("capacity", "容量", "text", [], False, False),
         ("incoming", "进线方式", "text", [], False, False),
-    ])
-    # 制冷系统
-    t_ahu = add_table("hvac", "ahu", "空调风柜", [
-        ("ahu_code", "风柜编号", "device_ref", [], True, True),
-        ("cooling_capacity", "制冷量", "text", [], False, False),
-        ("air_volume", "送风量", "text", [], False, False),
-        ("supply_distance", "送风距离", "text", [], False, False),
-        ("pipe_length", "管路长度", "text", [], False, False),
-    ])
-    t_chiller = add_table("hvac", "chillers", "冷水机组", [
-        ("chiller_code", "机组编号", "device_ref", [], True, True),
-        ("capacity", "制冷量", "text", [], False, False),
-    ])
-    # 消防系统
-    t_fire_det = add_table("fire", "fire_detectors", "火灾探测器", [
-        ("detector_code", "探测器编号", "device_ref", [], True, True),
-        ("det_type", "类型", "select", ["烟感", "温感", "手动报警"], False, False),
-        ("zone", "防区", "text", [], False, False),
-    ])
-    # 弱电系统
-    t_cam = add_table("weak", "cameras", "摄像头", [
-        ("cam_code", "摄像头编号", "device_ref", [], True, True),
-        ("resolution", "分辨率", "text", [], False, False),
-        ("location", "位置", "text", [], False, False),
     ])
     # 给排水系统（新增）
     t_water = add_table("water", "water_equipment", "给排水设备", [
@@ -1644,14 +1607,7 @@ def seed_assets(db: Session):
         db.commit()
 
     add_record_if_empty(t_light, {"fixture_code": "L-3F-A-001", "rated_power": "18W", "light_source": "LED", "install_date": "2025-03", "location": "3F-A区走道"}, "L-3F-A-001")
-    add_record_if_empty(t_light_circuit, {"circuit_code": "CB-L-A01", "panel": "PD-3F-A", "control_zone": "3F-A区走道", "load": "1.2kW"}, "CB-L-A01")
-    add_record_if_empty(t_power_circuit, {"circuit_code": "CB-L-A01", "panel": "PD-3F-A", "cable": "ZR-YJV-3×2.5", "current": "16A", "length": "45m"}, "CB-L-A01")
     add_record_if_empty(t_power_panel, {"panel_code": "PD-3F-A", "capacity": "100A", "incoming": "市电双路"}, "PD-3F-A")
-    add_record_if_empty(t_power_circuit, {"circuit_code": "CB-R-01", "panel": "PD-3F-A", "cable": "ZR-YJV-4×25", "current": "63A", "length": "60m"}, "CB-R-01")
-    add_record_if_empty(t_ahu, {"ahu_code": "AHU-2F-01", "cooling_capacity": "35kW", "air_volume": "5000m³/h", "supply_distance": "25m", "pipe_length": "18m"}, "AHU-2F-01")
-    add_record_if_empty(t_chiller, {"chiller_code": "CH-01", "capacity": "500kW"}, "CH-01")
-    add_record_if_empty(t_fire_det, {"detector_code": "FM-3F-A01", "det_type": "烟感", "zone": "3F-A"}, "FM-3F-A01")
-    add_record_if_empty(t_cam, {"cam_code": "CAM-1F-01", "resolution": "4MP", "location": "1F大厅"}, "CAM-1F-01")
     add_record_if_empty(t_water, {"water_code": "WP-1F-01", "equip_type": "给水泵", "spec": "Q=20m³/h H=32m", "location": "1F水泵房"}, "WP-1F-01")
     add_record_if_empty(t_hvac, {"hvac_code": "FCU-3F-01", "equip_type": "风机盘管", "capacity": "3.5kW", "location": "3F-A区"}, "FCU-3F-01")
     # ---- BA 子系统映射字典（7 行，幂等；一氧化碳检测/管廊气体监测 → weak）----
