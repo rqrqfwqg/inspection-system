@@ -10,6 +10,7 @@ import {
   FileSpreadsheet,
   Boxes,
   SlidersHorizontal,
+  Network,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAuth } from '@/contexts/AuthContext'
@@ -35,6 +36,7 @@ export default function Sidebar({ isOpen, onToggle }: SidebarProps) {
     { icon: Search, label: '资料检索', path: '/asset/search', adminOnly: false },
     { icon: FileSpreadsheet, label: '资料台账', path: '/asset/ledger', adminOnly: false },
     { icon: Boxes, label: '设备台账', path: '/asset/devices', adminOnly: false },
+    { icon: Network, label: '资产可视化', path: '/asset-viz', adminOnly: false },
     { icon: SlidersHorizontal, label: '资料配置', path: '/asset/settings', adminOnly: true },
   ].filter(item => !item.adminOnly || isAdmin)
 

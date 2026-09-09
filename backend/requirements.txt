@@ -10,4 +10,6 @@ numpy>=1.24
 python-dotenv>=1.0.0
 alembic>=1.14.0
 openpyxl>=3.1.0
+# 仅用于 scripts/smoke_test_p0.py 的 TestClient 冒烟测试（开发/QA 依赖，非运行时必需）
+httpx>=0.27.0
 

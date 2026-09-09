@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 
 from database import (
     get_db, User, Subsystem, Device, DataTable, FieldDef, Record, DeviceRelation,
+    BaSystemMap, EquipmentCategory, DeviceAlias, ImportBatch,
+    FixedAsset, DeviceArchive, DeviceAccessory, BaProblem, Room,
 )
 from asset_schemas import (
     SubsystemCreate, SubsystemUpdate, SubsystemResponse,
@@ -53,6 +55,82 @@ def _serialize_record(db: Session, rec: Record) -> Dict[str, Any]:
         "updated_at": rec.updated_at.isoformat() if rec.updated_at else None,
         "device_name": dev.name if dev else None,
         "table_name": tbl.name if tbl else None,
+    }
+
+
+def _date_to_str(d):
+    return d.isoformat() if d else None
+
+
+def _classify_area(building: Optional[str], location: Optional[str] = None) -> str:
+    """楼栋/位置 → 区域大类（停车楼 / GTC / 市政 / 其他）。"""
+    text = building or location or ""
+    if "停车" in text:
+        return "停车楼"
+    if "GTC" in text.upper() or "交通中心" in text or "工作区" in text:
+        return "GTC"
+    if "市政" in text:
+        return "市政"
+    return building or "其他"
+
+
+def _fa_to_dict(fa: "FixedAsset") -> Dict[str, Any]:
+    """固定资产 → JSON 友好 dict（日期转字符串、Numeric 转 float）。"""
+    return {
+        "device_code": fa.device_code,
+        "transfer_no": fa.transfer_no,
+        "tag_no": fa.tag_no,
+        "owner_unit": fa.owner_unit,
+        "use_dept": fa.use_dept,
+        "location": fa.location,
+        "asset_name": fa.asset_name,
+        "asset_code": fa.asset_code,
+        "brand_model": fa.brand_model,
+        "serial_no": fa.serial_no,
+        "recv_date": _date_to_str(fa.recv_date),
+        "warranty_end": _date_to_str(fa.warranty_end),
+        "price_tax": float(fa.price_tax) if fa.price_tax is not None else None,
+        "price_notax": float(fa.price_notax) if fa.price_notax is not None else None,
+        "tax": float(fa.tax) if fa.tax is not None else None,
+        "budget_item": fa.budget_item,
+        "contract_no": fa.contract_no,
+        "bim_tag": fa.bim_tag,
+        "builder": fa.builder,
+        "responsible": fa.responsible,
+        "proj_manager": fa.proj_manager,
+        "warranty_contact": fa.warranty_contact,
+        "remark": fa.remark,
+        "room_code": fa.room_code,
+        "room_match_method": fa.room_match_method,
+    }
+
+
+def _da_to_dict(da: "DeviceArchive") -> Dict[str, Any]:
+    """设备档案 → JSON 友好 dict。"""
+    return {
+        "device_code": da.device_code,
+        "pre_no": da.pre_no,
+        "project": da.project,
+        "system_text": da.system_text,
+        "location": da.location,
+        "building": da.building,
+        "floor": da.floor,
+        "old_name": da.old_name,
+        "asset_name": da.asset_name,
+        "old_code": da.old_code,
+        "manufacturer": da.manufacturer,
+        "brand_model": da.brand_model,
+        "recv_date": _date_to_str(da.recv_date),
+        "qty": da.qty,
+        "unit": da.unit,
+        "kio": da.kio,
+        "original_value": float(da.original_value) if da.original_value is not None else None,
+        "residual_rate": float(da.residual_rate) if da.residual_rate is not None else None,
+        "net_value": float(da.net_value) if da.net_value is not None else None,
+        "status_name": da.status_name,
+        "remark": da.remark,
+        "room_code": da.room_code,
+        "room_match_method": da.room_match_method,
     }
 
 
@@ -380,6 +458,11 @@ def search_device(code: str, depth: int = 2, db: Session = Depends(get_db), _: U
     if not code:
         return SearchResult(found=False)
 
+    # 别名桥接：任一编号（移交/资产代码/新设备编号/BA编号/BIM/标签号）→ canonical device_code
+    alias = db.query(DeviceAlias).filter(DeviceAlias.alias_code == code).first()
+    if alias:
+        code = alias.canonical_code
+
     target = db.query(Device).filter(Device.device_code == code).first()
     found = target is not None
 
@@ -488,6 +571,37 @@ def search_device(code: str, depth: int = 2, db: Session = Depends(get_db), _: U
         target_resp = DeviceResponse.model_validate(target)
         target_resp.subsystem_name = _subsystem_name(db, target.subsystem_id)
 
+    # ===== 扩展聚合：fixed_asset / archive / accessories / room / problems / aliases（可视化设计 C.5）=====
+    canonical_code = code
+    fixed_asset_block = None
+    fa = db.query(FixedAsset).filter(FixedAsset.device_code == canonical_code).first()
+    if fa:
+        fixed_asset_block = _fa_to_dict(fa)
+    archive_block = None
+    da = db.query(DeviceArchive).filter(DeviceArchive.device_code == canonical_code).first()
+    if da:
+        archive_block = _da_to_dict(da)
+    accessories = [{"name": a.name, "brand": a.brand, "spec": a.spec, "qty": a.qty,
+                   "unit": a.unit, "status_name": a.status_name}
+                  for a in db.query(DeviceAccessory).filter(DeviceAccessory.parent_device_code == canonical_code).all()]
+    room_block = None
+    room_id = target.room_id if target else None
+    if room_id is None and fa is not None:
+        room_id = fa.room_id
+    if room_id is None and da is not None:
+        room_id = da.room_id
+    if room_id:
+        rm = db.query(Room).filter(Room.id == room_id).first()
+        if rm:
+            room_block = {"room_code": rm.code, "room_name": rm.name,
+                         "building": rm.building, "floor": rm.floor}
+    problems = [{"ba_device_no": p.ba_device_no, "ba_system": p.ba_system,
+                 "ba_system_code": p.ba_system_code, "problem_type": p.problem_type,
+                 "status": p.status, "location": p.location}
+                for p in db.query(BaProblem).filter(BaProblem.device_code == canonical_code).all()]
+    aliases = [{"alias_code": a.alias_code, "source": a.source}
+               for a in db.query(DeviceAlias).filter(DeviceAlias.canonical_code == canonical_code).all()]
+
     return SearchResult(
         target=target_resp,
         found=found,
@@ -495,7 +609,345 @@ def search_device(code: str, depth: int = 2, db: Session = Depends(get_db), _: U
         edges=edges,
         groups=groups,
         total_records=total_records,
+        fixed_asset=fixed_asset_block,
+        archive=archive_block,
+        accessories=accessories,
+        room=room_block,
+        problems=problems,
+        aliases=aliases,
     )
+
+
+# ========================= P0：资产可视化接口 =========================
+# 全部挂载在 /assets 下（即 /ops/api/assets），与既有接口零冲突。
+
+@router.get("/trees/area")
+def tree_area(
+    building: Optional[str] = None,
+    floor: Optional[str] = None,
+    room_code: Optional[str] = None,
+    parent: Optional[str] = None,
+    area: Optional[str] = None,
+    keyword: Optional[str] = None,
+    only_problems: bool = False,
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """区域树（building→floor→room→device）懒加载。
+
+    节点 {key,type:building|floor|room|device,label,count,has_children,meta}；
+    room 节点带 room_code 与设备计数；device 节点带 device_code/status。
+    """
+    # 预计算：每个 room 归属的设备集合（devices / fixed_assets / device_archives 的 room_id）
+    room_devices: Dict[int, set] = {}
+    for d in db.query(Device.device_code, Device.room_id).filter(Device.is_active == True, Device.room_id.isnot(None)).all():
+        room_devices.setdefault(d.room_id, set()).add(d.device_code)
+    for fa in db.query(FixedAsset.device_code, FixedAsset.room_id).filter(FixedAsset.is_active == True, FixedAsset.room_id.isnot(None)).all():
+        room_devices.setdefault(fa.room_id, set()).add(fa.device_code)
+    for da in db.query(DeviceArchive.device_code, DeviceArchive.room_id).filter(DeviceArchive.is_active_del == True, DeviceArchive.room_id.isnot(None)).all():
+        room_devices.setdefault(da.room_id, set()).add(da.device_code)
+
+    problem_devices: set = set()
+    if only_problems:
+        for bp in db.query(BaProblem.device_code).filter(BaProblem.device_code.isnot(None)).all():
+            problem_devices.add(bp.device_code)
+
+    dev_name = {d.device_code: d.name for d in db.query(Device.device_code, Device.name).all()}
+
+    def dev_matches(code: str) -> bool:
+        if only_problems and code not in problem_devices:
+            return False
+        if keyword:
+            nm = dev_name.get(code, "")
+            if keyword not in code and keyword not in nm:
+                return False
+        return True
+
+    def room_codes(rid: int) -> List[str]:
+        return [c for c in room_devices.get(rid, set()) if dev_matches(c)]
+
+    # 直接给 room_code：返回该机房设备
+    if room_code and not parent:
+        room = db.query(Room).filter(Room.code == room_code).first()
+        if room:
+            return [{
+                "key": f"d:{c}", "type": "device", "label": dev_name.get(c, c),
+                "count": 0, "has_children": False,
+                "meta": {"device_code": c, "status": True},
+            } for c in room_codes(room.id)]
+        return []
+
+    nodes = []
+    if not parent:
+        q = db.query(Room).filter(Room.is_active == True)
+        if area:
+            q = q.filter(Room.building.like(f"%{area}%"))
+        if building:
+            q = q.filter(Room.building == building)
+        bld_count: Dict[str, int] = {}
+        bld_floors: Dict[str, int] = {}
+        for r in q.all():
+            cnt = len(room_codes(r.id))
+            if cnt == 0:
+                continue
+            bld_count[r.building] = bld_count.get(r.building, 0) + cnt
+            bld_floors[r.building] = bld_floors.get(r.building, 0) + 1
+        for b, cnt in sorted(bld_count.items()):
+            nodes.append({
+                "key": f"b:{b}", "type": "building", "label": b, "count": cnt,
+                "has_children": True,
+                "meta": {"building": b, "floor_count": bld_floors[b], "area": _classify_area(b)},
+            })
+        return nodes
+
+    if parent.startswith("b:"):
+        b = parent[2:]
+        q = db.query(Room).filter(Room.building == b, Room.is_active == True)
+        if floor:
+            q = q.filter(Room.floor == floor)
+        fl_count: Dict[str, int] = {}
+        for r in q.all():
+            fl_count[r.floor] = fl_count.get(r.floor, 0) + len(room_codes(r.id))
+        for f, cnt in sorted(fl_count.items()):
+            if cnt == 0:
+                continue
+            nodes.append({
+                "key": f"f:{b}:{f}", "type": "floor", "label": f"{b} {f}", "count": cnt,
+                "has_children": True, "meta": {"building": b, "floor": f},
+            })
+        return nodes
+
+    if parent.startswith("f:"):
+        _, b, f = parent.split(":", 2)
+        rooms = db.query(Room).filter(Room.building == b, Room.floor == f, Room.is_active == True).all()
+        for r in rooms:
+            cnt = len(room_codes(r.id))
+            if cnt == 0:
+                continue
+            nodes.append({
+                "key": f"r:{r.code}", "type": "room", "label": r.name, "count": cnt,
+                "has_children": True,
+                "meta": {"room_code": r.code, "building": r.building, "floor": r.floor, "room_type": r.room_type},
+            })
+        return nodes
+
+    if parent.startswith("r:"):
+        rc = parent[2:]
+        room = db.query(Room).filter(Room.code == rc).first()
+        if room:
+            for c in room_codes(room.id):
+                d = db.query(Device).filter(Device.device_code == c).first()
+                nodes.append({
+                    "key": f"d:{c}", "type": "device", "label": dev_name.get(c, c), "count": 0,
+                    "has_children": False,
+                    "meta": {"device_code": c, "status": d.is_active if d else None},
+                })
+        return nodes
+
+    return nodes
+
+
+@router.get("/trees/subsystem")
+def tree_subsystem(
+    subsystem_code: Optional[str] = None,
+    parent: Optional[str] = None,
+    keyword: Optional[str] = None,
+    only_problems: bool = False,
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """子系统树（subsystem → equipment_categories → device）三级懒加载。"""
+    problem_devices: set = set()
+    if only_problems:
+        for bp in db.query(BaProblem.device_code).filter(BaProblem.device_code.isnot(None)).all():
+            problem_devices.add(bp.device_code)
+    dev_name = {d.device_code: d.name for d in db.query(Device.device_code, Device.name).all()}
+
+    def dev_filter(codes: set) -> set:
+        out = set(codes)
+        if only_problems:
+            out &= problem_devices
+        if keyword:
+            out = {c for c in out if keyword in c or keyword in dev_name.get(c, "")}
+        return out
+
+    nodes = []
+    if not parent:
+        subs = db.query(Subsystem).order_by(Subsystem.sort_order, Subsystem.id).all()
+        if subsystem_code:
+            subs = [s for s in subs if s.code == subsystem_code]
+        for s in subs:
+            cnt = db.query(Device).filter(Device.subsystem_id == s.id, Device.is_active == True).count()
+            nodes.append({
+                "key": f"sub:{s.code}", "type": "subsystem", "label": s.name, "count": cnt,
+                "has_children": True, "meta": {"subsystem_code": s.code, "icon": s.icon},
+            })
+        return nodes
+
+    if parent.startswith("sub:"):
+        code = parent[4:]
+        cats = db.query(EquipmentCategory).filter(EquipmentCategory.subsystem_code == code).all()
+        for c in cats:
+            codes = set(dc for (dc,) in db.query(Device.device_code).filter(Device.category_id == c.id, Device.is_active == True).all())
+            for (dc,) in db.query(FixedAsset.device_code).filter(FixedAsset.asset_code == c.code).all():
+                codes.add(dc)
+            codes = dev_filter(codes)
+            if not codes:
+                continue
+            nodes.append({
+                "key": f"cat:{c.code}", "type": "category", "label": c.name or c.code, "count": len(codes),
+                "has_children": True, "meta": {"category_code": c.code, "subsystem_code": code},
+            })
+        # 未分类设备（属于该子系统但无 category）
+        sub = db.query(Subsystem).filter(Subsystem.code == code).first()
+        if sub:
+            uncat = set(dc for (dc,) in db.query(Device.device_code).filter(
+                Device.subsystem_id == sub.id, Device.category_id.is_(None), Device.is_active == True).all())
+            uncat = dev_filter(uncat)
+            if uncat:
+                nodes.append({
+                    "key": f"cat:_uncat_{code}", "type": "category", "label": "未分类", "count": len(uncat),
+                    "has_children": True, "meta": {"category_code": None, "subsystem_code": code},
+                })
+        return nodes
+
+    if parent.startswith("cat:"):
+        catkey = parent[4:]
+        devs = []
+        if catkey.startswith("_uncat_"):
+            code = catkey[len("_uncat_"):]
+            sub = db.query(Subsystem).filter(Subsystem.code == code).first()
+            if sub:
+                devs = db.query(Device).filter(Device.subsystem_id == sub.id, Device.category_id.is_(None), Device.is_active == True).all()
+        else:
+            cat = db.query(EquipmentCategory).filter(EquipmentCategory.code == catkey).first()
+            if cat:
+                devs = db.query(Device).filter(Device.category_id == cat.id, Device.is_active == True).all()
+                for fa in db.query(FixedAsset).filter(FixedAsset.asset_code == cat.code).all():
+                    d = db.query(Device).filter(Device.device_code == fa.device_code, Device.is_active == True).first()
+                    if d:
+                        devs.append(d)
+        for d in devs:
+            if only_problems and d.device_code not in problem_devices:
+                continue
+            if keyword and keyword not in d.device_code and keyword not in d.name:
+                continue
+            nodes.append({
+                "key": f"d:{d.device_code}", "type": "device", "label": d.name, "count": 0,
+                "has_children": False, "meta": {"device_code": d.device_code, "status": d.is_active},
+            })
+        return nodes
+
+    return nodes
+
+
+@router.get("/ba/problems")
+def ba_problems(
+    device_code: Optional[str] = None,
+    ba_system: Optional[str] = None,
+    status: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 50,
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """单（批）设备 BA 问题列表 + 汇总。"""
+    q = db.query(BaProblem)
+    if device_code:
+        q = q.filter(BaProblem.device_code == device_code)
+    if ba_system:
+        m = db.query(BaSystemMap).filter(
+            (BaSystemMap.ba_system == ba_system) | (BaSystemMap.code == ba_system)).first()
+        if m:
+            q = q.filter(BaProblem.ba_system_code == m.code)
+        else:
+            q = q.filter(BaProblem.ba_system == ba_system)
+    if status:
+        q = q.filter(BaProblem.status == status)
+    total = q.count()
+    items = q.order_by(BaProblem.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    summary = {
+        "total": total,
+        "open": db.query(BaProblem).filter(BaProblem.status == "open").count(),
+        "processing": db.query(BaProblem).filter(BaProblem.status == "processing").count(),
+        "closed": db.query(BaProblem).filter(BaProblem.status == "closed").count(),
+        "unclosed": total - db.query(BaProblem).filter(BaProblem.status == "closed").count(),
+    }
+    return {
+        "items": [{
+            "id": p.id, "ba_device_no": p.ba_device_no, "device_code": p.device_code,
+            "ba_system": p.ba_system, "ba_system_code": p.ba_system_code,
+            "problem_type": p.problem_type, "group_area": p.group_area,
+            "location": p.location, "status": p.status,
+        } for p in items],
+        "total": total, "page": page, "page_size": page_size, "summary": summary,
+    }
+
+
+@router.get("/ba/overview")
+def ba_overview(
+    ba_system: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """BA 设备总览统计：[{ba_system,total,normal,problem,problem_rate}]。"""
+    maps = db.query(BaSystemMap).order_by(BaSystemMap.code).all()
+    if ba_system:
+        maps = [m for m in maps if m.code == ba_system or m.ba_system == ba_system]
+    result = []
+    for m in maps:
+        total = db.query(DeviceArchive).filter(
+            DeviceArchive.system_text == m.ba_system, DeviceArchive.is_active_del == True).count()
+        problem = db.query(BaProblem).filter(BaProblem.ba_system_code == m.code).count()
+        normal = max(total - problem, 0)
+        rate = round(problem / total, 4) if total else 0
+        result.append({
+            "ba_system": m.ba_system, "ba_system_code": m.code,
+            "subsystem_code": m.subsystem_code,
+            "total": total, "normal": normal, "problem": problem, "problem_rate": rate,
+        })
+    return result
+
+
+@router.get("/stats/by-subsystem-area")
+def stats_by_subsystem_area(
+    subsystem_code: Optional[str] = None,
+    area: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """子系统×区域交叉计数矩阵：{rows:[{subsystem,area,count,amount}]}。"""
+    subs = {s.id: (s.name, s.code) for s in db.query(Subsystem).all()}
+    fa_map = {fa.device_code: fa for fa in db.query(FixedAsset).all()}
+    da_map = {da.device_code: da for da in db.query(DeviceArchive).all()}
+    agg: Dict[tuple, Dict[str, float]] = {}
+    for d in db.query(Device).filter(Device.is_active == True).all():
+        sname, scode = subs.get(d.subsystem_id, ("未归类", ""))
+        bld = d.building
+        if not bld:
+            da = da_map.get(d.device_code)
+            if da and da.building:
+                bld = da.building
+        a = _classify_area(bld)
+        if area and area not in a and area not in (bld or ""):
+            continue
+        if subsystem_code and scode != subsystem_code:
+            continue
+        amount = 0.0
+        fa = fa_map.get(d.device_code)
+        if fa and fa.price_tax is not None:
+            amount += float(fa.price_tax)
+        da = da_map.get(d.device_code)
+        if da and da.net_value is not None:
+            amount += float(da.net_value)
+        key = (sname, a)
+        agg.setdefault(key, {"count": 0, "amount": 0.0})
+        agg[key]["count"] += 1
+        agg[key]["amount"] += amount
+    rows = [{"subsystem": s, "area": a, "count": v["count"], "amount": round(v["amount"], 2)}
+            for (s, a), v in agg.items()]
+    rows.sort(key=lambda x: (x["subsystem"], x["area"]))
+    return {"rows": rows}
 
 
 # ========================= 种子数据 =========================
@@ -506,15 +958,40 @@ def seed_assets(db: Session):
     已确认决策（2026-07-12）：子系统扩至 7 个（补充给排水 water / 暖通 hvac）。
     重复执行安全：各实体均按唯一键 get_or_create，不会重复写入。
     """
-    # ---- 子系统（7 个，幂等）----
+    # ---- 子系统（7 个，幂等；历史 refriger→hvac 合并，补齐 other）----
+    # 历史兼容：若库中存在旧 code "refrig"，将其引用合并到 hvac（暖通）后删除，保证 7 码齐全。
+    _refrig = db.query(Subsystem).filter(Subsystem.code == "refrig").first()
+    _hvac = db.query(Subsystem).filter(Subsystem.code == "hvac").first()
+    if _refrig is not None:
+        if _hvac is None:
+            _refrig.code = "hvac"
+            _refrig.name = "暖通系统"
+            _refrig.icon = "Fan"
+            _refrig.sort_order = 3
+            db.commit(); db.refresh(_refrig)
+            _hvac = _refrig
+        else:
+            db.execute(sa_text(
+                "UPDATE devices SET subsystem_id = :hvac WHERE subsystem_id = :refrig"),
+                {"hvac": _hvac.id, "refrig": _refrig.id})
+            db.execute(sa_text(
+                "UPDATE data_tables SET subsystem_id = :hvac WHERE subsystem_id = :refrig"),
+                {"hvac": _hvac.id, "refrig": _refrig.id})
+            db.execute(sa_text(
+                "UPDATE device_relations SET subsystem_id = :hvac WHERE subsystem_id = :refrig"),
+                {"hvac": _hvac.id, "refrig": _refrig.id})
+            db.delete(_refrig)
+            db.commit()
+            _hvac = db.query(Subsystem).filter(Subsystem.code == "hvac").first()
+
     subs_def = {
         "power": ("电力系统", "Zap", 1),
-        "fire": ("消防系统", "Flame", 2),
-        "weak": ("弱电系统", "Cable", 3),
-        "refrig": ("制冷系统", "Snowflake", 4),
-        "lighting": ("照明系统", "Lightbulb", 5),
-        "water": ("给排水系统", "Droplets", 6),
-        "hvac": ("暖通系统", "Fan", 7),
+        "water": ("给排水系统", "Droplets", 2),
+        "hvac": ("暖通系统", "Fan", 3),
+        "weak": ("弱电系统", "Cable", 4),
+        "fire": ("消防系统", "Flame", 5),
+        "lighting": ("照明系统", "Lightbulb", 6),
+        "other": ("其他系统", "Circle", 7),
     }
     subs = {}
     for code, (name, icon, so) in subs_def.items():
@@ -572,14 +1049,14 @@ def seed_assets(db: Session):
         ("incoming", "进线方式", "text", [], False, False),
     ])
     # 制冷系统
-    t_ahu = add_table("refrig", "ahu", "空调风柜", [
+    t_ahu = add_table("hvac", "ahu", "空调风柜", [
         ("ahu_code", "风柜编号", "device_ref", [], True, True),
         ("cooling_capacity", "制冷量", "text", [], False, False),
         ("air_volume", "送风量", "text", [], False, False),
         ("supply_distance", "送风距离", "text", [], False, False),
         ("pipe_length", "管路长度", "text", [], False, False),
     ])
-    t_chiller = add_table("refrig", "chillers", "冷水机组", [
+    t_chiller = add_table("hvac", "chillers", "冷水机组", [
         ("chiller_code", "机组编号", "device_ref", [], True, True),
         ("capacity", "制冷量", "text", [], False, False),
     ])
@@ -828,5 +1305,252 @@ def seed_assets(db: Session):
     add_record_if_empty(t_cam, {"cam_code": "CAM-1F-01", "resolution": "4MP", "location": "1F大厅"}, "CAM-1F-01")
     add_record_if_empty(t_water, {"water_code": "WP-1F-01", "equip_type": "给水泵", "spec": "Q=20m³/h H=32m", "location": "1F水泵房"}, "WP-1F-01")
     add_record_if_empty(t_hvac, {"hvac_code": "FCU-3F-01", "equip_type": "风机盘管", "capacity": "3.5kW", "location": "3F-A区"}, "FCU-3F-01")
+    # ---- BA 子系统映射字典（7 行，幂等；一氧化碳检测/管廊气体监测 → weak）----
+    ba_map_def = [
+        ("ba_vrv", "VRV空调", "hvac", "空调类"),
+        ("ba_integrated_ac", "一体化空调", "hvac", "空调类"),
+        ("ba_co_detect", "一氧化碳检测", "weak", "气体监测传感器"),
+        ("ba_muni_exhaust", "市政排风", "hvac", "通风"),
+        ("ba_sub_pump", "潜污泵", "water", "水泵类"),
+        ("ba_exhaust_fan", "排风机", "hvac", "通风"),
+        ("ba_tunnel_gas", "管廊气体监测", "weak", "气体监测"),
+    ]
+    for code, name, sub_code, remark in ba_map_def:
+        m = db.query(BaSystemMap).filter(BaSystemMap.code == code).first()
+        if not m:
+            m = BaSystemMap(code=code, ba_system=name, subsystem_code=sub_code, remark=remark)
+            db.add(m)
+    db.commit()
+
     print("[初始化] 分系统资料管理种子数据已就绪（7 子系统 / 10 设备 / 7 关联 / 11 示范记录；"
-          "另含 10 张真实台账表：电柜清单/机房信息/BA-VRV/一体化空调/排风机/市政排风/潜污泵/CO检测/管廊气体/问题清单，幂等）")
+          "另含 10 张真实台账表：电柜清单/机房信息/BA-VRV/一体化空调/排风机/市政排风/潜污泵/CO检测/管廊气体/问题清单；"
+          "BA 子系统映射 7 行，幂等）")
+
+
+# ========================= P1：资产可视化接口（增量） =========================
+# 全部挂载在 /assets 下（即 /ops/api/assets），与 P0 接口零冲突，风格对齐 P0。
+
+@router.get("/trees/device")
+def tree_device(
+    parent: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """设备层级树（主设备 → 配件子树 / 配件从属子设备，逐级懒加载）。
+
+    节点结构对齐 P0：{key,type:device|accessory,label,count,has_children,meta}。
+    - 无 parent：返回「按子系统分组」的顶层主设备入口（每个子系统一个分组节点，
+        meta.is_group=true，count=该子系统下主设备数）。这样根层仅个位数节点，
+        避免万级设备平铺。root 口径（见 meta.root_criterion）：
+        active 设备且未作为任何 `device_relations(relation_type='配件从属')` 的
+        to_code 者即主设备；配件(DeviceAccessory)恒为叶节点。
+    - parent=`g:<subsystem_code>`：返回该子系统下的主设备列表（type:device, is_root=true）。
+    - parent=`d:<device_code>`：返回该设备的
+        (1) 配件子树（device_accessories，叶节点 type:accessory），
+        (2) 经 `device_relations(relation_type='配件从属')` 关联的子设备
+            （type:device，可继续递归下钻）。
+    """
+    dev_name = {d.device_code: d.name for d in db.query(Device.device_code, Device.name).all()}
+    subs = {s.id: s for s in db.query(Subsystem).order_by(Subsystem.sort_order, Subsystem.id).all()}
+
+    def child_device_codes(code: str) -> List[str]:
+        """该设备经「配件从属」关系指向的子设备编号列表（去重保序）。"""
+        seen: set = set()
+        out: List[str] = []
+        for (tc,) in db.query(DeviceRelation.to_code).filter(
+            DeviceRelation.from_code == code,
+            DeviceRelation.relation_type == "配件从属",
+        ).all():
+            if tc not in seen:
+                seen.add(tc)
+                out.append(tc)
+        return out
+
+    def device_node(code: str, relation_type: Optional[str] = None, is_root: bool = False) -> Dict[str, Any]:
+        kids = child_device_codes(code)
+        acc_count = db.query(DeviceAccessory).filter(
+            DeviceAccessory.parent_device_code == code).count()
+        has = bool(kids) or acc_count > 0
+        meta: Dict[str, Any] = {
+            "device_code": code,
+            "has_accessory": acc_count > 0,
+            "sub_device_count": len(kids),
+            "is_root": is_root,
+        }
+        if relation_type:
+            meta["relation_type"] = relation_type
+        if is_root:
+            meta["root_criterion"] = (
+                "未作为任何「配件从属」关系的子设备(to_code)，即顶层主设备；"
+                "配件(DeviceAccessory)恒为叶节点，不计入 root。"
+            )
+        return {
+            "key": f"d:{code}", "type": "device",
+            "label": dev_name.get(code, code),
+            "count": acc_count, "has_children": has, "meta": meta,
+        }
+
+    def accessory_node(a: "DeviceAccessory") -> Dict[str, Any]:
+        return {
+            "key": f"acc:{a.id}", "type": "accessory",
+            "label": a.name or f"配件#{a.id}",
+            "count": 0, "has_children": False,
+            "meta": {
+                "accessory_id": a.id,
+                "parent_device_code": a.parent_device_code,
+                "name": a.name, "brand": a.brand, "spec": a.spec,
+                "qty": a.qty, "unit": a.unit, "status_name": a.status_name,
+            },
+        }
+
+    nodes: List[Dict[str, Any]] = []
+
+    # 「主设备」集合：active 且未作为「配件从属」关系 to_code 的设备
+    sub_codes: set = set()
+    for (tc,) in db.query(DeviceRelation.to_code).filter(
+        DeviceRelation.relation_type == "配件从属").all():
+        sub_codes.add(tc)
+
+    if not parent:
+        count_by_sub: Dict[int, int] = {}
+        for d in db.query(Device).filter(Device.is_active == True).all():
+            if d.device_code in sub_codes:
+                continue
+            count_by_sub[d.subsystem_id] = count_by_sub.get(d.subsystem_id, 0) + 1
+        for s in subs.values():
+            cnt = count_by_sub.get(s.id, 0)
+            if cnt == 0:
+                continue
+            nodes.append({
+                "key": f"g:{s.code}", "type": "device", "label": s.name,
+                "count": cnt, "has_children": True,
+                "meta": {
+                    "is_group": True, "subsystem_code": s.code,
+                    "root_criterion": (
+                        "按子系统分组后的主设备入口；主设备=active 且未作为任何"
+                        "「配件从属」关系 to_code 的设备；点击展开该子系统主设备列表。"
+                    ),
+                },
+            })
+        return nodes
+
+    if parent.startswith("g:"):
+        code = parent[2:]
+        sub = db.query(Subsystem).filter(Subsystem.code == code).first()
+        if not sub:
+            return []
+        q = db.query(Device).filter(
+            Device.subsystem_id == sub.id, Device.is_active == True)
+        if sub_codes:
+            q = q.filter(Device.device_code.notin_(sub_codes))
+        for d in q.order_by(Device.device_code).all():
+            nodes.append(device_node(d.device_code, is_root=True))
+        return nodes
+
+    if parent.startswith("d:"):
+        code = parent[2:]
+        for a in db.query(DeviceAccessory).filter(
+            DeviceAccessory.parent_device_code == code).all():
+            nodes.append(accessory_node(a))
+        for cc in child_device_codes(code):
+            nodes.append(device_node(cc))
+        return nodes
+
+    return nodes
+
+
+@router.get("/trees/ba")
+def tree_ba(
+    parent: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """BA 系统树（BA 系统 → 设备，逐级懒加载）。
+
+    节点结构对齐 P0：{key,type:ba_system|ba_device,label,count,has_children,meta}。
+    - 无 parent：返回 7 个 BA 系统（来自 ba_system_map），
+        meta 含 ba_system_code / subsystem_code / 设备总数 / 问题数。
+    - parent=`ba:<ba_system_code>`：返回该系统下设备
+        （device_archives.system_text 命中该系统中文名），
+        每节点带 problem_count（来自 ba_problems），type:ba_device，
+        点击在终端页面打开 DeviceDetailDrawer。
+    """
+    if not parent:
+        nodes: List[Dict[str, Any]] = []
+        for m in db.query(BaSystemMap).order_by(BaSystemMap.code).all():
+            total = db.query(DeviceArchive).filter(
+                DeviceArchive.system_text == m.ba_system,
+                DeviceArchive.is_active_del == True).count()
+            problem = db.query(BaProblem).filter(
+                BaProblem.ba_system_code == m.code).count()
+            nodes.append({
+                "key": f"ba:{m.code}", "type": "ba_system", "label": m.ba_system,
+                "count": total, "has_children": True,
+                "meta": {
+                    "ba_system_code": m.code,
+                    "subsystem_code": m.subsystem_code,
+                    "device_count": total,
+                    "problem_count": problem,
+                },
+            })
+        return nodes
+
+    if parent.startswith("ba:"):
+        code = parent[3:]
+        m = db.query(BaSystemMap).filter(BaSystemMap.code == code).first()
+        if not m:
+            return []
+        nodes = []
+        for da in db.query(DeviceArchive).filter(
+            DeviceArchive.system_text == m.ba_system,
+            DeviceArchive.is_active_del == True,
+        ).order_by(DeviceArchive.device_code).all():
+            pc = db.query(BaProblem).filter(
+                BaProblem.device_code == da.device_code).count()
+            nodes.append({
+                "key": f"ba_dev:{da.device_code}", "type": "ba_device",
+                "label": da.asset_name or da.old_name or da.device_code,
+                "count": pc, "has_children": False,
+                "meta": {
+                    "device_code": da.device_code,
+                    "ba_system_code": code,
+                    "problem_count": pc,
+                },
+            })
+        return nodes
+
+    return []
+
+
+@router.get("/import-batches")
+def list_import_batches(
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """导入批次列表（按 created_at 倒序）。表为空返回 []（不 500）。
+
+    响应字段对齐前端约定：
+        id / batch_name / source_type / file_count / row_count / status / started_at / finished_at
+    说明：import_batches 模型仅存 file_name / segment_name / subsystem_hint / area_hint /
+        row_count / status / created_at，故按以下口径回填：
+        - batch_name   ← file_name（缺省取 segment_name）
+        - source_type  ← subsystem_hint（缺省取 area_hint）
+        - file_count   ← 1（设计约定：每文件 = 1 条批次）
+        - started/finished_at ← created_at（导入为同步过程）
+    """
+    rows = db.query(ImportBatch).order_by(ImportBatch.created_at.desc()).all()
+    result: List[Dict[str, Any]] = []
+    for b in rows:
+        started = _date_to_str(b.created_at)
+        batch_name = b.file_name or b.segment_name or f"批次#{b.id}"
+        result.append({
+            "id": b.id,
+            "batch_name": batch_name,
+            "source_type": b.subsystem_hint or b.area_hint or "unknown",
+            "file_count": b.file_count or 1,
+            "row_count": b.row_count or 0,
+            "status": b.status or "done",
+            "started_at": started,
+            "finished_at": started,
+        })
+    return result

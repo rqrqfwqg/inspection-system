@@ -186,6 +186,13 @@ class SearchResult(BaseModel):
     edges: List[Dict[str, Any]] = []       # {from,to,type,subsystem_code}
     groups: List[Dict[str, Any]] = []      # [{subsystem_code,subsystem_name,tables:[{table_id,table_code,table_name,records:[...]}]}]
     total_records: int = 0
+    # ===== 扩展聚合（可视化设计 C.5）：任一编号 → canonical 后聚合 =====
+    fixed_asset: Optional[Dict[str, Any]] = None     # 固定资产财务块
+    archive: Optional[Dict[str, Any]] = None         # 设备档案块
+    accessories: List[Dict[str, Any]] = []            # 配件列表
+    room: Optional[Dict[str, Any]] = None            # 所属机房 {room_code,room_name,building,floor}
+    problems: List[Dict[str, Any]] = []              # BA 问题列表
+    aliases: List[Dict[str, Any]] = []               # 编号别名溯源
 
 
 # ==================== 批量建记录（Excel 导入后端落库用） ====================

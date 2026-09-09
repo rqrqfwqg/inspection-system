@@ -12,6 +12,7 @@ import AssetSearchPage from '@/pages/asset/AssetSearchPage'
 import AssetLedgerPage from '@/pages/asset/AssetLedgerPage'
 import DeviceLedgerPage from '@/pages/asset/DeviceLedgerPage'
 import AssetSettingsPage from '@/pages/asset/AssetSettingsPage'
+import AssetsLayout from '@/features/assets/AssetsLayout'
 import MainLayout from '@/components/layout/MainLayout'
 
 function AppRoutes() {
@@ -31,6 +32,7 @@ function AppRoutes() {
         <Route path="asset/ledger" element={<AssetLedgerPage />} />
         <Route path="asset/devices" element={<DeviceLedgerPage />} />
         <Route path="asset/settings" element={<AssetSettingsPage />} />
+        <Route path="asset-viz" element={<AssetsLayout />} />
       </Route>
 
       {/* 404 → 首页 */}
