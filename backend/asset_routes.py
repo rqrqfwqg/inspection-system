@@ -31,6 +31,7 @@ from asset_schemas import (
     RelationTypeResponse,
     BulkRecordCreate, BulkRecordItem,
     SearchResult, DevicePhotoResponse,
+    TransferMappingItem, TransferMappingResponse, RecordTransferRequest,
 )
 # 鉴权统一收口到 dependencies（消除与 main.py 的重复实现）
 from dependencies import get_current_user as _get_current_user, require_admin as _require_admin
@@ -793,6 +794,271 @@ def bulk_create_records(tid: int, payload: BulkRecordCreate,
         created += 1
     db.commit()
     return {"success": True, "created": created, "skipped": skipped}
+
+
+# ========================= 记录跨表转移（字段映射） =========================
+# 背景：早期按关键词分类时有部分设备被分错子系统，需要把记录整批挪到正确的资料表；
+# 两张表的字段定义往往不一致，故引入"字段映射"：自动给建议 + 人工可改 + 未映射字段三种处置策略。
+
+_GENERIC_SUFFIXES = ("编号", "代码", "编码", "名称", "型号", "类型", "号", "no", "code", "id")
+
+
+def _norm_label(s: str) -> str:
+    """字段名称归一化：去括号内容/空白分隔符，并剥离"编号/代码/名称"等通用后缀。
+
+    例：『设备编号』/『设备代码』→ 设备；『资产名称（必填）』→ 资产。
+    """
+    import re as _re
+    s = (s or "").strip().lower()
+    s = _re.sub(r"[（(].*?[)）]", "", s)
+    s = _re.sub(r"[\s_\-/\.]", "", s)
+    for suf in _GENERIC_SUFFIXES:
+        if s.endswith(suf) and len(s) > len(suf):
+            s = s[: -len(suf)]
+            break
+    return s
+
+
+def _types_compatible(a: Optional[str], b: Optional[str]) -> bool:
+    if a == b:
+        return True
+    if (a or "") in ("image", "photo") or (b or "") in ("image", "photo"):
+        return False
+    return True
+
+
+def _suggest_mapping(src_fields: List[FieldDef], tgt_fields: List[FieldDef]) -> List[TransferMappingItem]:
+    """源表字段 → 目标表字段 的自动映射建议（贪心，按分数取最优且目标字段不重复占用）。"""
+    src_type_count: Dict[str, int] = {}
+    for f in src_fields:
+        src_type_count[f.type or ""] = src_type_count.get(f.type or "", 0) + 1
+    tgt_type_count: Dict[str, int] = {}
+    for f in tgt_fields:
+        tgt_type_count[f.type or ""] = tgt_type_count.get(f.type or "", 0) + 1
+
+    used: set = set()
+    items: List[TransferMappingItem] = []
+    # 关联键优先匹配（它是记录主键，命中率直接影响能否转移成功）
+    ordered = sorted(src_fields, key=lambda f: (not f.is_relation_key, f.sort_order or 0, f.id or 0))
+
+    for sf in ordered:
+        best_tf = None
+        best: tuple = (0, "none", "")
+        for tf in tgt_fields:
+            if tf.key in used:
+                continue
+            if sf.key == tf.key:
+                cand = (100, "exact_key", "字段名相同")
+            elif sf.label == tf.label:
+                cand = (95, "exact_label", "字段名称相同")
+            else:
+                ns, nt = _norm_label(sf.label), _norm_label(tf.label)
+                if ns and ns == nt:
+                    cand = (80, "normalized", "名称归一后相同")
+                elif sf.is_relation_key and tf.is_relation_key:
+                    cand = (70, "relation_key", "两侧均为关联键（设备编号）")
+                elif len(ns) >= 2 and len(nt) >= 2 and (ns in nt or nt in ns) and _types_compatible(sf.type, tf.type):
+                    cand = (60, "contains", "名称包含关系")
+                elif (sf.type == tf.type
+                      and src_type_count.get(sf.type or "", 0) == 1
+                      and tgt_type_count.get(tf.type or "", 0) == 1):
+                    cand = (45, "type_only", "字段类型相同且两侧唯一")
+                else:
+                    continue
+            if cand[0] > best[0]:
+                best, best_tf = cand, tf
+
+        if best_tf is not None and best[0] > 0:
+            used.add(best_tf.key)
+            items.append(TransferMappingItem(
+                source_key=sf.key, source_label=sf.label, source_type=sf.type,
+                target_key=best_tf.key, target_label=best_tf.label,
+                confidence=best[1], score=best[0], reason=best[2],
+            ))
+        else:
+            items.append(TransferMappingItem(
+                source_key=sf.key, source_label=sf.label, source_type=sf.type,
+                target_key=None, target_label=None,
+                confidence="none", score=0, reason="未找到匹配字段",
+            ))
+    return items
+
+
+@router.get("/tables/{tid}/transfer-mapping", response_model=TransferMappingResponse)
+def get_transfer_mapping(tid: int, target_table_id: int,
+                         db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """计算两张资料表之间的字段映射建议（只读，不改数据）。"""
+    src = db.query(DataTable).filter(DataTable.id == tid).first()
+    if not src:
+        raise HTTPException(status_code=404, detail="源资料表不存在")
+    tgt = db.query(DataTable).filter(DataTable.id == target_table_id).first()
+    if not tgt:
+        raise HTTPException(status_code=404, detail="目标资料表不存在")
+
+    src_fields = db.query(FieldDef).filter(FieldDef.table_id == src.id).order_by(FieldDef.sort_order, FieldDef.id).all()
+    tgt_fields = db.query(FieldDef).filter(FieldDef.table_id == tgt.id).order_by(FieldDef.sort_order, FieldDef.id).all()
+
+    matches = _suggest_mapping(src_fields, tgt_fields)
+    matched_src = {m.source_key for m in matches if m.target_key}
+    used_tgt = {m.target_key for m in matches if m.target_key}
+
+    unmapped_sources = [
+        {"key": f.key, "label": f.label, "type": f.type, "required": bool(f.is_required)}
+        for f in src_fields if f.key not in matched_src
+    ]
+    unfilled_targets = [
+        {"key": f.key, "label": f.label, "type": f.type, "required": bool(f.is_required)}
+        for f in tgt_fields if f.key not in used_tgt
+    ]
+    remark_candidates = [
+        {"key": f.key, "label": f.label}
+        for f in tgt_fields if (f.type or "") in ("text", "textarea")
+    ]
+
+    return TransferMappingResponse(
+        source_table={"id": src.id, "name": src.name, "code": src.code, "subsystem_id": src.subsystem_id},
+        target_table={"id": tgt.id, "name": tgt.name, "code": tgt.code, "subsystem_id": tgt.subsystem_id},
+        matches=matches,
+        unmapped_sources=unmapped_sources,
+        unfilled_targets=unfilled_targets,
+        remark_candidates=remark_candidates,
+    )
+
+
+@router.post("/tables/{tid}/records/transfer", response_model=Dict[str, Any])
+def transfer_records(tid: int, payload: RecordTransferRequest,
+                     db: Session = Depends(get_db), current_user: User = Depends(_get_current_user)):
+    """把选中记录按字段映射转移到目标表（支持批量、dry_run 预览）。
+
+    - mode=move 会删除源记录；copy 保留源记录
+    - unmapped_policy: drop 丢弃 / remark 合并写入指定文本字段 / extra 存入 _extra 保留
+    - on_conflict: 目标表已存在同 device_code 时 skip 跳过 / update 覆盖 / duplicate 仍新建
+    """
+    src = db.query(DataTable).filter(DataTable.id == tid).first()
+    if not src:
+        raise HTTPException(status_code=404, detail="源资料表不存在")
+    tgt = db.query(DataTable).filter(DataTable.id == payload.target_table_id).first()
+    if not tgt:
+        raise HTTPException(status_code=404, detail="目标资料表不存在")
+    if src.id == tgt.id:
+        raise HTTPException(status_code=400, detail="源表与目标表不能是同一张")
+    if payload.mode not in ("move", "copy"):
+        raise HTTPException(status_code=400, detail="mode 只能是 move 或 copy")
+    if payload.unmapped_policy not in ("drop", "remark", "extra"):
+        raise HTTPException(status_code=400, detail="unmapped_policy 只能是 drop/remark/extra")
+    if payload.on_conflict not in ("skip", "update", "duplicate"):
+        raise HTTPException(status_code=400, detail="on_conflict 只能是 skip/update/duplicate")
+
+    src_fields = db.query(FieldDef).filter(FieldDef.table_id == src.id).all()
+    tgt_fields = db.query(FieldDef).filter(FieldDef.table_id == tgt.id).all()
+    src_by_key = {f.key: f for f in src_fields}
+    tgt_by_key = {f.key: f for f in tgt_fields}
+    rel_tgt = next((f for f in tgt_fields if f.is_relation_key), None)
+
+    bad = sorted({v for v in payload.mapping.values() if v and v not in tgt_by_key})
+    if bad:
+        raise HTTPException(status_code=400, detail=f"目标表不存在字段：{'、'.join(bad)}")
+    if payload.unmapped_policy == "remark" and not payload.remark_target_key:
+        raise HTTPException(status_code=400, detail="选择了合并到备注策略，但未指定目标字段")
+
+    if not payload.record_ids:
+        raise HTTPException(status_code=400, detail="未选择要转移的记录")
+
+    recs = db.query(Record).filter(Record.id.in_(payload.record_ids), Record.table_id == src.id).all()
+    now = datetime.now(timezone.utc)
+    stats = {"created": 0, "updated": 0, "moved": 0, "skipped": 0, "conflicts": 0}
+    skipped: List[Dict[str, Any]] = []
+
+    for rec in recs:
+        data = rec.data or {}
+        new_data: Dict[str, Any] = {}
+
+        for skey, tkey in payload.mapping.items():
+            if not tkey:
+                continue
+            v = data.get(skey)
+            if v is None or v == "":
+                continue
+            new_data[tkey] = v
+
+        # 未映射字段的处置
+        unmapped = {k: v for k, v in data.items()
+                    if (k not in payload.mapping or not payload.mapping.get(k))
+                    and v not in (None, "")}
+        if unmapped and payload.unmapped_policy == "remark" and payload.remark_target_key in tgt_by_key:
+            parts = [f"{src_by_key.get(k).label if src_by_key.get(k) else k}: {v}" for k, v in unmapped.items()]
+            extra_text = "；".join(parts)
+            rkey = payload.remark_target_key
+            new_data[rkey] = f"{new_data[rkey]}；{extra_text}" if new_data.get(rkey) else extra_text
+        elif unmapped and payload.unmapped_policy == "extra":
+            new_data["_extra"] = unmapped
+
+        # 目标表必填字段缺失 → 跳过（避免产生半截数据）
+        missing = [f.label for f in tgt_fields if f.is_required and not new_data.get(f.key)]
+        if missing:
+            stats["skipped"] += 1
+            skipped.append({"record_id": rec.id, "device_code": rec.device_code,
+                            "reason": f"目标必填字段缺失：{'、'.join(missing)}"})
+            continue
+
+        dc = ""
+        if rel_tgt and new_data.get(rel_tgt.key):
+            dc = str(new_data[rel_tgt.key])
+        if not dc:
+            dc = rec.device_code or ""
+        if not dc:
+            stats["skipped"] += 1
+            skipped.append({"record_id": rec.id, "device_code": "", "reason": "缺少设备编号（关联键）"})
+            continue
+
+        exist = db.query(Record).filter(Record.table_id == tgt.id, Record.device_code == dc).first()
+        if exist and payload.on_conflict == "skip":
+            stats["skipped"] += 1
+            stats["conflicts"] += 1
+            skipped.append({"record_id": rec.id, "device_code": dc, "reason": "目标表已存在同编号记录"})
+            continue
+
+        if payload.dry_run:
+            if exist:
+                stats["updated"] += 1
+                stats["conflicts"] += 1
+            else:
+                stats["created"] += 1
+            if payload.mode == "move":
+                stats["moved"] += 1
+            continue
+
+        if exist and payload.on_conflict == "update":
+            merged = dict(exist.data or {})
+            merged.update(new_data)
+            exist.data = merged
+            exist.updated_at = now
+            stats["updated"] += 1
+        else:
+            db.add(Record(table_id=tgt.id, device_code=dc, data=new_data,
+                          created_by=current_user.name))
+            stats["created"] += 1
+
+        if payload.mode == "move":
+            db.delete(rec)
+            stats["moved"] += 1
+
+    if not payload.dry_run:
+        db.commit()
+
+    return {
+        "success": True,
+        "dry_run": payload.dry_run,
+        "total": len(recs),
+        "created": stats["created"],
+        "updated": stats["updated"],
+        "moved": stats["moved"],
+        "skipped": stats["skipped"],
+        "conflicts": stats["conflicts"],
+        "skipped_details": skipped[:20],   # 只回传前 20 条明细，避免大响应
+        "source_table_id": src.id,
+        "target_table_id": tgt.id,
+    }
 
 
 # ========================= 核心：设备全局检索 =========================

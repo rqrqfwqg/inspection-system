@@ -154,6 +154,40 @@ class RecordResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# ---------- 记录跨表转移（字段映射） ----------
+
+class TransferMappingItem(BaseModel):
+    source_key: str
+    source_label: str
+    source_type: Optional[str] = None
+    target_key: Optional[str] = None
+    target_label: Optional[str] = None
+    confidence: str = "none"        # exact_key|exact_label|normalized|contains|type_only|none
+    score: int = 0
+    reason: str = ""
+
+class TransferMappingResponse(BaseModel):
+    source_table: Dict[str, Any]
+    target_table: Dict[str, Any]
+    matches: List[TransferMappingItem] = []
+    # 源表有、但自动匹配没落到目标字段的（前端可手工指定或按策略处理）
+    unmapped_sources: List[Dict[str, Any]] = []
+    # 目标表有、但源表没有对应字段的（必填的需重点提示）
+    unfilled_targets: List[Dict[str, Any]] = []
+    # 目标表中可接收"未映射内容"的长文本字段（备注类）
+    remark_candidates: List[Dict[str, Any]] = []
+
+class RecordTransferRequest(BaseModel):
+    target_table_id: int
+    record_ids: List[int]
+    mapping: Dict[str, Optional[str]] = {}      # {源字段key: 目标字段key|null}
+    unmapped_policy: str = "extra"              # drop|remark|extra
+    remark_target_key: Optional[str] = None     # policy=remark 时写入的目标字段
+    mode: str = "move"                          # move|copy
+    on_conflict: str = "skip"                   # skip|update|duplicate（目标表已存在同编号时）
+    dry_run: bool = False                       # 只算不写，用于前端预览
+
+
 # ==================== 设备关联 ====================
 
 class DeviceRelationBase(BaseModel):

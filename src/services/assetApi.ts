@@ -19,6 +19,9 @@ import type {
   RecordPayload,
   RecordUpdatePayload,
   BulkRecordItem,
+  TransferMapping,
+  TransferPayload,
+  TransferResult,
   DeviceRelation,
   DeviceRelationPayload,
   DeviceRelationUpdatePayload,
@@ -91,6 +94,16 @@ class AssetApiService {
   }
   bulkCreateRecords(tableId: number, records: BulkRecordItem[]) {
     return api.post<BulkResult>(`${BASE}/tables/${tableId}/records/bulk`, { records })
+  }
+
+  // ==================== 记录跨表转移（字段映射） ====================
+  getTransferMapping(sourceTableId: number, targetTableId: number) {
+    return api.get<TransferMapping>(
+      `${BASE}/tables/${sourceTableId}/transfer-mapping?target_table_id=${targetTableId}`,
+    )
+  }
+  transferRecords(sourceTableId: number, payload: TransferPayload) {
+    return api.post<TransferResult>(`${BASE}/tables/${sourceTableId}/records/transfer`, payload)
   }
 
   // ==================== 设备台账 ====================

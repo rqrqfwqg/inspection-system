@@ -3,6 +3,8 @@ import type { Subsystem, DataTable, FieldDef, RecordItem } from '@/types/asset'
 import { assetApi } from '@/services/assetApi'
 import DynamicRecordTable from '@/components/asset/DynamicRecordTable'
 import RecordEditDialog from '@/components/asset/RecordEditDialog'
+import RecordTransferDialog from '@/components/asset/RecordTransferDialog'
+import type { TransferResult } from '@/types/asset'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -25,6 +27,7 @@ import {
   Table2,
   Layers,
   PencilLine,
+  ArrowRightLeft,
 } from 'lucide-react'
 
 /**
@@ -56,6 +59,13 @@ export default function AssetLedgerPage() {
   const [edit, setEdit] = useState<RecordItem | null | undefined>(undefined)
   const [importing, setImporting] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+
+  // 跨表转移（单行 or 批量）
+  const [selectedIds, setSelectedIds] = useState<number[]>([])
+  const [transferIds, setTransferIds] = useState<number[]>([])
+  const [transferOpen, setTransferOpen] = useState(false)
+  // 单表内行级搜索：便于从大量记录里挑出分错系统的那些
+  const [rowQ, setRowQ] = useState('')
 
   useEffect(() => {
     let cancelled = false
@@ -117,6 +127,7 @@ export default function AssetLedgerPage() {
     setEdit(undefined)
     setRecords([])
     setFields([])
+    setSelectedIds([])
     void loadRecords(tid)
   }
 
@@ -125,6 +136,27 @@ export default function AssetLedgerPage() {
     setEdit(undefined)
     setRecords([])
     setFields([])
+    setSelectedIds([])
+  }
+
+  const openTransfer = (ids: number[]) => {
+    if (ids.length === 0) {
+      toast({ title: '请先勾选要转移的记录', variant: 'destructive' })
+      return
+    }
+    setTransferIds(ids)
+    setTransferOpen(true)
+  }
+
+  const handleTransferred = (res: TransferResult) => {
+    setSelectedIds([])
+    setTransferIds([])
+    // 记录数变化 → 顺带刷新表目录（概览卡片的记录数）
+    void assetApi.listTables().then(setTables).catch(() => {})
+    if (tableId) void loadRecords(tableId)
+    if (res.moved > 0) {
+      toast({ title: `已移动 ${res.moved} 条`, description: '原表记录已移除' })
+    }
   }
 
   const handleDeleteRecord = async (r: RecordItem) => {
@@ -186,6 +218,16 @@ export default function AssetLedgerPage() {
   }
 
   const relationField = fields.find((f) => f.is_relation_key)
+
+  // 行级过滤（按任意字段值或设备编号）
+  const visibleRecords = useMemo(() => {
+    const kw = rowQ.trim().toLowerCase()
+    if (!kw) return records
+    return records.filter((r) => {
+      if ((r.device_code || '').toLowerCase().includes(kw)) return true
+      return Object.values(r.data || {}).some((v) => String(v ?? '').toLowerCase().includes(kw))
+    })
+  }, [records, rowQ])
 
   /* ==================== 概览：所有表 ==================== */
   if (!tableId) {
@@ -318,6 +360,12 @@ export default function AssetLedgerPage() {
             <Download className="w-4 h-4 mr-1" />
             导出
           </Button>
+          {selectedIds.length > 0 && (
+            <Button variant="secondary" onClick={() => openTransfer(selectedIds)}>
+              <ArrowRightLeft className="w-4 h-4 mr-1" />
+              转移选中 {selectedIds.length} 条
+            </Button>
+          )}
         </div>
         <input
           ref={fileRef}
@@ -328,6 +376,29 @@ export default function AssetLedgerPage() {
         />
       </div>
 
+      <div className="flex flex-wrap items-center gap-2">
+        {selectedIds.length > 0 && (
+          <Button variant="secondary" onClick={() => openTransfer(selectedIds)}>
+            <ArrowRightLeft className="w-4 h-4 mr-1" />
+            转移选中 {selectedIds.length} 条
+          </Button>
+        )}
+        <div className="relative w-56">
+          <Search className="absolute left-2.5 top-2.5 w-4 h-4 text-gray-400" />
+          <Input
+            className="pl-8"
+            placeholder="表内搜索（挑出分错系统的）"
+            value={rowQ}
+            onChange={(e) => setRowQ(e.target.value)}
+          />
+        </div>
+        {rowQ && (
+          <span className="text-xs text-gray-400">
+            命中 {visibleRecords.length} / {records.length} 条（全选仅作用于筛选结果）
+          </span>
+        )}
+      </div>
+
       <Card>
         <CardContent className="pt-6">
           {loading ? (
@@ -335,10 +406,14 @@ export default function AssetLedgerPage() {
           ) : (
             <DynamicRecordTable
               title={activeTable?.name || ''}
-              records={records}
+              records={visibleRecords}
               fields={fields}
               onEdit={(r) => setEdit(r)}
               onDelete={handleDeleteRecord}
+              selectable
+              selectedIds={selectedIds}
+              onSelectionChange={setSelectedIds}
+              onTransfer={(r) => openTransfer([r.id])}
             />
           )}
         </CardContent>
@@ -351,6 +426,15 @@ export default function AssetLedgerPage() {
         fields={fields}
         initial={edit ?? null}
         onSaved={handleSaved}
+      />
+
+      <RecordTransferDialog
+        open={transferOpen}
+        onOpenChange={setTransferOpen}
+        sourceTable={activeTable}
+        recordIds={transferIds}
+        tables={tables}
+        onDone={handleTransferred}
       />
     </div>
   )
