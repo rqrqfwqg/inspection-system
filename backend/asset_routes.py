@@ -7,10 +7,13 @@
 """
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
-from sqlalchemy import text as sa_text, func
+from sqlalchemy import text as sa_text, func, cast as sa_cast, Text as SAText
 from typing import Optional, List, Dict, Any
 import os
 import io
+import json
+import re
+import time
 import uuid
 import openpyxl
 from datetime import datetime, timezone
@@ -151,6 +154,74 @@ def _serialize_record(db: Session, rec: Record) -> Dict[str, Any]:
         "device_name": dev.name if dev else None,
         "table_name": tbl.name if tbl else None,
     }
+
+
+# ==================== 设备画像：未在 devices 登记的真实台账设备补全 ====================
+# 现场台账（电柜 / 机房 / BA 等）大量设备只存在于 records，未进 devices 主表；
+# 面板与关系图若只认 devices，这些设备就会显示成空白 → 按字段候选从 records.data 反查。
+_PROFILE_NAME_KEYS = ("device_name", "name", "equipment_name", "asset_name", "cabinet_name",
+                      "room_name", "equip_name", "fixture_name", "monitor_name",
+                      "elevator_name", "net_name", "hvac_name", "water_name")
+_PROFILE_LOC_KEYS = ("location", "install_location", "location_desc", "room", "room_no",
+                     "distribution_room", "area", "position", "install_position")
+_PROFILE_BUILDING_KEYS = ("building", "bldg", "building_name")
+_PROFILE_FLOOR_KEYS = ("floor", "floor_no")
+
+
+def _pick_first(data: Optional[Dict[str, Any]], keys) -> Optional[str]:
+    """按候选键优先级取第一个非空值（各台账表字段命名不统一）。"""
+    for k in keys:
+        v = (data or {}).get(k)
+        if v is not None and str(v).strip() != "":
+            return str(v).strip()
+    return None
+
+
+def _records_profiles(db: Session, codes: List[str],
+                      recs: Optional[List[Record]] = None) -> Dict[str, Dict[str, Any]]:
+    """从 records 反查设备画像（未登记 devices 的真实台账设备专用）。
+
+    传入已查出的 recs 可避免重复查询。返回 code → 画像字典：
+    {name, subsystem_code, subsystem_name, building, floor, location, tables[], record_count}
+    """
+    if not codes:
+        return {}
+    if recs is None:
+        recs = db.query(Record).filter(Record.device_code.in_(codes)).all()
+    if not recs:
+        return {}
+    table_ids = list({r.table_id for r in recs})
+    tables = db.query(DataTable).filter(DataTable.id.in_(table_ids)).all()
+    tbl_map = {t.id: t for t in tables}
+    sub_ids = list({t.subsystem_id for t in tables if t.subsystem_id})
+    subs = db.query(Subsystem).filter(Subsystem.id.in_(sub_ids)).all() if sub_ids else []
+    sub_map = {s.id: s for s in subs}
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in recs:
+        code = r.device_code
+        if not code:
+            continue
+        p = out.setdefault(code, {"record_count": 0, "tables": []})
+        p["record_count"] += 1
+        t = tbl_map.get(r.table_id)
+        if t:
+            if t.name not in p["tables"]:
+                p["tables"].append(t.name)
+            if not p.get("subsystem_code"):
+                s = sub_map.get(t.subsystem_id)
+                if s:
+                    p["subsystem_code"] = s.code
+                    p["subsystem_name"] = s.name
+        data = r.data or {}
+        if not p.get("name"):
+            p["name"] = _pick_first(data, _PROFILE_NAME_KEYS)
+        for fld, keys in (("location", _PROFILE_LOC_KEYS),
+                          ("building", _PROFILE_BUILDING_KEYS),
+                          ("floor", _PROFILE_FLOOR_KEYS)):
+            if not p.get(fld):
+                p[fld] = _pick_first(data, keys)
+    return out
 
 
 def _date_to_str(d):
@@ -1063,6 +1134,85 @@ def transfer_records(tid: int, payload: RecordTransferRequest,
 
 # ========================= 核心：设备全局检索 =========================
 
+@router.get("/search/suggest")
+def suggest_devices(q: str, limit: int = 12,
+                    db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """设备模糊候选（面板顶部搜索框用）。
+
+    真实台账设备大量只存在于 records、未进 devices 主表，故候选必须四路合并：
+    devices 编号/名称 → records 关联键编号 → records 名称关键字 → 编号别名。
+    每项带 in_ledger 标识与来源，便于前端区分「已登记 / 现场台账 / 别名」。
+    """
+    key = (q or "").strip()
+    if not key:
+        return []
+    limit = max(1, min(int(limit), 30))
+    like = f"%{key}%"
+    hits: Dict[str, Dict[str, Any]] = {}
+
+    # 1) devices 主表（编号 / 名称）
+    for d in db.query(Device).filter(Device.is_active == True).filter(
+            (Device.device_code.like(like)) | (Device.name.like(like))).limit(limit).all():
+        hits[d.device_code] = {"code": d.device_code, "name": d.name,
+                               "in_ledger": True, "source": "设备台账"}
+
+    # 2) records 关联键编号（现场台账设备，如电柜 / 一体化空调 / BA 设备）
+    rec_codes = [r[0] for r in db.query(Record.device_code).filter(
+        Record.device_code.like(like)).distinct().limit(limit * 3).all() if r[0]]
+
+    # 3) records 名称关键字（搜「排风机」「配电房」这类想找设备名的场景）。
+    #    ⚠️ records.data 以 JSON 存储且中文为 \uXXXX 转义（json.dumps ensure_ascii），
+    #    直接 like 中文永远不命中 → 必须同时匹配原文与转义两种形式。
+    def _json_esc(s: str) -> str:
+        return "".join(ch if ord(ch) < 128 else "\\u{:04x}".format(ord(ch)) for ch in s)
+
+    esc_like = f"%{_json_esc(key)}%"
+    name_codes = [r[0] for r in db.query(Record.device_code).filter(
+        sa_cast(Record.data, SAText).like(like)
+        | sa_cast(Record.data, SAText).like(esc_like)
+    ).distinct().limit(limit * 2).all() if r[0]]
+
+    # 4) 别名桥接（移交编号 / 资产代码 / BIM 标签等 → canonical）
+    for a in db.query(DeviceAlias).filter(DeviceAlias.alias_code.like(like)).limit(limit).all():
+        hits.setdefault(a.canonical_code, {"code": a.canonical_code, "name": "",
+                                           "in_ledger": False,
+                                           "source": f"别名 {a.alias_code}"})
+
+    # 统一补画像（名称 / 子系统 / 所属表），避免候选只剩编号
+    extra = [c for c in dict.fromkeys(rec_codes + name_codes) if c not in hits]
+    if extra:
+        profs = _records_profiles(db, extra[:limit * 3])
+        for c in extra:
+            p = profs.get(c)
+            if not p:
+                continue
+            hits[c] = {"code": c, "name": p.get("name") or "", "in_ledger": False,
+                       "source": "现场台账", "subsystem_name": p.get("subsystem_name"),
+                       "tables": p.get("tables", [])}
+    else:
+        profs = {}
+
+    # 补齐已在 hits 但缺名称的项（如别名命中）
+    miss = [c for c, v in hits.items() if not v.get("name")]
+    if miss:
+        for c, p in _records_profiles(db, miss).items():
+            hits[c]["name"] = hits[c].get("name") or p.get("name") or ""
+            hits[c].setdefault("subsystem_name", p.get("subsystem_name"))
+            hits[c].setdefault("tables", p.get("tables", []))
+
+    # 排序：前缀命中 > 包含；已登记 devices 略微优先
+    low = key.lower()
+
+    def _rank(v: Dict[str, Any]) -> tuple:
+        c = (v.get("code") or "").lower()
+        n = (v.get("name") or "").lower()
+        prefix = 0 if (c.startswith(low) or n.startswith(low)) else 1
+        return (prefix, 0 if v.get("in_ledger") else 1, len(c))
+
+    out = sorted(hits.values(), key=_rank)[:limit]
+    return out
+
+
 @router.get("/search", response_model=SearchResult)
 def search_device(code: str, depth: int = 2, db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
     code = (code or "").strip()
@@ -1097,20 +1247,35 @@ def search_device(code: str, depth: int = 2, db: Session = Depends(get_db), _: U
     linked_map: Dict[str, int] = {row[0]: row[1] for row in linked_rows}
     codes = list(linked_map.keys())
 
-    # 2) 设备节点信息
+    # 1.5) 记录集合提前取一次：画像补全 / 节点补全 / 分组 三处复用（避免同一查询跑三遍）
+    recs: List[Record] = db.query(Record).filter(Record.device_code.in_(codes)).all() if codes else []
+    profiles = _records_profiles(db, codes, recs)
+
+    # 2) 设备节点信息（devices 优先；未登记的真实台账设备用 records 画像补全，否则节点为空）
     devices = db.query(Device).filter(Device.device_code.in_(codes)).all()
     dev_info: Dict[str, Device] = {d.device_code: d for d in devices}
     nodes = []
     for c in codes:
         d = dev_info.get(c)
+        p = profiles.get(c) or {}
         if d:
             sub = db.query(Subsystem).filter(Subsystem.id == d.subsystem_id).first()
             nodes.append({
                 "device_code": c,
                 "name": d.name,
-                "subsystem_code": sub.code if sub else None,
-                "subsystem_name": sub.name if sub else None,
+                "subsystem_code": sub.code if sub else p.get("subsystem_code"),
+                "subsystem_name": sub.name if sub else p.get("subsystem_name"),
                 "depth": linked_map.get(c, 0),
+                "in_ledger": True,
+            })
+        elif p:
+            nodes.append({
+                "device_code": c,
+                "name": p.get("name") or c,
+                "subsystem_code": p.get("subsystem_code"),
+                "subsystem_name": p.get("subsystem_name"),
+                "depth": linked_map.get(c, 0),
+                "in_ledger": False,
             })
 
     # 3) 关联边（仅保留两端都在节点集合内的边，避免悬挂）
@@ -1132,10 +1297,9 @@ def search_device(code: str, depth: int = 2, db: Session = Depends(get_db), _: U
                 "subsystem_code": sub.code if sub else None,
             })
 
-    # 4) 聚合记录：按 子系统 → 资料表 分组
+    # 4) 聚合记录：按 子系统 → 资料表 分组（recs 已在上文取过一次，直接复用）
     groups = []
-    if codes:
-        recs = db.query(Record).filter(Record.device_code.in_(codes)).all()
+    if codes and recs:
         # 预取表与子系统
         table_ids = list({r.table_id for r in recs})
         tables = db.query(DataTable).filter(DataTable.id.in_(table_ids)).all() if table_ids else []
@@ -1214,6 +1378,58 @@ def search_device(code: str, depth: int = 2, db: Session = Depends(get_db), _: U
     aliases = [{"alias_code": a.alias_code, "source": a.source}
                for a in db.query(DeviceAlias).filter(DeviceAlias.canonical_code == canonical_code).all()]
 
+    # ===== 设备画像（面板主渲染源）：devices → 设备档案 → 固定资产 → records 反查，逐级兜底 =====
+    prof = profiles.get(code) or {}
+    fa_d = fixed_asset_block or {}
+    da_d = archive_block or {}
+    photo_count = db.query(DevicePhoto).filter(DevicePhoto.device_code == canonical_code).count()
+    tgt_sub_code = tgt_sub_name = None
+    if target:
+        tgt_sub = db.query(Subsystem).filter(Subsystem.id == target.subsystem_id).first()
+        tgt_sub_code = tgt_sub.code if tgt_sub else None
+        tgt_sub_name = tgt_sub.name if tgt_sub else None
+    profile_block = {
+        "device_code": code,
+        "name": (target.name if target else None) or da_d.get("asset_name") or da_d.get("old_name")
+                or fa_d.get("asset_name") or prof.get("name") or "",
+        "subsystem_code": tgt_sub_code or prof.get("subsystem_code"),
+        "subsystem_name": tgt_sub_name or prof.get("subsystem_name"),
+        "building": (target.building if target else "") or da_d.get("building") or prof.get("building") or "",
+        "floor": (target.floor if target else "") or da_d.get("floor") or prof.get("floor") or "",
+        "location": (target.location_desc if target else "") or fa_d.get("location")
+                    or da_d.get("location") or prof.get("location") or "",
+        "room": room_block,
+        "tag_no": fa_d.get("tag_no") or "",
+        "photo_count": photo_count,
+        "in_ledger": target is not None,
+        "record_count": total_records,
+        "related_count": max(0, len(codes) - 1),
+        "subsystem_count": len(groups),
+        "aliases_count": len(aliases),
+        "problems_count": len(problems),
+        "source_tables": prof.get("tables", []),
+    }
+
+    # ===== 供电/冷源链路（以 code 为起点，未登记 devices 也拿得到；kind ∈ power/cooling）=====
+    up = _chain_bfs(db, code, "up", max(1, min(5, int(depth))))
+    down = _chain_bfs(db, code, "down", max(1, min(5, int(depth))))
+
+    def _named(chain_nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out = []
+        for n in chain_nodes:
+            if n.get("depth") == 0:
+                continue
+            nm = n.get("name") or (profiles.get(n["device_code"]) or {}).get("name") or n["device_code"]
+            out.append({**n, "name": nm})
+        return out
+
+    power_chain = {
+        "start_code": code,
+        "upstream": _named(up["nodes"]),
+        "downstream": _named(down["nodes"]),
+        "edges": up["edges"] + down["edges"],
+    }
+
     return SearchResult(
         target=target_resp,
         found=found,
@@ -1227,11 +1443,221 @@ def search_device(code: str, depth: int = 2, db: Session = Depends(get_db), _: U
         room=room_block,
         problems=problems,
         aliases=aliases,
+        profile=profile_block,
+        power_chain=power_chain,
     )
 
 
 # ========================= P0：资产可视化接口 =========================
 # 全部挂载在 /assets 下（即 /ops/api/assets），与既有接口零冲突。
+
+# ---------- 区域树：房间归属索引（多通路合并） ----------
+
+def _norm_room_code(s: Optional[str]) -> str:
+    """房间号归一化：GW2F → GW-2F（字母数字间补连字符）、去尾部子序号 -N。
+
+    库内并存两种格式（台账 GW-2F-KTJF-101 / 电柜 room_no GW1F-PDF-102-1），
+    统一归一后用于跨来源匹配；不修改任何原始数据。
+    """
+    if not s:
+        return ""
+    t = re.sub(r"\s+", "", str(s).strip().upper())
+    t = re.sub(r"^([A-Z]+?)(\d)", r"\1-\2", t)   # GW2F -> GW-2F
+    t = re.sub(r"-\d+$", "", t)                  # 去子序号 -1 / -2
+    return t
+
+
+# records 中「房间类」字段名提示（用于从台账反推设备所在机房）
+_ROOM_FIELD_HINTS = ("room", "房间", "机房")
+
+# 索引缓存（进程内，短 TTL）：避免逐层懒加载时重复全量构建
+_AREA_INDEX_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
+_AREA_INDEX_TTL = 60.0
+
+
+def _build_area_index(db: Session) -> Dict[str, Any]:
+    """构建「机房 → 设备」归属索引（房间粒度可信的多通路合并）。
+
+    通路（按可信度排序）：
+      1) device_relations 的「所在机房」类边（to_code = 机房编号）
+      2) records 中房间类字段（room_no / room 等）命中机房编号
+      3) device_archives / devices / fixed_assets 的 room_id（**排除 fuzzy 模糊匹配**）
+
+    重要：fixed_assets 现有 4358 条 room_id 为 room_match_method='fuzzy' 的
+    模糊匹配结果，仅落在 3 个代表房间（2409 台挤一间），房间粒度不可信——
+    故不计入房间归属，只作为「归属待核实」单独统计。不修改任何原始数据。
+
+    返回 {rooms, dev_meta, fuzzy, stats}
+    """
+    rooms = db.query(Room).all()
+    code_by_norm: Dict[str, str] = {}
+    for r in rooms:
+        n = _norm_room_code(r.code)
+        if n and n not in code_by_norm:
+            code_by_norm[n] = r.code
+
+    def resolve(code: Optional[str]) -> Optional[str]:
+        """外部编号 → 真实 room.code（先精确、后归一化）。"""
+        if not code:
+            return None
+        c = str(code).strip()
+        if c in _room_code_set:
+            return c
+        return code_by_norm.get(_norm_room_code(c))
+
+    _room_code_set = {r.code for r in rooms}
+
+    # 设备元信息：名称 / 子系统（逐级兜底，供节点展示）
+    dev_meta: Dict[str, Dict[str, Any]] = {}
+
+    def touch(code: str) -> Dict[str, Any]:
+        if code not in dev_meta:
+            dev_meta[code] = {"name": None, "subsystem_code": None,
+                              "subsystem_name": None, "sources": []}
+        return dev_meta[code]
+
+    sub_by_id = {s.id: (s.code, s.name) for s in db.query(Subsystem).all()}
+    for d in db.query(Device).all():
+        m = touch(d.device_code)
+        if d.name:
+            m["name"] = d.name
+        sc = sub_by_id.get(d.subsystem_id)
+        if sc:
+            m["subsystem_code"], m["subsystem_name"] = sc
+
+    # 固定资产品名兜底（不修改数据，仅取名）
+    for fa_code, fa_name in db.query(FixedAsset.device_code, FixedAsset.asset_name).all():
+        if not fa_code:
+            continue
+        m = touch(fa_code)
+        if not m["name"] and fa_name:
+            m["name"] = fa_name
+
+    for da_code, da_name, da_sub in db.query(
+            DeviceArchive.device_code, DeviceArchive.asset_name, DeviceArchive.subsystem_id).all():
+        if not da_code:
+            continue
+        m = touch(da_code)
+        if not m["name"] and da_name:
+            m["name"] = da_name
+        if not m["subsystem_code"]:
+            sc = sub_by_id.get(da_sub)
+            if sc:
+                m["subsystem_code"], m["subsystem_name"] = sc
+
+    # ---- 通路 1：device_relations「所在机房」边 ----
+    rooms_dev: Dict[str, set] = {}
+    self_records: Dict[str, str] = {}   # 房间本体记录（机房台账，device_code 即房间号）
+
+    def link(rc: Optional[str], code: Optional[str], src: str) -> None:
+        """建立「机房 → 设备」关联。
+
+        排除**房间本体记录**：机房信息汇总表的 device_code 就是房间号本身，
+        若不排除，每间房都会把自己算作一台"设备"（虚增计数且列表出现自身）。
+        """
+        if not rc or not code:
+            return
+        if _norm_room_code(code) == _norm_room_code(rc):
+            self_records[rc] = code
+            return
+        rooms_dev.setdefault(rc, set()).add(code)
+        touch(code)["sources"].append(src)
+
+    for rel in db.query(DeviceRelation).all():
+        if "机房" not in (rel.relation_type or ""):
+            continue
+        link(resolve(rel.to_code), rel.from_code, "relation")
+
+    # ---- 通路 2：records 房间类字段 ----
+    records = db.query(Record).all()
+    for rec in records:
+        if not rec.device_code:
+            continue
+        try:
+            data = json.loads(rec.data) if isinstance(rec.data, str) else (rec.data or {})
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        for k, v in data.items():
+            if not isinstance(v, str) or not v.strip():
+                continue
+            kl = str(k).lower()
+            if not any(h in kl or h in str(k) for h in _ROOM_FIELD_HINTS):
+                continue
+            rc = resolve(v)
+            if rc:
+                link(rc, rec.device_code, "record")
+                break
+
+    # ---- 通路 3：room_id 外键（排除 fuzzy）+ 固定资产 fuzzy 待核实 ----
+    room_by_id = {r.id: r.code for r in rooms}
+    bld_by_id = {r.id: r.building for r in rooms}
+    fuzzy_by_building: Dict[str, int] = {}
+    fuzzy_total = 0
+    for fa in db.query(FixedAsset).all():
+        method = (fa.room_match_method or "").lower()
+        if method == "fuzzy":
+            fuzzy_total += 1
+            bld = bld_by_id.get(fa.room_id) or "未标注楼栋"
+            fuzzy_by_building[bld] = fuzzy_by_building.get(bld, 0) + 1
+            continue
+        link(room_by_id.get(fa.room_id) or resolve(fa.room_code), fa.device_code, "fixed_asset")
+
+    for da in db.query(DeviceArchive).all():
+        if (da.room_match_method or "").lower() == "fuzzy":
+            continue
+        link(room_by_id.get(da.room_id) or resolve(da.room_code), da.device_code, "archive")
+
+    for d in db.query(Device.device_code, Device.room_id).filter(Device.room_id.isnot(None)).all():
+        link(room_by_id.get(d.room_id), d.device_code, "device")
+
+    # records 反查画像补名称（未登记 devices 的真实台账设备）
+    missing = [c for c, m in dev_meta.items() if not m["name"]]
+    if missing:
+        for c, p in _records_profiles(db, missing).items():
+            m = dev_meta.get(c)
+            if m and p.get("name"):
+                m["name"] = p["name"]
+            if m and not m["subsystem_code"] and p.get("subsystem_code"):
+                m["subsystem_code"] = p["subsystem_code"]
+                m["subsystem_name"] = p.get("subsystem_name")
+
+    return {
+        "rooms": rooms_dev,          # room.code -> set(device_code)
+        "dev_meta": dev_meta,
+        "self_records": self_records,  # room.code -> 机房本体台账记录编号
+        "fuzzy": {"total": fuzzy_total, "by_building": fuzzy_by_building},
+        "stats": {"mapped_devices": sum(len(v) for v in rooms_dev.values()),
+                  "rooms_with_devices": len(rooms_dev)},
+    }
+
+
+def _area_index(db: Session) -> Dict[str, Any]:
+    """带短 TTL 缓存的 _build_area_index 包装。"""
+    now = time.time()
+    if _AREA_INDEX_CACHE["data"] is not None and now - _AREA_INDEX_CACHE["ts"] < _AREA_INDEX_TTL:
+        return _AREA_INDEX_CACHE["data"]
+    data = _build_area_index(db)
+    _AREA_INDEX_CACHE["ts"] = now
+    _AREA_INDEX_CACHE["data"] = data
+    return data
+
+
+def _dev_label(idx: Dict[str, Any], code: str) -> str:
+    """设备节点显示名：名称（编号），无名称时退化为编号。"""
+    m = idx["dev_meta"].get(code) or {}
+    nm = (m.get("name") or "").strip()
+    if nm and nm != code:
+        return f"{nm}（{code}）"
+    return code
+
+
+def _room_label(room: Room) -> str:
+    """房间节点显示格式：空调机房（GE1F-KTJF-101）。"""
+    nm = (room.name or "").strip()
+    return f"{nm}（{room.code}）" if nm else room.code
+
 
 @router.get("/trees/area")
 def tree_area(
@@ -1242,121 +1668,237 @@ def tree_area(
     area: Optional[str] = None,
     keyword: Optional[str] = None,
     only_problems: bool = False,
+    only_with_devices: bool = False,
     db: Session = Depends(get_db),
     _: User = Depends(_get_current_user),
 ):
-    """区域树（building→floor→room→device）懒加载。
+    """区域树（楼栋 → 楼层 → 房间 → 设备）懒加载。
 
-    节点 {key,type:building|floor|room|device,label,count,has_children,meta}；
-    room 节点带 room_code 与设备计数；device 节点带 device_code/status。
+    节点 {key,type:building|floor|room|device,label,count,has_children,meta}。
+    房间节点 label 为「空调机房（GE1F-KTJF-101）」格式；count 为**真实归属**设备数
+    （device_relations「所在机房」边 + 台账房间字段 + 非 fuzzy 的 room_id 外键）。
+    固定资产 fuzzy 归属不计入房间数，仅以 meta.asset_pending 提示待核实。
     """
-    # 预计算：每个 room 归属的设备集合（devices / fixed_assets / device_archives 的 room_id）
-    room_devices: Dict[int, set] = {}
-    for d in db.query(Device.device_code, Device.room_id).filter(Device.is_active == True, Device.room_id.isnot(None)).all():
-        room_devices.setdefault(d.room_id, set()).add(d.device_code)
-    for fa in db.query(FixedAsset.device_code, FixedAsset.room_id).filter(FixedAsset.is_active == True, FixedAsset.room_id.isnot(None)).all():
-        room_devices.setdefault(fa.room_id, set()).add(fa.device_code)
-    for da in db.query(DeviceArchive.device_code, DeviceArchive.room_id).filter(DeviceArchive.is_active_del == True, DeviceArchive.room_id.isnot(None)).all():
-        room_devices.setdefault(da.room_id, set()).add(da.device_code)
+    idx = _area_index(db)
+    rooms_dev: Dict[str, set] = idx["rooms"]
+    room_rows = db.query(Room).filter(Room.is_active == True).all()
+    if area:
+        room_rows = [r for r in room_rows if area in (r.building or "")]
+    if building:
+        room_rows = [r for r in room_rows if r.building == building]
 
     problem_devices: set = set()
     if only_problems:
-        for bp in db.query(BaProblem.device_code).filter(BaProblem.device_code.isnot(None)).all():
-            problem_devices.add(bp.device_code)
+        problem_devices = {bp.device_code for bp in
+                           db.query(BaProblem.device_code).filter(BaProblem.device_code.isnot(None)).all()}
 
-    dev_name = {d.device_code: d.name for d in db.query(Device.device_code, Device.name).all()}
+    kw = (keyword or "").strip().lower()
 
     def dev_matches(code: str) -> bool:
         if only_problems and code not in problem_devices:
             return False
-        if keyword:
-            nm = dev_name.get(code, "")
-            if keyword not in code and keyword not in nm:
+        if kw:
+            nm = ((idx["dev_meta"].get(code) or {}).get("name") or "").lower()
+            if kw not in code.lower() and kw not in nm:
                 return False
         return True
 
-    def room_codes(rid: int) -> List[str]:
-        return [c for c in room_devices.get(rid, set()) if dev_matches(c)]
+    def room_matches(r: Room) -> bool:
+        """关键字是否命中机房名称/编号（让「空调机房」这类搜索能找到机房本身）。"""
+        if not kw:
+            return True
+        return kw in (r.name or "").lower() or kw in (r.code or "").lower()
 
-    # 直接给 room_code：返回该机房设备
-    if room_code and not parent:
-        room = db.query(Room).filter(Room.code == room_code).first()
-        if room:
-            return [{
-                "key": f"d:{c}", "type": "device", "label": dev_name.get(c, c),
+    def room_devs(r: Room) -> List[str]:
+        """机房内设备：机房名/编号命中时不过滤设备，否则按设备名/编号过滤。"""
+        codes = sorted(rooms_dev.get(r.code, set()))
+        if kw and room_matches(r):
+            return [c for c in codes if not only_problems or c in problem_devices]
+        return [c for c in codes if dev_matches(c)]
+
+    def dev_nodes(codes: List[str], room_code: Optional[str] = None) -> List[Dict[str, Any]]:
+        out = []
+        for c in codes:
+            m = idx["dev_meta"].get(c) or {}
+            out.append({
+                "key": f"d:{c}", "type": "device", "label": _dev_label(idx, c),
                 "count": 0, "has_children": False,
-                "meta": {"device_code": c, "status": True},
-            } for c in room_codes(room.id)]
-        return []
+                "meta": {"device_code": c, "name": m.get("name"),
+                         "subsystem_code": m.get("subsystem_code"),
+                         "subsystem_name": m.get("subsystem_name"),
+                         "room_code": room_code, "status": True},
+            })
+        return out
 
-    nodes = []
+    # 直接给 room_code：返回该机房设备（支持归一化形式）
+    if room_code and not parent:
+        norm = _norm_room_code(room_code)
+        target = next((r for r in room_rows if r.code == room_code), None) or \
+            next((r for r in room_rows if _norm_room_code(r.code) == norm), None)
+        return dev_nodes(room_devs(target), target.code) if target else []
+
+    nodes: List[Dict[str, Any]] = []
     if not parent:
-        q = db.query(Room).filter(Room.is_active == True)
-        if area:
-            q = q.filter(Room.building.like(f"%{area}%"))
-        if building:
-            q = q.filter(Room.building == building)
-        bld_count: Dict[str, int] = {}
-        bld_floors: Dict[str, int] = {}
-        for r in q.all():
-            cnt = len(room_codes(r.id))
-            if cnt == 0:
+        agg: Dict[str, Dict[str, Any]] = {}
+        for r in room_rows:
+            codes = room_devs(r)
+            if kw and not room_matches(r) and not codes:
                 continue
-            bld_count[r.building] = bld_count.get(r.building, 0) + cnt
-            bld_floors[r.building] = bld_floors.get(r.building, 0) + 1
-        for b, cnt in sorted(bld_count.items()):
+            b = r.building or "未标注楼栋"
+            a = agg.setdefault(b, {"count": 0, "rooms": 0, "floors": set()})
+            a["count"] += len(codes)
+            a["rooms"] += 1
+            a["floors"].add(r.floor or "未标注楼层")
+        for b, a in sorted(agg.items()):
+            if only_with_devices and a["count"] == 0:
+                continue
             nodes.append({
-                "key": f"b:{b}", "type": "building", "label": b, "count": cnt,
+                "key": f"b:{b}", "type": "building", "label": b, "count": a["count"],
                 "has_children": True,
-                "meta": {"building": b, "floor_count": bld_floors[b], "area": _classify_area(b)},
+                "meta": {"building": b, "floor_count": len(a["floors"]), "room_count": a["rooms"],
+                         "area": _classify_area(b),
+                         "asset_pending": idx["fuzzy"]["by_building"].get(b, 0)},
             })
         return nodes
 
     if parent.startswith("b:"):
         b = parent[2:]
-        q = db.query(Room).filter(Room.building == b, Room.is_active == True)
-        if floor:
-            q = q.filter(Room.floor == floor)
-        fl_count: Dict[str, int] = {}
-        for r in q.all():
-            fl_count[r.floor] = fl_count.get(r.floor, 0) + len(room_codes(r.id))
-        for f, cnt in sorted(fl_count.items()):
-            if cnt == 0:
+        agg_f: Dict[str, Dict[str, Any]] = {}
+        for r in room_rows:
+            if r.building != b:
+                continue
+            if floor and r.floor != floor:
+                continue
+            codes = room_devs(r)
+            if kw and not room_matches(r) and not codes:
+                continue
+            f = r.floor or "未标注楼层"
+            a = agg_f.setdefault(f, {"count": 0, "rooms": 0})
+            a["count"] += len(codes)
+            a["rooms"] += 1
+        for f, a in sorted(agg_f.items()):
+            if only_with_devices and a["count"] == 0:
                 continue
             nodes.append({
-                "key": f"f:{b}:{f}", "type": "floor", "label": f"{b} {f}", "count": cnt,
-                "has_children": True, "meta": {"building": b, "floor": f},
+                "key": f"f:{b}:{f}", "type": "floor", "label": f"{b} {f}", "count": a["count"],
+                "has_children": True,
+                "meta": {"building": b, "floor": f, "room_count": a["rooms"]},
             })
         return nodes
 
     if parent.startswith("f:"):
         _, b, f = parent.split(":", 2)
-        rooms = db.query(Room).filter(Room.building == b, Room.floor == f, Room.is_active == True).all()
-        for r in rooms:
-            cnt = len(room_codes(r.id))
-            if cnt == 0:
+        for r in sorted([x for x in room_rows
+                         if x.building == b and (x.floor or "未标注楼层") == f],
+                        key=lambda x: x.code):
+            codes = room_devs(r)
+            if kw and not room_matches(r) and not codes:
+                continue
+            if only_with_devices and not codes:
                 continue
             nodes.append({
-                "key": f"r:{r.code}", "type": "room", "label": r.name, "count": cnt,
-                "has_children": True,
-                "meta": {"room_code": r.code, "building": r.building, "floor": r.floor, "room_type": r.room_type},
+                "key": f"r:{r.code}", "type": "room", "label": _room_label(r), "count": len(codes),
+                "has_children": len(codes) > 0,
+                "meta": {"room_code": r.code, "room_name": r.name, "building": r.building,
+                         "floor": r.floor, "room_type": r.room_type,
+                         "self_record": idx["self_records"].get(r.code)},
             })
         return nodes
 
     if parent.startswith("r:"):
         rc = parent[2:]
-        room = db.query(Room).filter(Room.code == rc).first()
-        if room:
-            for c in room_codes(room.id):
-                d = db.query(Device).filter(Device.device_code == c).first()
-                nodes.append({
-                    "key": f"d:{c}", "type": "device", "label": dev_name.get(c, c), "count": 0,
-                    "has_children": False,
-                    "meta": {"device_code": c, "status": d.is_active if d else None},
-                })
-        return nodes
+        room = next((r for r in room_rows if r.code == rc), None)
+        return dev_nodes(room_devs(room), rc) if room else []
 
     return nodes
+
+
+@router.get("/areas/stats")
+def area_stats(
+    building: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """区域多维统计：楼栋×楼层矩阵、子系统分布、机房类型分布、覆盖率、归属待核实。
+
+    计数口径与 /trees/area 一致（真实房间归属），固定资产 fuzzy 归属单独记 pending。
+    """
+    idx = _area_index(db)
+    rooms_dev: Dict[str, set] = idx["rooms"]
+    dev_meta: Dict[str, Dict[str, Any]] = idx["dev_meta"]
+    room_rows = db.query(Room).filter(Room.is_active == True).all()
+    if building:
+        room_rows = [r for r in room_rows if r.building == building]
+
+    bld_agg: Dict[str, Dict[str, Any]] = {}
+    fam_agg: Dict[str, Dict[str, Any]] = {}
+    sub_agg: Dict[str, Dict[str, Any]] = {}
+    mapped: set = set()
+    top_rooms: List[Dict[str, Any]] = []
+
+    for r in room_rows:
+        codes = rooms_dev.get(r.code, set())
+        b = r.building or "未标注楼栋"
+        f = r.floor or "未标注楼层"
+        ba = bld_agg.setdefault(b, {"area": _classify_area(b), "room_count": 0,
+                                    "device_count": 0, "rooms_with_devices": 0, "floors": {}})
+        ba["room_count"] += 1
+        ba["device_count"] += len(codes)
+        if codes:
+            ba["rooms_with_devices"] += 1
+            top_rooms.append({"room_code": r.code, "room_name": r.name, "label": _room_label(r),
+                              "building": r.building, "floor": r.floor, "count": len(codes)})
+        fl = ba["floors"].setdefault(f, {"floor": f, "room_count": 0, "device_count": 0,
+                                         "rooms_with_devices": 0})
+        fl["room_count"] += 1
+        fl["device_count"] += len(codes)
+        if codes:
+            fl["rooms_with_devices"] += 1
+        fam = (r.name or "未命名机房").strip()
+        fa = fam_agg.setdefault(fam, {"name": fam, "room_count": 0, "device_count": 0})
+        fa["room_count"] += 1
+        fa["device_count"] += len(codes)
+        for c in codes:
+            if c in mapped:
+                continue
+            mapped.add(c)
+            m = dev_meta.get(c) or {}
+            key = m.get("subsystem_name") or "未归类"
+            sa = sub_agg.setdefault(key, {"name": key, "code": m.get("subsystem_code"), "count": 0})
+            sa["count"] += 1
+
+    buildings = [{
+        "building": b,
+        "area": ba["area"],
+        "room_count": ba["room_count"],
+        "device_count": ba["device_count"],
+        "rooms_with_devices": ba["rooms_with_devices"],
+        "floors": [{"floor": fl["floor"], "room_count": fl["room_count"],
+                    "device_count": fl["device_count"],
+                    "rooms_with_devices": fl["rooms_with_devices"]}
+                   for fl in sorted(ba["floors"].values(), key=lambda x: -x["device_count"])],
+    } for b, ba in sorted(bld_agg.items(), key=lambda x: -x[1]["device_count"])]
+
+    top_rooms.sort(key=lambda x: -x["count"])
+
+    return {
+        "summary": {
+            "building_count": len({r.building for r in room_rows}),
+            "floor_count": len({(r.building, r.floor) for r in room_rows}),
+            "room_count": len(room_rows),
+            "rooms_with_devices": sum(1 for r in room_rows if rooms_dev.get(r.code)),
+            "rooms_with_self_record": sum(1 for r in room_rows if idx["self_records"].get(r.code)),
+            "devices_mapped": len(mapped),
+            "devices_total": db.query(func.count(Device.id)).scalar() or 0,
+            "asset_pending": idx["fuzzy"]["total"],
+        },
+        "buildings": buildings,
+        "subsystems": sorted(sub_agg.values(), key=lambda x: -x["count"]),
+        "room_families": sorted(fam_agg.values(), key=lambda x: -x["device_count"]),
+        "top_rooms": top_rooms[:15],
+        "pending_by_building": [{"building": k, "count": v} for k, v in
+                                sorted(idx["fuzzy"]["by_building"].items(), key=lambda x: -x[1])],
+    }
 
 
 @router.get("/trees/subsystem")

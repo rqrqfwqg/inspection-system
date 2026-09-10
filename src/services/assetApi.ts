@@ -26,6 +26,7 @@ import type {
   DeviceRelationPayload,
   DeviceRelationUpdatePayload,
   SearchResult,
+  DeviceSuggestItem,
   BulkResult,
 } from '@/types/asset'
 
@@ -146,6 +147,13 @@ class AssetApiService {
   // ==================== 核心：设备全局检索 ====================
   search(code: string, depth = 2) {
     return api.get<SearchResult>(`${BASE}/search?code=${encodeURIComponent(code)}&depth=${depth}`)
+  }
+
+  /** 面板搜索框候选：devices 编号/名称 + 现场台账 records + 别名（真实台账设备多未登记 devices） */
+  suggest(q: string, limit = 12) {
+    return api.get<DeviceSuggestItem[]>(
+      `${BASE}/search/suggest?q=${encodeURIComponent(q)}&limit=${limit}`
+    )
   }
 
   // ==================== Excel 导入 / 导出 ====================

@@ -32,6 +32,8 @@ function AppRoutes() {
         <Route path="settings" element={<SettingsPage />} />
         <Route path="asset/search" element={<AssetSearchPage />} />
         <Route path="asset/ledger" element={<AssetLedgerPage />} />
+        {/* 单表视图独立成路由：浏览器/手机后退回概览，刷新与分享可直达某张表 */}
+        <Route path="asset/ledger/:tableId" element={<AssetLedgerPage />} />
         <Route path="asset/devices" element={<DeviceLedgerPage />} />
         <Route path="asset/settings" element={<AssetSettingsPage />} />
         <Route path="asset/qr-labels" element={<QrLabelPage />} />

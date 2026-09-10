@@ -214,6 +214,8 @@ export interface SearchNode {
   subsystem_code: string | null
   subsystem_name: string | null
   depth: number
+  /** true = 已在 devices 主表登记；false = 仅存在于现场台账 records（画像由 records 反查） */
+  in_ledger?: boolean
 }
 
 export interface SearchEdge {
@@ -237,6 +239,58 @@ export interface SearchGroup {
   tables: SearchTableGroup[]
 }
 
+export interface DeviceProfile {
+  device_code: string
+  name: string
+  subsystem_code?: string | null
+  subsystem_name?: string | null
+  building?: string
+  floor?: string
+  location?: string
+  room?: { room_code?: string; room_name?: string; building?: string; floor?: string } | null
+  tag_no?: string
+  photo_count: number
+  in_ledger: boolean
+  record_count: number
+  related_count: number
+  subsystem_count: number
+  aliases_count: number
+  problems_count: number
+  source_tables: string[]
+}
+
+export interface PowerChainNode {
+  device_code: string
+  name?: string
+  depth: number
+  role: string
+}
+
+export interface PowerChainEdge {
+  rid: number
+  from: string
+  to: string
+  type: string
+  side: 'up' | 'down'
+  depth: number
+}
+
+export interface PowerChain {
+  start_code: string
+  upstream: PowerChainNode[]
+  downstream: PowerChainNode[]
+  edges: PowerChainEdge[]
+}
+
+export interface DeviceSuggestItem {
+  code: string
+  name?: string
+  in_ledger: boolean
+  source: string
+  subsystem_name?: string | null
+  tables?: string[]
+}
+
 export interface SearchResult {
   target: Device | null
   found: boolean
@@ -244,6 +298,8 @@ export interface SearchResult {
   edges: SearchEdge[]
   groups: SearchGroup[]
   total_records: number
+  profile?: DeviceProfile | null
+  power_chain?: PowerChain | null
 }
 
 export interface BulkResult {

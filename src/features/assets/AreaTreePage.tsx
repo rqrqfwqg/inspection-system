@@ -1,309 +1,233 @@
 import * as React from 'react'
-import {
-  ChevronRight,
-  ChevronDown,
-  Building2,
-  DoorOpen,
-  Cpu,
-  Layers,
-  MapPin,
-  Boxes,
-} from 'lucide-react'
+import { BarChart3, Boxes, ChevronDown, ChevronUp, Cpu, MapPin, RefreshCw, Search } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useToast } from '@/hooks/use-toast'
-import { cn } from '@/lib/utils'
-import { getAreaTree } from './api'
-import type { AreaNode } from './types'
+import { getAreaStats } from './api'
+import AreaTreeView from './AreaTreeView'
+import AreaStatsPanel from './AreaStatsPanel'
+import type { AreaNode, AreaStats } from './types'
 
 interface AreaTreePageProps {
   /** 点击设备节点时打开详情抽屉 */
   onOpenDevice: (code: string) => void
 }
 
-function NodeIcon({ type }: { type: AreaNode['type'] }) {
-  if (type === 'device') return <Cpu className="w-4 h-4 text-blue-500" />
-  if (type === 'room') return <DoorOpen className="w-4 h-4 text-amber-500" />
-  if (type === 'building') return <Building2 className="w-4 h-4 text-indigo-500" />
-  return <Layers className="w-4 h-4 text-gray-500" />
-}
-
-interface TreeNodeProps {
-  node: AreaNode
-  depth: number
-  expandedKeys: Set<string>
-  loadingKeys: Set<string>
-  childrenMap: Record<string, AreaNode[]>
-  selectedKey: string | null
-  onToggle: (node: AreaNode) => void
-  onOpenDevice: (code: string) => void
-  onSelect: (node: AreaNode) => void
-}
-
-function TreeNode({
-  node,
-  depth,
-  expandedKeys,
-  loadingKeys,
-  childrenMap,
-  selectedKey,
-  onToggle,
-  onOpenDevice,
-  onSelect,
-}: TreeNodeProps) {
-  const isDevice = node.type === 'device'
-  const hasChildren = !!node.has_children
-  const expanded = expandedKeys.has(node.key)
-  const loading = loadingKeys.has(node.key)
-  const kids = childrenMap[node.key]
-  const selected = selectedKey === node.key
-
-  return (
-    <div>
-      <div
-        className={cn(
-          'flex items-center gap-1 rounded-md px-2 py-1.5 cursor-pointer transition-colors',
-          selected ? 'bg-blue-50 ring-1 ring-blue-200' : 'hover:bg-gray-50',
-          isDevice && 'hover:bg-blue-50'
-        )}
-        style={{ paddingLeft: depth * 16 + 8 }}
-        onClick={() => {
-          if (isDevice) {
-            onOpenDevice(String(node.meta?.device_code ?? ''))
-            return
-          }
-          onSelect(node)
-          if (hasChildren) onToggle(node)
-        }}
-      >
-        <span className="w-4 flex items-center justify-center">
-          {hasChildren ? (
-            expanded ? (
-              <ChevronDown className="w-4 h-4 text-gray-400" />
-            ) : (
-              <ChevronRight className="w-4 h-4 text-gray-400" />
-            )
-          ) : null}
-        </span>
-        <NodeIcon type={node.type} />
-        <span
-          className={cn(
-            'flex-1 truncate text-sm',
-            isDevice ? 'text-blue-700 font-mono' : 'text-gray-800'
-          )}
-        >
-          {node.label}
-        </span>
-        {node.count != null && (
-          <Badge variant="outline" className="text-xs">
-            {node.count}
-          </Badge>
-        )}
-      </div>
-      {expanded && hasChildren && (
-        loading ? (
-          <div className="py-2 text-sm text-gray-400" style={{ paddingLeft: (depth + 1) * 16 + 8 }}>
-            加载中…
-          </div>
-        ) : kids && kids.length > 0 ? (
-          kids.map((k) => (
-            <TreeNode
-              key={k.key}
-              node={k}
-              depth={depth + 1}
-              expandedKeys={expandedKeys}
-              loadingKeys={loadingKeys}
-              childrenMap={childrenMap}
-              selectedKey={selectedKey}
-              onToggle={onToggle}
-              onOpenDevice={onOpenDevice}
-              onSelect={onSelect}
-            />
-          ))
-        ) : (
-          <div className="py-2 text-sm text-gray-400" style={{ paddingLeft: (depth + 1) * 16 + 8 }}>
-            无下级节点
-          </div>
-        )
-      )}
-    </div>
-  )
-}
-
+/**
+ * 区域总览：楼栋 → 楼层 → 机房（名称（房间号））→ 设备 四级下钻，
+ * 顶部为基于同一口径的多维可视化（楼栋×楼层 / 子系统 / 机房类型 / 覆盖率）。
+ */
 export function AreaTreePage({ onOpenDevice }: AreaTreePageProps) {
   const { toast } = useToast()
-  const [roots, setRoots] = React.useState<AreaNode[]>([])
-  const [childrenMap, setChildrenMap] = React.useState<Record<string, AreaNode[]>>({})
-  const [loadingKeys, setLoadingKeys] = React.useState<Set<string>>(new Set())
-  const [expandedKeys, setExpandedKeys] = React.useState<Set<string>>(new Set())
+  const [input, setInput] = React.useState('')
+  const [keyword, setKeyword] = React.useState('')
+  const [onlyWithDevices, setOnlyWithDevices] = React.useState(false)
+  const [building, setBuilding] = React.useState<string | undefined>(undefined)
+  const [showStats, setShowStats] = React.useState(true)
+  const [refreshToken, setRefreshToken] = React.useState(0)
+
   const [selectedKey, setSelectedKey] = React.useState<string | null>(null)
-  const [rootLoading, setRootLoading] = React.useState(true)
+  const [rangeTitle, setRangeTitle] = React.useState('')
   const [rangeDevices, setRangeDevices] = React.useState<AreaNode[]>([])
-  const [rangeLabel, setRangeLabel] = React.useState<string>('')
-  const [rangeLoading, setRangeLoading] = React.useState(false)
+  const [rangeNote, setRangeNote] = React.useState('')
+
+  const [stats, setStats] = React.useState<AreaStats | null>(null)
+  const [statsLoading, setStatsLoading] = React.useState(true)
+
+  const onError = React.useCallback(
+    (msg: string) => toast({ title: msg, variant: 'destructive' }),
+    [toast]
+  )
+
+  /* 搜索防抖：真实台账设备名/编号由后端过滤，避免前端全量拉取 */
+  React.useEffect(() => {
+    const t = setTimeout(() => setKeyword(input.trim()), 300)
+    return () => clearTimeout(t)
+  }, [input])
+
+  const loadStats = React.useCallback(async () => {
+    setStatsLoading(true)
+    try {
+      setStats(await getAreaStats(building))
+    } catch (e) {
+      toast({
+        title: '统计加载失败',
+        description: e instanceof Error ? e.message : '',
+        variant: 'destructive',
+      })
+    } finally {
+      setStatsLoading(false)
+    }
+  }, [building, toast])
 
   React.useEffect(() => {
-    let cancelled = false
-    getAreaTree()
-      .then((data) => {
-        if (!cancelled) setRoots(data)
-      })
-      .catch((e) => {
-        if (!cancelled)
-          toast({
-            title: '加载区域树失败',
-            description: e instanceof Error ? e.message : '',
-            variant: 'destructive',
-          })
-      })
-      .finally(() => {
-        if (!cancelled) setRootLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [toast])
+    void loadStats()
+  }, [loadStats])
 
-  const loadChildren = React.useCallback(async (key: string) => {
-    const kids = await getAreaTree(key)
-    setChildrenMap((prev) => ({ ...prev, [key]: kids }))
-    return kids
+  const handleSelectRange = React.useCallback((node: AreaNode, devices: AreaNode[]) => {
+    setSelectedKey(node.key)
+    setRangeTitle(node.label)
+    setRangeDevices(devices)
+    if (node.type === 'room') {
+      const self = node.meta?.self_record
+      setRangeNote(self ? `机房本体档案：${self}` : '')
+    } else {
+      const rooms = new Set(devices.map((d) => String(d.meta?.room_code ?? '')))
+      setRangeNote(`覆盖 ${rooms.size} 间机房`)
+    }
   }, [])
 
-  const toggle = React.useCallback(
-    async (node: AreaNode) => {
-      const key = node.key
-      setExpandedKeys((prev) => {
-        const next = new Set(prev)
-        if (next.has(key)) next.delete(key)
-        else next.add(key)
-        return next
-      })
-      if (!childrenMap[key] && !loadingKeys.has(key)) {
-        setLoadingKeys((prev) => new Set(prev).add(key))
-        try {
-          await loadChildren(key)
-        } catch (e) {
-          toast({
-            title: '展开失败',
-            description: e instanceof Error ? e.message : '',
-            variant: 'destructive',
-          })
-        } finally {
-          setLoadingKeys((prev) => {
-            const n = new Set(prev)
-            n.delete(key)
-            return n
-          })
-        }
-      }
-    },
-    [childrenMap, loadingKeys, loadChildren, toast]
-  )
+  const handleSelectOther = React.useCallback((node: AreaNode) => {
+    setSelectedKey(node.key)
+    if (node.type === 'building') {
+      setRangeTitle(node.label)
+      setRangeDevices([])
+      const pending = Number(node.meta?.asset_pending ?? 0)
+      setRangeNote(
+        `${Number(node.meta?.room_count ?? 0)} 间机房 / ${Number(node.meta?.floor_count ?? 0)} 个楼层` +
+          (pending ? ` · 固定资产待核实归属 ${pending}` : '')
+      )
+    }
+  }, [])
 
-  const handleSelect = React.useCallback(
-    async (node: AreaNode) => {
-      setSelectedKey(node.key)
-      if (node.type === 'room') {
-        const kids =
-          childrenMap[node.key] ?? (await loadChildren(node.key).catch(() => [] as AreaNode[]))
-        setRangeLabel(node.label)
-        setRangeDevices(kids.filter((k) => k.type === 'device'))
-      } else if (node.type === 'floor') {
-        // 楼层范围设备：并行下钻其所有房间再聚合设备（任一房间失败不影响其余）
-        setRangeLabel(node.label)
-        setRangeLoading(true)
-        try {
-          const rooms = await loadChildren(node.key)
-          const results = await Promise.allSettled(
-            rooms
-              .filter((r) => r.type === 'room')
-              .map((r) => loadChildren(r.key))
-          )
-          const devices: AreaNode[] = []
-          results.forEach((res) => {
-            if (res.status === 'fulfilled') {
-              devices.push(...res.value.filter((k) => k.type === 'device'))
-            }
-          })
-          setRangeDevices(devices)
-        } catch (e) {
-          toast({
-            title: '加载楼层设备失败',
-            description: e instanceof Error ? e.message : '',
-            variant: 'destructive',
-          })
-        } finally {
-          setRangeLoading(false)
-        }
-      }
-    },
-    [childrenMap, loadChildren, toast]
-  )
+  const reset = () => {
+    setInput('')
+    setKeyword('')
+    setOnlyWithDevices(false)
+    setBuilding(undefined)
+    setSelectedKey(null)
+    setRangeTitle('')
+    setRangeDevices([])
+    setRangeNote('')
+  }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-      <Card className="lg:col-span-2">
-        <CardHeader className="py-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <MapPin className="w-4 h-4" />区域树（楼栋 → 楼层 → 房间 → 设备）
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          {rootLoading ? (
-            <p className="text-sm text-gray-400 py-8 text-center">加载中…</p>
-          ) : roots.length === 0 ? (
-            <p className="text-sm text-gray-400 py-8 text-center">暂无区域数据</p>
-          ) : (
-            roots.map((n) => (
-              <TreeNode
-                key={n.key}
-                node={n}
-                depth={0}
-                expandedKeys={expandedKeys}
-                loadingKeys={loadingKeys}
-                childrenMap={childrenMap}
-                selectedKey={selectedKey}
-                onToggle={toggle}
-                onOpenDevice={onOpenDevice}
-                onSelect={handleSelect}
-              />
-            ))
-          )}
+    <div className="space-y-4">
+      <Card>
+        <CardContent className="py-3 flex flex-wrap items-center gap-3">
+          <div className="relative flex-1 min-w-[240px]">
+            <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <Input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="搜索机房或设备：名称 / 编号，如 空调机房 / KTJF-101 / PDF-107"
+              className="pl-9"
+            />
+          </div>
+          <Button
+            variant={onlyWithDevices ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => setOnlyWithDevices((v) => !v)}
+          >
+            仅有设备的机房
+          </Button>
+          <Button variant="outline" size="sm" onClick={reset}>
+            重置
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setRefreshToken((v) => v + 1)}>
+            <RefreshCw className="w-4 h-4 mr-1" />
+            刷新
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => setShowStats((v) => !v)}>
+            <BarChart3 className="w-4 h-4 mr-1" />
+            {showStats ? '收起可视化' : '展开可视化'}
+            {showStats ? (
+              <ChevronUp className="w-4 h-4 ml-1" />
+            ) : (
+              <ChevronDown className="w-4 h-4 ml-1" />
+            )}
+          </Button>
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader className="py-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Boxes className="w-4 h-4" />范围内设备
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          {!rangeLabel ? (
-            <p className="text-sm text-gray-400 py-8 text-center">
-              点选左侧房间或楼层以高亮其范围内设备
-            </p>
-          ) : (
-            <div className="space-y-2">
-              <div className="text-sm font-medium text-gray-700">
-                {rangeLabel}（{rangeLoading ? '加载中…' : `${rangeDevices.length} 台`}）
-              </div>
-              <div className="max-h-[60vh] overflow-y-auto space-y-1">
-                {rangeDevices.map((d) => (
-                  <button
-                    key={d.key}
-                    onClick={() => onOpenDevice(String(d.meta?.device_code ?? ''))}
-                    className="w-full text-left text-sm font-mono text-blue-700 hover:bg-blue-50 rounded px-2 py-1.5 truncate"
-                  >
-                    {d.label}
+      {showStats && (
+        <AreaStatsPanel
+          stats={stats}
+          loading={statsLoading}
+          onPickBuilding={(b) => {
+            setBuilding((prev) => (prev === b ? undefined : b))
+            setRefreshToken((v) => v + 1)
+          }}
+        />
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <Card className="lg:col-span-2">
+          <CardHeader className="py-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <MapPin className="w-4 h-4" />
+              区域树（楼栋 → 楼层 → 机房 → 设备）
+              {building && (
+                <Badge variant="outline" className="ml-1">
+                  {building}
+                  <button className="ml-1 text-gray-400" onClick={() => setBuilding(undefined)}>
+                    ×
                   </button>
-                ))}
+                </Badge>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <AreaTreeView
+              keyword={keyword}
+              onlyWithDevices={onlyWithDevices}
+              building={building}
+              selectedKey={selectedKey}
+              refreshToken={refreshToken}
+              onSelectRange={handleSelectRange}
+              onSelectOther={handleSelectOther}
+              onOpenDevice={onOpenDevice}
+              onError={onError}
+            />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="py-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Boxes className="w-4 h-4" />
+              范围内设备
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {!rangeTitle ? (
+              <p className="text-sm text-gray-400 py-8 text-center">
+                点选左侧楼栋 / 楼层 / 机房以查看其范围内设备
+              </p>
+            ) : (
+              <div className="space-y-2">
+                <div className="text-sm font-medium text-gray-800 break-all">{rangeTitle}</div>
+                <div className="text-xs text-gray-500">
+                  {rangeDevices.length} 台{rangeNote ? ` · ${rangeNote}` : ''}
+                </div>
+                <div className="max-h-[60vh] overflow-y-auto space-y-1">
+                  {rangeDevices.length === 0 ? (
+                    <p className="text-sm text-gray-400 py-4 text-center">该范围内暂无已归属设备</p>
+                  ) : (
+                    rangeDevices.map((d) => (
+                      <button
+                        key={d.key}
+                        onClick={() => onOpenDevice(String(d.meta?.device_code ?? ''))}
+                        className="w-full text-left rounded px-2 py-1.5 hover:bg-blue-50 flex items-center gap-2"
+                      >
+                        <Cpu className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                        <span className="flex-1 text-sm text-blue-700 truncate">{d.label}</span>
+                        {d.meta?.subsystem_name ? (
+                          <Badge variant="outline" className="text-xs shrink-0">
+                            {String(d.meta.subsystem_name)}
+                          </Badge>
+                        ) : null}
+                      </button>
+                    ))
+                  )}
+                </div>
               </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   )
 }

@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { LayoutDashboard, Map, Boxes, Search, Upload, Share2, Network } from 'lucide-react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { DashboardPage } from './DashboardPage'
@@ -26,7 +27,17 @@ const TABS = [
  * 子系统树选中某系统 → 切换至概览并按该系统过滤（跨视图联动）。
  */
 export default function AssetsLayout() {
-  const [activeTab, setActiveTab] = React.useState<string>('overview')
+  // tab 同步到 URL（?tab=area 可直达/分享/刷新保留视图）
+  const [searchParams, setSearchParams] = useSearchParams()
+  const activeTab = searchParams.get('tab') || 'overview'
+  const setActiveTab = React.useCallback(
+    (t: string) => {
+      const next = new URLSearchParams(searchParams)
+      next.set('tab', t)
+      setSearchParams(next, { replace: true })
+    },
+    [searchParams, setSearchParams]
+  )
   const [drawerCode, setDrawerCode] = React.useState<string | null>(null)
   const [subsystemFilter, setSubsystemFilter] = React.useState<string | undefined>(undefined)
 
@@ -34,10 +45,13 @@ export default function AssetsLayout() {
     if (code) setDrawerCode(code)
   }, [])
 
-  const selectSubsystem = React.useCallback((code: string) => {
-    setSubsystemFilter(code)
-    setActiveTab('overview')
-  }, [])
+  const selectSubsystem = React.useCallback(
+    (code: string) => {
+      setSubsystemFilter(code)
+      setActiveTab('overview')
+    },
+    [setActiveTab]
+  )
 
   return (
     <div className="space-y-4">

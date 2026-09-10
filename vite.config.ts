@@ -26,4 +26,18 @@ export default defineConfig({
       },
     },
   },
+  // preview（服务 dist 产物）同样代理 API，便于构建后端到端验收
+  preview: {
+    port: 4173,
+    proxy: {
+      '/ops/api': {
+        target: 'http://127.0.0.1:9527',
+        changeOrigin: true,
+      },
+      '/ops/uploads': {
+        target: 'http://127.0.0.1:9527',
+        changeOrigin: true,
+      },
+    },
+  },
 })

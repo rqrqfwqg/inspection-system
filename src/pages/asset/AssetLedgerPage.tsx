@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
 import type { Subsystem, DataTable, FieldDef, RecordItem } from '@/types/asset'
 import { assetApi } from '@/services/assetApi'
 import DynamicRecordTable from '@/components/asset/DynamicRecordTable'
@@ -51,8 +52,10 @@ export default function AssetLedgerPage() {
   const [q, setQ] = useState('')
   const [subFilter, setSubFilter] = useState('all') // 'all' | 子系统 id 字符串
 
-  // 维护模式
-  const [tableId, setTableId] = useState<number | null>(null)
+  // 维护模式：单表视图由路由参数决定（/asset/ledger/:tableId）→ 后退回概览、刷新/分享直达
+  const { tableId: tableIdParam } = useParams()
+  const navigate = useNavigate()
+  const tableId = tableIdParam && !Number.isNaN(Number(tableIdParam)) ? Number(tableIdParam) : null
   const [fields, setFields] = useState<FieldDef[]>([])
   const [records, setRecords] = useState<RecordItem[]>([])
   const [loading, setLoading] = useState(false)
@@ -122,22 +125,20 @@ export default function AssetLedgerPage() {
     }
   }
 
-  const openTable = (tid: number) => {
-    setTableId(tid)
-    setEdit(undefined)
-    setRecords([])
-    setFields([])
-    setSelectedIds([])
-    void loadRecords(tid)
-  }
+  const openTable = (tid: number) => navigate(`/asset/ledger/${tid}`)
 
-  const backToCatalog = () => {
-    setTableId(null)
+  const backToCatalog = () => navigate('/asset/ledger')
+
+  /* 路由参数变化 → 加载/清空单表数据：后退自然回概览、刷新与分享可复现同一张表 */
+  useEffect(() => {
     setEdit(undefined)
+    setSelectedIds([])
+    setRowQ('')
     setRecords([])
     setFields([])
-    setSelectedIds([])
-  }
+    if (tableId) void loadRecords(tableId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tableId])
 
   const openTransfer = (ids: number[]) => {
     if (ids.length === 0) {
@@ -333,11 +334,16 @@ export default function AssetLedgerPage() {
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="sm" className="gap-1" onClick={backToCatalog}>
             <ArrowLeft className="w-4 h-4" />
-            全部表
+            返回数据表
           </Button>
+          <nav className="hidden sm:flex items-center gap-1.5 text-xs text-gray-400">
+            <span>数据表管理</span>
+            <span>/</span>
+            <span className="text-gray-600">{activeTable?.name || `表 #${tableId}`}</span>
+          </nav>
           <div>
             <h1 className="text-xl font-bold text-gray-900 flex items-center gap-2">
-              {activeTable?.name}
+              {activeTable?.name || `表 #${tableId}`}
               <Badge variant="outline">{records.length} 条</Badge>
               {activeTable?.subsystem_name && <Badge variant="secondary">{activeTable.subsystem_name}</Badge>}
             </h1>

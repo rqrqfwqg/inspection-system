@@ -242,6 +242,9 @@ class SearchResult(BaseModel):
     room: Optional[Dict[str, Any]] = None            # 所属机房 {room_code,room_name,building,floor}
     problems: List[Dict[str, Any]] = []              # BA 问题列表
     aliases: List[Dict[str, Any]] = []               # 编号别名溯源
+    # ===== 设备数据面板（2026-09-10）：未登记 devices 的真实台账设备也能完整展示 =====
+    profile: Optional[Dict[str, Any]] = None          # 设备画像（devices→档案→固定资产→records 逐级兜底）
+    power_chain: Optional[Dict[str, Any]] = None      # 供电/冷源链路 {start_code,upstream,downstream,edges}
 
 
 # ==================== 批量建记录（Excel 导入后端落库用） ====================

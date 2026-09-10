@@ -20,12 +20,67 @@ export interface AreaNode {
   has_children?: boolean
   meta?: {
     building?: string
+    floor?: string
     floor_count?: number
+    room_count?: number
+    room_code?: string
+    room_name?: string
+    room_type?: string
+    /** 该机房的「本体台账」记录编号（机房信息汇总表，device_code 即房间号） */
+    self_record?: string | null
+    /** 固定资产模糊归属、房间粒度不可信的数量（提示待核实） */
+    asset_pending?: number
     area?: number
     device_code?: string
+    name?: string | null
+    subsystem_code?: string | null
+    subsystem_name?: string | null
     [key: string]: unknown
   }
   [key: string]: unknown
+}
+
+/** 区域多维统计（GET /areas/stats） */
+export interface AreaFloorStat {
+  floor: string
+  room_count: number
+  device_count: number
+  rooms_with_devices: number
+}
+
+export interface AreaBuildingStat {
+  building: string
+  area: string
+  room_count: number
+  device_count: number
+  rooms_with_devices: number
+  floors: AreaFloorStat[]
+}
+
+export interface AreaStats {
+  summary: {
+    building_count: number
+    floor_count: number
+    room_count: number
+    rooms_with_devices: number
+    rooms_with_self_record?: number
+    devices_mapped: number
+    devices_total: number
+    /** 固定资产 fuzzy 归属（房间粒度不可信）待核实数量 */
+    asset_pending: number
+  }
+  buildings: AreaBuildingStat[]
+  subsystems: Array<{ code: string | null; name: string; count: number }>
+  room_families: Array<{ name: string; room_count: number; device_count: number }>
+  top_rooms: Array<{
+    room_code: string
+    room_name: string
+    label: string
+    building: string
+    floor: string
+    count: number
+  }>
+  pending_by_building: Array<{ building: string; count: number }>
 }
 
 /** 子系统树节点（GET /trees/subsystem） */
