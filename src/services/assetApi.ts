@@ -28,6 +28,10 @@ import type {
   SearchResult,
   DeviceSuggestItem,
   BulkResult,
+  AssetLedgerListResult,
+  AssetLedgerSummary,
+  AssetLedgerDetail,
+  AssetLedgerQuery,
 } from '@/types/asset'
 
 const BASE = '/assets'
@@ -142,6 +146,42 @@ class AssetApiService {
   }
   deleteRelation(id: number) {
     return api.delete<{ success: boolean; message: string }>(`${BASE}/relations/${id}`)
+  }
+
+  // ==================== 资产总台账（设备台账升级） ====================
+
+  /** 查询串构造：跳过 undefined / null / 空串，避免把空筛选发给后端 */
+  private static buildQuery(params: AssetLedgerQuery): string {
+    const qs = new URLSearchParams()
+    Object.entries(params).forEach(([k, v]) => {
+      if (v === undefined || v === null || v === '') return
+      qs.set(k, String(v))
+    })
+    const s = qs.toString()
+    return s ? '?' + s : ''
+  }
+
+  /**
+   * 资产总台账分页列表。
+   * 数据源是 devices ∪ 台账 records ∪ 固定资产 的全集合（真实台账设备多未登记 devices，
+   * 只看 devices 会漏掉约 13%）。筛选/排序均由后端统一口径处理。
+   */
+  listAssetLedger(params: AssetLedgerQuery = {}) {
+    return api.get<AssetLedgerListResult>(`${BASE}/asset-ledger${AssetApiService.buildQuery(params)}`)
+  }
+
+  /** 资产总台账汇总：规模 / 金额 / 区域 / 子系统 / 使用单位 / 保修预警 */
+  getAssetLedgerSummary(params: AssetLedgerQuery = {}) {
+    return api.get<AssetLedgerSummary>(
+      `${BASE}/asset-ledger/summary${AssetApiService.buildQuery(params)}`
+    )
+  }
+
+  /** 单设备全字段详情：设备 + 固定资产 + 档案 + 跨表台账记录 + 关联链路 */
+  getAssetLedgerDetail(code: string) {
+    return api.get<AssetLedgerDetail>(
+      `${BASE}/asset-ledger/detail?code=${encodeURIComponent(code)}`
+    )
   }
 
   // ==================== 核心：设备全局检索 ====================

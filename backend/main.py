@@ -29,6 +29,8 @@ from schemas import (
 from auth import verify_password, get_password_hash, create_access_token, decode_token
 from cad_routes import router as cad_router
 from asset_routes import router as asset_router, seed_assets
+# 资产总台账（设备台账升级）：独立模块，避免 asset_routes 继续膨胀
+from asset_ledger_routes import router as asset_ledger_router
 from dependencies import get_current_user, require_admin, AUTH_DISABLED
 
 from contextlib import asynccontextmanager
@@ -114,6 +116,7 @@ api_router = APIRouter(prefix="/ops/api")
 # 子路由仅保留子路径前缀，由 api_router 拼装为 /ops/api/cad、/ops/api/assets
 api_router.include_router(cad_router)      # /ops/api/cad/...
 api_router.include_router(asset_router)    # /ops/api/assets/...
+api_router.include_router(asset_ledger_router)  # /ops/api/assets/asset-ledger...
 
 # ==================== 健康检查 ====================
 

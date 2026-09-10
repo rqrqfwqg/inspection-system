@@ -307,3 +307,134 @@ export interface BulkResult {
   created: number
   skipped: number
 }
+
+// ==================== 资产总台账（设备台账升级） ====================
+
+/** 总台账单行：devices ∪ 台账 records ∪ 固定资产 的全集合 */
+export interface AssetLedgerRow {
+  device_code: string
+  name: string
+  device_name?: string
+  /** devices=已登记；ledger_only=只在台账、未登记进设备主表 */
+  source: 'devices' | 'ledger_only'
+  subsystem_id: number | null
+  subsystem_name: string
+  location: string
+  building: string
+  floor: string
+  area: string
+  use_dept: string
+  owner_unit: string
+  asset_name: string
+  asset_code: string
+  brand_model: string
+  serial_no: string
+  transfer_no: string
+  tag_no: string
+  contract_no: string
+  bim_tag: string
+  room_code: string
+  price_tax: number | null
+  price_notax: number | null
+  tax: number | null
+  recv_date: string | null
+  warranty_end: string | null
+  warranty_state: 'ok' | 'soon' | 'expired' | null
+  is_active: boolean
+  has_asset: boolean
+  record_count: number
+  record_tables: string[]
+  relation_count: number
+}
+
+export interface AssetLedgerFacets {
+  areas: string[]
+  use_depts: string[]
+  subsystems: { id: number; name: string }[]
+}
+
+export interface AssetLedgerListResult {
+  total: number
+  page: number
+  page_size: number
+  pages: number
+  items: AssetLedgerRow[]
+  facets: AssetLedgerFacets
+}
+
+/** 台账筛选/排序参数 */
+export interface AssetLedgerQuery {
+  q?: string
+  subsystem_id?: number
+  area?: string
+  use_dept?: string
+  /** with_asset / without_asset / ledger_only / has_records / warranty_soon / warranty_expired / bim / no_location */
+  state?: string
+  source?: 'devices' | 'ledger_only'
+  include_inactive?: boolean
+  sort?: string
+  order?: 'asc' | 'desc'
+  page?: number
+  page_size?: number
+}
+
+export interface AssetLedgerBucket {
+  name: string
+  count: number
+  amount: number
+  with_asset: number
+}
+
+export interface AssetLedgerSummary {
+  total: number
+  registered: number
+  ledger_only: number
+  with_asset: number
+  without_asset: number
+  with_records: number
+  with_bim: number
+  no_location: number
+  amount_total: number
+  amount_avg: number
+  warranty_soon: number
+  warranty_expired: number
+  warranty_soon_days: number
+  by_area: AssetLedgerBucket[]
+  by_subsystem: AssetLedgerBucket[]
+  by_use_dept: AssetLedgerBucket[]
+}
+
+export interface AssetLedgerRecordItem {
+  record_id: number
+  table_id: number
+  table_code: string | null
+  table_name: string | null
+  subsystem_name: string | null
+  data: Record<string, unknown>
+}
+
+export interface AssetLedgerRelationItem {
+  relation_id: number
+  direction: 'in' | 'out'
+  from_code: string
+  to_code: string
+  other_code: string
+  relation_type: string
+  relation_type_code?: string | null
+  kind?: string | null
+  meta: Record<string, unknown>
+}
+
+export interface AssetLedgerDetail {
+  found: boolean
+  code: string
+  source?: string
+  device: (Device & { transfer_no?: string; asset_code?: string; bim_tag?: string }) | null
+  fixed_asset: Record<string, unknown> | null
+  archive: Record<string, unknown> | null
+  profile: DeviceProfile | Record<string, unknown>
+  area?: string
+  records: AssetLedgerRecordItem[]
+  record_count: number
+  relations: AssetLedgerRelationItem[]
+}
