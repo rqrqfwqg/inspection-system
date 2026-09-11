@@ -1,16 +1,5 @@
 import * as React from 'react'
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-  Cell,
-} from 'recharts'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useToast } from '@/hooks/use-toast'
@@ -22,8 +11,6 @@ interface DashboardPageProps {
   subsystemFilter?: string
   onClearFilter?: () => void
 }
-
-const PALETTE = ['#2563eb', '#16a34a', '#f59e0b', '#dc2626', '#7c3aed', '#0891b2', '#db2777']
 
 export function DashboardPage({ subsystemFilter, onClearFilter }: DashboardPageProps) {
   const { toast } = useToast()
@@ -77,24 +64,6 @@ export function DashboardPage({ subsystemFilter, onClearFilter }: DashboardPageP
     filteredRows.forEach((r) => m.set(r.subsystem, (m.get(r.subsystem) || 0) + (r.count || 0)))
     return [...m.entries()].sort((a, b) => b[1] - a[1])
   }, [filteredRows])
-
-  const rateData = filteredOverview.map((o) => ({
-    name: o.ba_system,
-    故障率: Number(o.problem_rate) || 0,
-  }))
-
-  const areas = [...new Set(filteredRows.map((r) => r.area))].sort()
-  const subs = [...new Set(filteredRows.map((r) => r.subsystem))].sort()
-  const stackedData = areas.map((area) => {
-    const row: Record<string, number | string> = { area }
-    subs.forEach((s) => {
-      const c = filteredRows
-        .filter((r) => r.area === area && r.subsystem === s)
-        .reduce((acc, r) => acc + (r.count || 0), 0)
-      row[s] = c
-    })
-    return row
-  })
 
   const filterName = subsystemFilter
     ? subsystems.find((s) => s.code === subsystemFilter)?.name || subsystemFilter
@@ -152,52 +121,6 @@ export function DashboardPage({ subsystemFilter, onClearFilter }: DashboardPageP
         </Card>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Card>
-          <CardHeader className="py-3">
-            <CardTitle className="text-base">BA 系统故障率</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={rateData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="name" tick={{ fontSize: 12 }} />
-                <YAxis tick={{ fontSize: 12 }} />
-                <Tooltip />
-                <Bar dataKey="故障率" fill="#dc2626">
-                  {rateData.map((_, i) => (
-                    <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="py-3">
-            <CardTitle className="text-base">子系统 × 区域 设备计数</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {stackedData.length === 0 ? (
-              <p className="text-sm text-gray-400 py-16 text-center">无数据</p>
-            ) : (
-              <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={stackedData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="area" tick={{ fontSize: 12 }} />
-                  <YAxis tick={{ fontSize: 12 }} />
-                  <Tooltip />
-                  <Legend wrapperStyle={{ fontSize: 12 }} />
-                  {subs.map((s, i) => (
-                    <Bar key={s} dataKey={s} stackId="a" fill={PALETTE[i % PALETTE.length]} />
-                  ))}
-                </BarChart>
-              </ResponsiveContainer>
-            )}
-          </CardContent>
-        </Card>
-      </div>
     </div>
   )
 }

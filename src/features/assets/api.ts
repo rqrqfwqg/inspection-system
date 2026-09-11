@@ -5,7 +5,6 @@ import { API_BASE } from '@/config'
 import type {
   Subsystem,
   AreaNode,
-  AreaStats,
   SubsystemNode,
   SearchResult,
   BaProblemsResponse,
@@ -43,12 +42,6 @@ export async function getAreaTree(
   if (opts.building) p.set('building', opts.building)
   const q = p.toString()
   return api.get<AreaNode[]>(`${BASE}/trees/area${q ? `?${q}` : ''}`)
-}
-
-/** GET /areas/stats —— 区域多维统计（楼栋×楼层矩阵 / 子系统 / 机房类型 / 覆盖率） */
-export async function getAreaStats(building?: string): Promise<AreaStats> {
-  const q = building ? `?building=${encodeURIComponent(building)}` : ''
-  return api.get<AreaStats>(`${BASE}/areas/stats${q}`)
 }
 
 /** GET /trees/subsystem?parent= —— 子系统树逐级下钻（子系统→分类→设备） */

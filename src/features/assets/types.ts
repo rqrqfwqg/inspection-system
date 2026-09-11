@@ -40,49 +40,6 @@ export interface AreaNode {
   [key: string]: unknown
 }
 
-/** 区域多维统计（GET /areas/stats） */
-export interface AreaFloorStat {
-  floor: string
-  room_count: number
-  device_count: number
-  rooms_with_devices: number
-}
-
-export interface AreaBuildingStat {
-  building: string
-  area: string
-  room_count: number
-  device_count: number
-  rooms_with_devices: number
-  floors: AreaFloorStat[]
-}
-
-export interface AreaStats {
-  summary: {
-    building_count: number
-    floor_count: number
-    room_count: number
-    rooms_with_devices: number
-    rooms_with_self_record?: number
-    devices_mapped: number
-    devices_total: number
-    /** 固定资产 fuzzy 归属（房间粒度不可信）待核实数量 */
-    asset_pending: number
-  }
-  buildings: AreaBuildingStat[]
-  subsystems: Array<{ code: string | null; name: string; count: number }>
-  room_families: Array<{ name: string; room_count: number; device_count: number }>
-  top_rooms: Array<{
-    room_code: string
-    room_name: string
-    label: string
-    building: string
-    floor: string
-    count: number
-  }>
-  pending_by_building: Array<{ building: string; count: number }>
-}
-
 /** 子系统树节点（GET /trees/subsystem） */
 export type SubsystemNodeType = 'subsystem' | 'category' | 'device'
 export interface SubsystemNode {

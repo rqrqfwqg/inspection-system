@@ -1,14 +1,12 @@
 import * as React from 'react'
-import { BarChart3, Boxes, ChevronDown, ChevronUp, Cpu, MapPin, RefreshCw, Search } from 'lucide-react'
+import { Boxes, Cpu, MapPin, RefreshCw, Search } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useToast } from '@/hooks/use-toast'
-import { getAreaStats } from './api'
 import AreaTreeView from './AreaTreeView'
-import AreaStatsPanel from './AreaStatsPanel'
-import type { AreaNode, AreaStats } from './types'
+import type { AreaNode } from './types'
 
 interface AreaTreePageProps {
   /** 点击设备节点时打开详情抽屉 */
@@ -17,24 +15,19 @@ interface AreaTreePageProps {
 
 /**
  * 区域总览：楼栋 → 楼层 → 机房（名称（房间号））→ 设备 四级下钻，
- * 顶部为基于同一口径的多维可视化（楼栋×楼层 / 子系统 / 机房类型 / 覆盖率）。
+ * 右侧为所选范围内设备清单。
  */
 export function AreaTreePage({ onOpenDevice }: AreaTreePageProps) {
   const { toast } = useToast()
   const [input, setInput] = React.useState('')
   const [keyword, setKeyword] = React.useState('')
   const [onlyWithDevices, setOnlyWithDevices] = React.useState(false)
-  const [building, setBuilding] = React.useState<string | undefined>(undefined)
-  const [showStats, setShowStats] = React.useState(true)
   const [refreshToken, setRefreshToken] = React.useState(0)
 
   const [selectedKey, setSelectedKey] = React.useState<string | null>(null)
   const [rangeTitle, setRangeTitle] = React.useState('')
   const [rangeDevices, setRangeDevices] = React.useState<AreaNode[]>([])
   const [rangeNote, setRangeNote] = React.useState('')
-
-  const [stats, setStats] = React.useState<AreaStats | null>(null)
-  const [statsLoading, setStatsLoading] = React.useState(true)
 
   const onError = React.useCallback(
     (msg: string) => toast({ title: msg, variant: 'destructive' }),
@@ -46,25 +39,6 @@ export function AreaTreePage({ onOpenDevice }: AreaTreePageProps) {
     const t = setTimeout(() => setKeyword(input.trim()), 300)
     return () => clearTimeout(t)
   }, [input])
-
-  const loadStats = React.useCallback(async () => {
-    setStatsLoading(true)
-    try {
-      setStats(await getAreaStats(building))
-    } catch (e) {
-      toast({
-        title: '统计加载失败',
-        description: e instanceof Error ? e.message : '',
-        variant: 'destructive',
-      })
-    } finally {
-      setStatsLoading(false)
-    }
-  }, [building, toast])
-
-  React.useEffect(() => {
-    void loadStats()
-  }, [loadStats])
 
   const handleSelectRange = React.useCallback((node: AreaNode, devices: AreaNode[]) => {
     setSelectedKey(node.key)
@@ -96,7 +70,6 @@ export function AreaTreePage({ onOpenDevice }: AreaTreePageProps) {
     setInput('')
     setKeyword('')
     setOnlyWithDevices(false)
-    setBuilding(undefined)
     setSelectedKey(null)
     setRangeTitle('')
     setRangeDevices([])
@@ -130,28 +103,8 @@ export function AreaTreePage({ onOpenDevice }: AreaTreePageProps) {
             <RefreshCw className="w-4 h-4 mr-1" />
             刷新
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => setShowStats((v) => !v)}>
-            <BarChart3 className="w-4 h-4 mr-1" />
-            {showStats ? '收起可视化' : '展开可视化'}
-            {showStats ? (
-              <ChevronUp className="w-4 h-4 ml-1" />
-            ) : (
-              <ChevronDown className="w-4 h-4 ml-1" />
-            )}
-          </Button>
         </CardContent>
       </Card>
-
-      {showStats && (
-        <AreaStatsPanel
-          stats={stats}
-          loading={statsLoading}
-          onPickBuilding={(b) => {
-            setBuilding((prev) => (prev === b ? undefined : b))
-            setRefreshToken((v) => v + 1)
-          }}
-        />
-      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="lg:col-span-2">
@@ -159,21 +112,12 @@ export function AreaTreePage({ onOpenDevice }: AreaTreePageProps) {
             <CardTitle className="text-base flex items-center gap-2">
               <MapPin className="w-4 h-4" />
               区域树（楼栋 → 楼层 → 机房 → 设备）
-              {building && (
-                <Badge variant="outline" className="ml-1">
-                  {building}
-                  <button className="ml-1 text-gray-400" onClick={() => setBuilding(undefined)}>
-                    ×
-                  </button>
-                </Badge>
-              )}
             </CardTitle>
           </CardHeader>
           <CardContent>
             <AreaTreeView
               keyword={keyword}
               onlyWithDevices={onlyWithDevices}
-              building={building}
               selectedKey={selectedKey}
               refreshToken={refreshToken}
               onSelectRange={handleSelectRange}
