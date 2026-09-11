@@ -34,6 +34,7 @@ from asset_schemas import (
     RelationTypeResponse,
     BulkRecordCreate, BulkRecordItem,
     SearchResult, DevicePhotoResponse,
+    RoomDeviceBind,
     TransferMappingItem, TransferMappingResponse, RecordTransferRequest,
 )
 # 鉴权统一收口到 dependencies（消除与 main.py 的重复实现）
@@ -2870,3 +2871,269 @@ async def import_assets_file(
     result["filename"] = filename
     result["dry_run"] = dry_run
     return result
+
+
+# ========================= 扫码盘点 · 房间 ↔ 设备（一对多） =========================
+# 设计要点（2026-09-11 落地）：
+#   1) 不新建表：复用既有约定 —— device_relations 的「所在机房」边
+#      （from_code = 设备编号，to_code = 房间编号，relation_type = '所在机房'）。
+#      后端 _build_area_index() 把这条通路列为「机房 → 设备」归属的第一优先级，
+#      因此盘点写入后 /trees/area、/areas/stats 立即可见，零改造打通可视化。
+#   2) 同步回填 devices.room_id / building / floor，保持设备卡位置字段一致
+#      （复刻 update_device 对 room_id 的级联约定，避免两处口径漂移）。
+#   3) 一对多语义：一间房多台设备；一台设备只归属一间房。
+#      跨房间重复扫码 → 409，需显式 move=true 改挂（盘点现场纠错）。
+#   4) 存在性校验放宽到 devices ∪ 别名 ∪ records —— 既有 460 条「所在机房」边中
+#      from_code 大多不在 devices 表（是仅台账存在的真实设备），只认 devices 会漏。
+#   5) 读写同源：绑定口径只含「所在机房」边 + devices.room_id 两条显式通路，
+#      不含 records 文本推断 / fixed_assets 模糊匹配 —— 保证解绑与改挂可控、不产生双挂。
+
+_INV_LOCATE_LABEL = RELATION_CODE_LABEL["locate_in_room"]   # 「所在机房」
+
+
+def _room_code_resolver(db: Session):
+    """返回 (exact, norm) —— 外部房间编号 → 真实 room.code（先精确、后归一化）。"""
+    rooms = db.query(Room).all()
+    exact = {r.code: r.code for r in rooms}
+    norm: Dict[str, str] = {}
+    for r in rooms:
+        n = _norm_room_code(r.code)
+        if n and n not in norm:
+            norm[n] = r.code
+    return exact, norm
+
+
+def _get_room_or_404(db: Session, room_code: str) -> Room:
+    """房间编号 → Room（先精确、后归一化），未命中 404。"""
+    code = (room_code or "").strip()
+    room = db.query(Room).filter(Room.code == code).first()
+    if room:
+        return room
+    n = _norm_room_code(code)
+    if n:
+        for r in db.query(Room).all():
+            if _norm_room_code(r.code) == n:
+                return r
+    raise HTTPException(status_code=404, detail=f"机房不存在：{room_code}")
+
+
+def _resolve_inventory_device(db: Session, raw: str):
+    """扫码编号 → (canonical_code, device|None, profile|None)；未命中返回三个 None。
+
+    别名先桥接 canonical（与 /search 同源）；未登记 devices 时回落 records 画像。
+    """
+    code = (raw or "").strip()
+    if not code:
+        return None, None, None
+    dev = _resolve_device_by_code_or_alias(db, code)
+    if dev:
+        return dev.device_code, dev, None
+    # 扫到的是房间号本身 → 不算设备
+    if db.query(Room).filter(Room.code == code).first():
+        return None, None, None
+    prof = _records_profiles(db, [code]).get(code)
+    if prof:
+        return code, None, prof
+    return None, None, None
+
+
+def _device_bound_room_code(db: Session, device_code: str) -> Optional[str]:
+    """设备当前归属房间编号（显式绑定口径）；未绑定返回 None。"""
+    exact, norm = _room_code_resolver(db)
+    rel = (db.query(DeviceRelation)
+           .filter(DeviceRelation.from_code == device_code,
+                   DeviceRelation.relation_type == _INV_LOCATE_LABEL)
+           .order_by(DeviceRelation.id.desc()).first())
+    if rel:
+        tc = (rel.to_code or "").strip()
+        rc = exact.get(tc) or norm.get(_norm_room_code(tc))
+        if rc:
+            return rc
+    d = db.query(Device).filter(Device.device_code == device_code).first()
+    if d and d.room_id:
+        r = db.query(Room).filter(Room.id == d.room_id).first()
+        if r:
+            return r.code
+    return None
+
+
+def _room_bound_codes(db: Session, room: Room) -> set:
+    """房间已绑定设备编号集合（与写入同源的显式绑定口径）。"""
+    exact, norm = _room_code_resolver(db)
+    codes = set()
+    for rel in db.query(DeviceRelation).filter(
+            DeviceRelation.relation_type == _INV_LOCATE_LABEL).all():
+        tc = (rel.to_code or "").strip()
+        if (exact.get(tc) or norm.get(_norm_room_code(tc))) == room.code and rel.from_code:
+            codes.add(rel.from_code)
+    for (dc,) in db.query(Device.device_code).filter(Device.room_id == room.id).all():
+        if dc:
+            codes.add(dc)
+    codes.discard(room.code)      # 排除机房本体台账记录（device_code 即房间号）
+    return codes
+
+
+def _room_brief(room: Room) -> Dict[str, Any]:
+    return {"id": room.id, "code": room.code, "name": room.name,
+            "building": room.building, "floor": room.floor,
+            "room_type": room.room_type}
+
+
+def _inventory_device_rows(db: Session, codes: set) -> List[Dict[str, Any]]:
+    """设备编号集合 → 盘点行（名称/子系统/是否已登记/位置描述，逐级兜底）。"""
+    if not codes:
+        return []
+    code_list = sorted(codes)
+    dev_map = {d.device_code: d
+               for d in db.query(Device).filter(Device.device_code.in_(code_list)).all()}
+    sub_by_id = {s.id: s.name for s in db.query(Subsystem).all()}
+    missing = [c for c in code_list if c not in dev_map]
+    profs = _records_profiles(db, missing) if missing else {}
+
+    rows: List[Dict[str, Any]] = []
+    for code in code_list:
+        d = dev_map.get(code)
+        p = profs.get(code) or {}
+        rows.append({
+            "device_code": code,
+            "name": (d.name if d and d.name else p.get("name")) or "",
+            "subsystem_name": (sub_by_id.get(d.subsystem_id) if d else None) or p.get("subsystem_name"),
+            "is_registered": d is not None,
+            "is_active": bool(d.is_active) if d is not None else True,
+            "location_desc": (d.location_desc if d else "") or "",
+        })
+    return rows
+
+
+@router.get("/rooms/inventory/overview")
+def rooms_inventory_overview(building: Optional[str] = None,
+                             db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """扫码盘点进度总览：各房间已绑定设备数（按设备数倒序，供选房间页显示进度）。"""
+    exact, norm = _room_code_resolver(db)
+    rooms = db.query(Room).all()
+    counts: Dict[str, set] = {}
+    for rel in db.query(DeviceRelation).filter(
+            DeviceRelation.relation_type == _INV_LOCATE_LABEL).all():
+        tc = (rel.to_code or "").strip()
+        rc = exact.get(tc) or norm.get(_norm_room_code(tc))
+        if rc and rel.from_code:
+            counts.setdefault(rc, set()).add(rel.from_code)
+    room_by_id = {r.id: r.code for r in rooms}
+    for dc, rid in db.query(Device.device_code, Device.room_id)\
+            .filter(Device.room_id.isnot(None)).all():
+        rc = room_by_id.get(rid)
+        if rc and dc:
+            counts.setdefault(rc, set()).add(dc)
+    for rc, st in counts.items():
+        st.discard(rc)
+
+    out = []
+    for r in rooms:
+        if building and r.building != building:
+            continue
+        out.append({**_room_brief(r), "device_count": len(counts.get(r.code, set()))})
+    out.sort(key=lambda x: (-x["device_count"], x["building"], x["floor"], x["code"]))
+    return {
+        "total_rooms": len(out),
+        "rooms_with_devices": sum(1 for x in out if x["device_count"] > 0),
+        "total_bound_devices": sum(x["device_count"] for x in out),
+        "rooms": out,
+    }
+
+
+@router.get("/rooms/{room_code}/devices")
+def room_devices(room_code: str, db: Session = Depends(get_db),
+                 _: User = Depends(_get_current_user)):
+    """某房间已绑定（已盘）设备清单。"""
+    room = _get_room_or_404(db, room_code)
+    rows = _inventory_device_rows(db, _room_bound_codes(db, room))
+    return {"room": _room_brief(room), "count": len(rows), "devices": rows}
+
+
+@router.post("/rooms/{room_code}/devices")
+def bind_device_to_room(room_code: str, data: RoomDeviceBind,
+                        db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """扫码把设备绑定到房间（幂等，现场连续扫码用）。
+
+    - 设备已在本房间 → already=true，不重复建边
+    - 设备已归属其他房间 → 409（除非 move=true 改挂）
+    - 返回更新后的本房间已绑定数量 + 本次设备信息，供前端即时反馈
+    """
+    room = _get_room_or_404(db, room_code)
+    code, dev, _prof = _resolve_inventory_device(db, data.device_code)
+    if not code:
+        raise HTTPException(
+            status_code=404,
+            detail=f"未找到该设备编号：{(data.device_code or '').strip()}（请核对编号或先在设备台账登记）")
+
+    cur_room = _device_bound_room_code(db, code)
+    moved_from = cur_room if (cur_room and cur_room != room.code) else None
+    if moved_from:
+        if not data.move:
+            other = db.query(Room).filter(Room.code == moved_from).first()
+            raise HTTPException(
+                status_code=409,
+                detail=f"该设备已归属机房 {moved_from}（{other.name if other else ''}）")
+        # move：清掉原房间的「所在机房」边，保证一台设备只归属一间房
+        db.query(DeviceRelation).filter(
+            DeviceRelation.from_code == code,
+            DeviceRelation.relation_type == _INV_LOCATE_LABEL,
+        ).delete(synchronize_session=False)
+
+    already = code in _room_bound_codes(db, room)
+    if not already:
+        db.add(DeviceRelation(
+            from_code=code, to_code=room.code, relation_type=_INV_LOCATE_LABEL,
+            subsystem_id=dev.subsystem_id if dev else None,
+            meta={"source": "scan_inventory"}))
+        db.flush()
+
+    # 回填 devices 位置字段（与 update_device 的 room_id 级联约定一致）
+    if dev is None:
+        dev = db.query(Device).filter(Device.device_code == code).first()
+    if dev is not None:
+        dev.room_id = room.id
+        dev.building = room.building
+        dev.floor = room.floor
+        dev.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    info = _inventory_device_rows(db, {code})
+    return {
+        "success": True,
+        "already": already,
+        "moved_from": moved_from,
+        "device": info[0] if info else {"device_code": code},
+        "room": _room_brief(room),
+        "count": len(_room_bound_codes(db, room)),
+    }
+
+
+@router.delete("/rooms/{room_code}/devices/{device_code}")
+def unbind_device_from_room(room_code: str, device_code: str,
+                            db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """解绑：删除该设备到本房间的「所在机房」边，并清空指向本房间的 devices.room_id。"""
+    room = _get_room_or_404(db, room_code)
+    code = (device_code or "").strip()
+    resolved = _resolve_device_by_code_or_alias(db, code)
+    if resolved:
+        code = resolved.device_code
+
+    exact, norm = _room_code_resolver(db)
+    removed = 0
+    for rel in db.query(DeviceRelation).filter(
+            DeviceRelation.from_code == code,
+            DeviceRelation.relation_type == _INV_LOCATE_LABEL).all():
+        tc = (rel.to_code or "").strip()
+        if (exact.get(tc) or norm.get(_norm_room_code(tc))) == room.code:
+            db.delete(rel)
+            removed += 1
+
+    dev = resolved or db.query(Device).filter(Device.device_code == code).first()
+    if dev is not None and dev.room_id == room.id:
+        dev.room_id = None
+        dev.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    return {"success": True, "removed": removed, "device_code": code,
+            "room": _room_brief(room), "count": len(_room_bound_codes(db, room))}

@@ -18,6 +18,7 @@ import {
   scanDeleteRelation,
 } from '@/features/scan/api'
 import type { ScanDevice, ScanRelationType, PowerChainResult } from '@/features/scan/types'
+import { ScanInput } from '@/components/scan/ScanInput'
 import { ArrowDown, ArrowUp, Link2, Zap } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -228,15 +229,21 @@ export function DeviceRelationPanel({
       <div className="border-t border-gray-100 pt-3">
         <p className="text-sm font-medium text-gray-800 flex items-center gap-1.5 mb-2">
           <Link2 className="w-4 h-4 text-blue-600" />
-          现场建边（扫完这台，输入关联设备编号）
+          现场建边（扫对方设备，或手输编号）
         </p>
         <div className="space-y-2.5">
+          <ScanInput
+            onScan={(scanned) => setOtherCode(scanned)}
+            placeholder="扫上级/下级设备二维码或条码"
+          />
           <div className="space-y-1">
-            <Label className="text-xs text-gray-500">对方设备编号</Label>
+            <Label className="text-xs text-gray-500">
+              对方设备编号（扫码后自动填入，可手工修正；支持别名）
+            </Label>
             <Input
               value={otherCode}
               onChange={(e) => setOtherCode(e.target.value)}
-              placeholder="输入上级配电柜 / 冷水机组 / 交换机编号（别名亦可）"
+              placeholder="上级配电柜 / 冷水机组 / 交换机编号"
               className="h-9 text-sm"
             />
           </div>

@@ -1,6 +1,7 @@
 // 扫码补录 P0 · API 客户端
 // 请求前缀与后端一致：/assets → /ops/api/assets（见 src/config.ts）
 import { api } from '@/services/api'
+import { API_BASE } from '@/config'
 import type {
   ScanDevice,
   ScanSearchResult,
@@ -11,6 +12,11 @@ import type {
   ScanRelationType,
   PowerChainResult,
   CreateRelationPayload,
+  RoomInventoryOverview,
+  RoomDevicesResult,
+  BindDeviceResult,
+  BindDeviceOutcome,
+  UnbindDeviceResult,
 } from './types'
 
 const BASE = '/assets'
@@ -120,4 +126,80 @@ export function scanCreateRelation(payload: CreateRelationPayload): Promise<{ id
 /** DELETE /assets/relations/{rid} —— 删除一条关联（现场误建纠错） */
 export function scanDeleteRelation(rid: number): Promise<{ success: boolean; message: string }> {
   return api.delete<{ success: boolean; message: string }>(`${BASE}/relations/${rid}`)
+}
+
+// ===== P2：扫码盘点 · 房间 ↔ 设备（一对多） =====
+
+/** GET /assets/rooms/inventory/overview —— 各房间已绑定设备数（盘点进度，按设备数倒序） */
+export function scanInventoryOverview(building?: string): Promise<RoomInventoryOverview> {
+  const q = building ? `?building=${encodeURIComponent(building)}` : ''
+  return api.get<RoomInventoryOverview>(`${BASE}/rooms/inventory/overview${q}`)
+}
+
+/** GET /assets/rooms/{roomCode}/devices —— 某房间已绑定（已盘）设备清单 */
+export function scanRoomDevices(roomCode: string): Promise<RoomDevicesResult> {
+  return api.get<RoomDevicesResult>(`${BASE}/rooms/${encodeURIComponent(roomCode)}/devices`)
+}
+
+/** DELETE /assets/rooms/{roomCode}/devices/{deviceCode} —— 解绑（删「所在机房」边 + 清 room_id） */
+export function scanUnbindDeviceFromRoom(
+  roomCode: string,
+  deviceCode: string,
+): Promise<UnbindDeviceResult> {
+  return api.delete<UnbindDeviceResult>(
+    `${BASE}/rooms/${encodeURIComponent(roomCode)}/devices/${encodeURIComponent(deviceCode)}`,
+  )
+}
+
+/**
+ * POST /assets/rooms/{roomCode}/devices —— 扫码把设备绑定到房间（幂等）。
+ *
+ * 用原生 fetch 而非 api.post：需要区分 **409 冲突**（设备已归属其他机房，等用户确认改挂）
+ * 与其他错误（404 未找到 / 400 参数）。通用 api 层只抛 message，拿不到状态码。
+ * move=true 时后端会清掉原房间的边，保证一台设备只归属一间房。
+ */
+export async function scanBindDeviceToRoom(
+  roomCode: string,
+  deviceCode: string,
+  move = false,
+): Promise<BindDeviceOutcome> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  const token = (api as unknown as { token?: string | null }).token
+  if (token) headers['Authorization'] = `Bearer ${token}`
+
+  const resp = await fetch(`${API_BASE}${BASE}/rooms/${encodeURIComponent(roomCode)}/devices`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ device_code: deviceCode, move }),
+  })
+  const data = await resp.json().catch(() => ({} as Record<string, unknown>))
+  if (resp.ok) return data as BindDeviceResult
+
+  const detail = String((data as { detail?: unknown })?.detail ?? '')
+  if (resp.status === 409) {
+    // detail 形如「该设备已归属机房 P12W2F-PDF-102（配电房）」
+    const roomCode2 = detail.replace(/^该设备已归属机房\s*/, '').split('（')[0].trim()
+    return { conflict: true, room_code: roomCode2, message: detail || '该设备已归属其他机房' }
+  }
+  throw new Error(detail || `绑定失败 (${resp.status})`)
+}
+
+/**
+ * 扫码内容 → 设备编号。
+ *
+ * 标签打印的二维码内容是 `/ops/qr/<encodeURIComponent(编号)>` 直达链接（见 QrLabelPage），
+ * 扫码枪扫标签会输出整条 URL，摄像头同理；也兼容现场手输纯编号。
+ */
+export function parseScanPayload(raw: string): string {
+  const s = (raw || '').trim()
+  if (!s) return ''
+  const m = /[/#]qr\/([^?#\s]+)/.exec(s)
+  if (m) {
+    try {
+      return decodeURIComponent(m[1]).trim()
+    } catch {
+      return m[1].trim()
+    }
+  }
+  return s
 }

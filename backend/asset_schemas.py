@@ -257,6 +257,18 @@ class BulkRecordCreate(BaseModel):
     records: List[BulkRecordItem] = []
 
 
+# ==================== 扫码盘点 · 房间 ↔ 设备（一对多） ====================
+
+class RoomDeviceBind(BaseModel):
+    """扫码把设备绑定到房间。
+
+    move=True：若该设备已归属其他房间，自动改挂到本房间（现场纠错用）。
+    落点 = device_relations 的「所在机房」边 + devices.room_id/building/floor 回填。
+    """
+    device_code: str
+    move: bool = False
+
+
 # ==================== 设备现场照片（扫码补录 P0） ====================
 
 class DevicePhotoResponse(BaseModel):
