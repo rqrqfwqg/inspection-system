@@ -22,10 +22,6 @@ def migrate() -> None:
             "UPDATE users SET avatar = REPLACE(avatar, '/uploads/', '/ops/uploads/') "
             "WHERE avatar LIKE '/uploads/%'"
         ))
-        conn.execute(text(
-            "UPDATE shift_tasks SET images = REPLACE(images, '/uploads/', '/ops/uploads/') "
-            "WHERE images LIKE '%/uploads/%'"
-        ))
     print("[迁移] 上传路径已命名为 /ops/uploads/（幂等）")
 
 

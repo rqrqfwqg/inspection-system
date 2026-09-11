@@ -14,7 +14,7 @@ import { useToast } from '@/hooks/use-toast'
 import { Toaster } from '@/components/ui/toaster'
 import { api } from '@/services/api'
 import { useAuth } from '@/contexts/AuthContext'
-import { DEPARTMENTS } from '@/types/duty'
+import { DEPARTMENTS } from '@/lib/constants'
 
 interface UserInfo {
   id: number

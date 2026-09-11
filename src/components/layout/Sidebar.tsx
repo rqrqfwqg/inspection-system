@@ -3,9 +3,6 @@ import {
   Users,
   Settings,
   X,
-  ClipboardList,
-  CalendarClock,
-  Calendar,
   Search,
   FileSpreadsheet,
   Boxes,
@@ -27,9 +24,6 @@ export default function Sidebar({ isOpen, onToggle }: SidebarProps) {
   const isAdmin = user?.role === 'admin'
 
   const menuItems = [
-    { icon: CalendarClock, label: '当班信息', path: '/duty-board', adminOnly: false },
-    { icon: Calendar, label: '巡查计划', path: '/inspection-plan', adminOnly: false },
-    { icon: ClipboardList, label: '交接班台账', path: '/shift-handover', adminOnly: false },
     // { icon: FileDigit, label: 'CAD处理', path: '/cad', adminOnly: false }, // 暂时隐藏CAD菜单
     { icon: Users, label: '用户管理', path: '/users', adminOnly: true },
     { icon: Settings, label: '系统设置', path: '/settings', adminOnly: false },

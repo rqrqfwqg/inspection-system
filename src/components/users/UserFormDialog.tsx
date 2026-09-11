@@ -18,7 +18,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import AvatarUpload from './AvatarUpload'
-import { DEPARTMENTS } from '@/types/duty'
+import { DEPARTMENTS } from '@/lib/constants'
 
 interface User {
   id: number

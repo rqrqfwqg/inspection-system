@@ -23,7 +23,6 @@ def get_db():
 def init_db():
     Base.metadata.create_all(bind=engine)
 
-
 class User(Base):
     __tablename__ = "users"
     
@@ -40,44 +39,6 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
-
-class DutySchedule(Base):
-    __tablename__ = "duty_schedules"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    staff_id = Column(Integer, ForeignKey("users.id"))
-    staff_name = Column(String)
-    department = Column(String)
-    position = Column(String)
-    shift_type = Column(String)
-    date = Column(String)
-    start_time = Column(String)
-    end_time = Column(String)
-    status = Column(String, default="scheduled")
-    created_at = Column(DateTime, default=datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
-
-
-class ShiftTask(Base):
-    __tablename__ = "shift_tasks"
-
-    id = Column(Integer, primary_key=True, index=True)
-    title = Column(String)
-    content = Column(Text, nullable=True)
-    shift = Column(String)
-    date = Column(String)
-    department = Column(String, nullable=True)  # 所属部门
-    completed = Column(Boolean, default=False)
-    completed_at = Column(DateTime, nullable=True)
-    completed_by = Column(String, nullable=True)
-    priority = Column(String, default="normal")
-    notes = Column(Text, nullable=True)
-    handover_count = Column(Integer, default=0)
-    images = Column(Text, nullable=True)  # JSON字符串，存储图片路径列表
-    created_at = Column(DateTime, default=datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
-
-
 class Room(Base):
     """机房信息表（独立维护，不随计划变动）"""
     __tablename__ = "rooms"
@@ -93,37 +54,6 @@ class Room(Base):
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
-
-class InspectionRule(Base):
-    """巡查规则表（控制高频/低频的生成策略）"""
-    __tablename__ = "inspection_rules"
-
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)         # 规则名称，如"标准巡查规则"
-    high_freq_days = Column(Integer, default=4)   # 高频：每 N 天巡查一轮（全部高频机房）
-    low_freq_times = Column(Integer, default=2)   # 低频：每月巡查 M 次，均摊到每天
-    is_active = Column(Boolean, default=True)     # 是否为当前生效规则
-    created_at = Column(DateTime, default=datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
-
-
-class InspectionPlan(Base):
-    """巡查计划数据表（按年月存储，由规则+机房自动生成）"""
-    __tablename__ = "inspection_plans"
-
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, nullable=False)  # 计划名称，如"2024年1月巡查计划"
-    year = Column(Integer)   # 年份
-    month = Column(Integer)  # 月份
-    data = Column(Text, nullable=False)  # JSON字符串，存储完整的巡查计划数据
-    created_at = Column(DateTime, default=datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
-
-
-# =====================================================================
-# 分系统资料管理模块（资产管理）
-# =====================================================================
-
 class Subsystem(Base):
     """子系统字典：电力/消防/弱电/制冷/照明（可维护）"""
     __tablename__ = "subsystems"
@@ -136,7 +66,6 @@ class Subsystem(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
-
 
 class Device(Base):
     """设备主表 / 全局设备台账（检索主键 = device_code）"""
@@ -164,7 +93,6 @@ class Device(Base):
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
-
 class DataTable(Base):
     """资料表元数据：每个子系统下的一张或多张资料表"""
     __tablename__ = "data_tables"
@@ -178,7 +106,6 @@ class DataTable(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
-
 
 class FieldDef(Base):
     """字段定义（动态字段）：每张资料表的列由它定义，非硬编码"""
@@ -196,7 +123,6 @@ class FieldDef(Base):
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
-
 class Record(Base):
     """资料记录：字段值存 JSON（{key: value}）"""
     __tablename__ = "records"
@@ -208,7 +134,6 @@ class Record(Base):
     created_by = Column(String, default="")
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
-
 
 class RelationType(Base):
     """关联类型字典（P1 新增）：统一 relation_type 文本为受控字典。
@@ -230,7 +155,6 @@ class RelationType(Base):
     sort_order = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
 
-
 class DeviceRelation(Base):
     """设备关联关系图：设备间的物理/逻辑链路"""
     __tablename__ = "device_relations"
@@ -244,7 +168,6 @@ class DeviceRelation(Base):
     subsystem_id = Column(Integer, ForeignKey("subsystems.id"), nullable=True)
     meta = Column(JSON, default=dict)          # 附加属性，如回路/线径/端口/VLAN/距离
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
-
 
 # =====================================================================
 # 资产模块新增模型（T3GTC 固定资产 / 设备档案 / BA 问题 / 字典 / 批次）
@@ -266,7 +189,6 @@ class BaSystemMap(Base):
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
-
 class EquipmentCategory(Base):
     """设备类型字典（资产名录），供 fixed_assets / devices 归类。"""
     __tablename__ = "equipment_categories"
@@ -278,7 +200,6 @@ class EquipmentCategory(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
-
 
 class DeviceAlias(Base):
     """设备编号别名 → 规范 device_code 桥接表。
@@ -295,7 +216,6 @@ class DeviceAlias(Base):
     remark = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
 
-
 class ImportBatch(Base):
     """导入批次溯源：每文件 = 1 条批次。"""
     __tablename__ = "import_batches"
@@ -310,7 +230,6 @@ class ImportBatch(Base):
     status = Column(String, default="done")       # done / partial / failed
     imported_by = Column(String, default="")
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
-
 
 class FixedAsset(Base):
     """固定资产总账（固定资产清单模板 row4 落此）。
@@ -352,7 +271,6 @@ class FixedAsset(Base):
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
-
 class DeviceArchive(Base):
     """设备档案主表（设备档案模板 row2 落此），与 fixed_assets 平行挂 devices。"""
     __tablename__ = "device_archives"
@@ -393,7 +311,6 @@ class DeviceArchive(Base):
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
-
 class DeviceAccessory(Base):
     """配件独立表：主设备行之后的「配件行」落入此表，与设备关联。"""
     __tablename__ = "device_accessories"
@@ -412,7 +329,6 @@ class DeviceAccessory(Base):
     source_batch_id = Column(Integer, ForeignKey("import_batches.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
 
-
 class BaProblem(Base):
     """BA 问题清单落库（可视化与关联设计 B.2）。"""
     __tablename__ = "ba_problems"
@@ -429,7 +345,6 @@ class BaProblem(Base):
     source_batch_id = Column(Integer, ForeignKey("import_batches.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
-
 
 class DevicePhoto(Base):
     """设备现场照片（扫码补录 P0：手机拍照/相册上传，URL 落此表，按设备聚合展示）。
