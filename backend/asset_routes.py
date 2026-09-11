@@ -22,7 +22,7 @@ from database import (
     get_db, User, Subsystem, Device, DataTable, FieldDef, Record, DeviceRelation,
     BaSystemMap, EquipmentCategory, DeviceAlias, ImportBatch,
     FixedAsset, DeviceArchive, DeviceAccessory, BaProblem, Room, DevicePhoto,
-    RelationType,
+    RelationType, RoomInventoryRecord,
 )
 from asset_schemas import (
     SubsystemCreate, SubsystemUpdate, SubsystemResponse,
@@ -34,7 +34,7 @@ from asset_schemas import (
     RelationTypeResponse,
     BulkRecordCreate, BulkRecordItem,
     SearchResult, DevicePhotoResponse,
-    RoomDeviceBind,
+    RoomDeviceBind, RoomInventoryComplete,
     TransferMappingItem, TransferMappingResponse, RecordTransferRequest,
 )
 # 鉴权统一收口到 dependencies（消除与 main.py 的重复实现）
@@ -2979,6 +2979,27 @@ def _room_brief(room: Room) -> Dict[str, Any]:
             "room_type": room.room_type}
 
 
+def _inventory_record_map(db: Session) -> Dict[str, "RoomInventoryRecord"]:
+    """room_code → 盘点完成记录（一次查询，overview 遍历复用，避免 N+1）。"""
+    return {r.room_code: r for r in db.query(RoomInventoryRecord).all()}
+
+
+def _inventory_record_brief(rec) -> Optional[Dict[str, Any]]:
+    """盘点完成记录 → 前端展示块；未盘点返回 None（前端据此显示「未盘点」）。"""
+    if rec is None:
+        return None
+    return {
+        "inspected": True,
+        "status": rec.status or "completed",
+        "device_count": rec.device_count or 0,
+        "empty_confirmed": bool(rec.empty_confirmed),
+        "operator": rec.operator or "",
+        "remark": rec.remark or "",
+        "source": rec.source or "",
+        "completed_at": rec.completed_at.isoformat() if rec.completed_at else None,
+    }
+
+
 def _inventory_device_rows(db: Session, codes: set) -> List[Dict[str, Any]]:
     """设备编号集合 → 盘点行（名称/子系统/是否已登记/位置描述，逐级兜底）。"""
     if not codes:
@@ -3027,16 +3048,26 @@ def rooms_inventory_overview(building: Optional[str] = None,
     for rc, st in counts.items():
         st.discard(rc)
 
+    rec_map = _inventory_record_map(db)
     out = []
     for r in rooms:
         if building and r.building != building:
             continue
-        out.append({**_room_brief(r), "device_count": len(counts.get(r.code, set()))})
+        rec = rec_map.get(r.code)
+        out.append({**_room_brief(r), "device_count": len(counts.get(r.code, set())),
+                    "inspected": rec is not None,
+                    "inspected_at": (rec.completed_at.isoformat()
+                                     if rec and rec.completed_at else None),
+                    "inspector": (rec.operator if rec else "") or "",
+                    "empty_confirmed": bool(rec.empty_confirmed) if rec else False})
     out.sort(key=lambda x: (-x["device_count"], x["building"], x["floor"], x["code"]))
     return {
         "total_rooms": len(out),
         "rooms_with_devices": sum(1 for x in out if x["device_count"] > 0),
         "total_bound_devices": sum(x["device_count"] for x in out),
+        "inspected_rooms": sum(1 for x in out if x["inspected"]),
+        "empty_inspected_rooms": sum(1 for x in out
+                                     if x["inspected"] and x["device_count"] == 0),
         "rooms": out,
     }
 
@@ -3047,7 +3078,10 @@ def room_devices(room_code: str, db: Session = Depends(get_db),
     """某房间已绑定（已盘）设备清单。"""
     room = _get_room_or_404(db, room_code)
     rows = _inventory_device_rows(db, _room_bound_codes(db, room))
-    return {"room": _room_brief(room), "count": len(rows), "devices": rows}
+    rec = (db.query(RoomInventoryRecord)
+           .filter(RoomInventoryRecord.room_code == room.code).first())
+    return {"room": _room_brief(room), "count": len(rows), "devices": rows,
+            "inspected": _inventory_record_brief(rec)}
 
 
 @router.post("/rooms/{room_code}/devices")
@@ -3137,3 +3171,49 @@ def unbind_device_from_room(room_code: str, device_code: str,
 
     return {"success": True, "removed": removed, "device_code": code,
             "room": _room_brief(room), "count": len(_room_bound_codes(db, room))}
+
+
+@router.post("/rooms/{room_code}/inventory/complete")
+def complete_room_inventory(room_code: str, data: RoomInventoryComplete,
+                            db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """标记房间「已盘点」（幂等 upsert，空房间同样可提交）。
+
+    - device_count 由服务端按「所在机房」绑定口径实时统计后**快照**，口径与设备清单一致；
+    - 0 台设备 → empty_confirmed=true，语义是「现场确认该房间无设备」，不阻断提交；
+    - 重复提交为更新（completed_at 刷新），支持同一房间反复盘点。
+    """
+    room = _get_room_or_404(db, room_code)
+    count = len(_room_bound_codes(db, room))
+    now = datetime.now(timezone.utc)
+
+    rec = (db.query(RoomInventoryRecord)
+           .filter(RoomInventoryRecord.room_code == room.code).first())
+    if rec is None:
+        rec = RoomInventoryRecord(room_code=room.code, created_at=now)
+        db.add(rec)
+
+    rec.status = "completed"
+    rec.device_count = count
+    rec.empty_confirmed = (count == 0)
+    rec.operator = (data.operator or "").strip()[:64]
+    rec.remark = (data.remark or "").strip()[:500]
+    rec.source = ((data.source or "miniprogram").strip()[:32]) or "miniprogram"
+    rec.completed_at = now
+    rec.updated_at = now
+    db.commit()
+    db.refresh(rec)
+
+    return {"success": True, "room": _room_brief(room), "count": count,
+            "inspected": _inventory_record_brief(rec)}
+
+
+@router.delete("/rooms/{room_code}/inventory/complete")
+def undo_room_inventory(room_code: str, db: Session = Depends(get_db),
+                        _: User = Depends(_get_current_user)):
+    """撤销房间「已盘点」标记（现场误标纠错）。设备绑定关系不受影响。"""
+    room = _get_room_or_404(db, room_code)
+    removed = (db.query(RoomInventoryRecord)
+               .filter(RoomInventoryRecord.room_code == room.code)
+               .delete(synchronize_session=False))
+    db.commit()
+    return {"success": True, "removed": removed, "room": _room_brief(room)}

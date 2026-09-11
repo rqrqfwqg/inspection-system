@@ -279,3 +279,14 @@ class DevicePhotoResponse(BaseModel):
     created_by: str = ""
     created_at: Any = None
     model_config = ConfigDict(from_attributes=True)
+
+
+class RoomInventoryComplete(BaseModel):
+    """标记房间「已盘点」。
+
+    device_count 不作为入参：由服务端按「所在机房」绑定口径实时统计后快照，
+    避免客户端口径与设备清单漂移；0 台设备时为 empty_confirmed 空房确认。
+    """
+    operator: str = ""
+    remark: str = ""
+    source: str = "miniprogram"

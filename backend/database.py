@@ -360,3 +360,31 @@ class DevicePhoto(Base):
     note = Column(String, default="")                         # 拍摄说明（如“柜内铭牌”“背面接线”）
     created_by = Column(String, default="")                   # 上传人（免鉴权模式记设备名/工号）
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
+
+
+# =====================================================================
+# 扫码盘点（2026-09-11）：房间盘点完成记录
+# =====================================================================
+
+class RoomInventoryRecord(Base):
+    """房间盘点完成记录 —— 现场扫完一间房后的「已盘点」确认（空房间亦可）。
+
+    设计要点：
+    1) 一间房一条记录（room_code 唯一），重复提交为**更新**（幂等），支持反复盘点覆盖；
+    2) 与设备绑定口径解耦：设备清单仍以 device_relations 的「所在机房」边为准，
+       本表只回答「这间房有没有被现场确认盘过」——因此 0 台设备的空房间也能落记录；
+    3) device_count 是完成当刻的设备数**快照**，事后台账变动不回溯改写这次盘点的历史事实。
+    """
+    __tablename__ = "room_inventory_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    room_code = Column(String, unique=True, nullable=False, index=True)  # 真实 room.code
+    status = Column(String, default="completed")        # completed（预留 pending/partial）
+    device_count = Column(Integer, default=0)           # 完成时该房间已绑定设备数快照
+    empty_confirmed = Column(Boolean, default=False)    # 是否「现场确认本房间无设备」
+    operator = Column(String, default="")               # 盘点人（免鉴权模式由端上报）
+    source = Column(String, default="miniprogram")      # miniprogram / web
+    remark = Column(String, default="")
+    completed_at = Column(DateTime, default=datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
