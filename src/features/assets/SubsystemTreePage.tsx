@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { ChevronRight, ChevronDown, Boxes, Cpu, Layers, FolderTree } from 'lucide-react'
+import { ChevronRight, ChevronDown, Boxes, Cpu, Layers, FolderTree, Filter } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { useToast } from '@/hooks/use-toast'
@@ -52,7 +52,7 @@ function SubTreeNode({
     <div>
       <div
         className={cn(
-          'flex items-center gap-1 rounded-md px-2 py-1.5 cursor-pointer transition-colors',
+          'group flex items-center gap-1 rounded-md px-2 py-1.5 cursor-pointer transition-colors',
           isDevice ? 'hover:bg-blue-50' : 'hover:bg-gray-50'
         )}
         style={{ paddingLeft: depth * 16 + 8 }}
@@ -61,10 +61,7 @@ function SubTreeNode({
             onOpenDevice(String(node.meta?.device_code ?? ''))
             return
           }
-          if (isSubsystem && node.meta?.subsystem_code) {
-            onSelectSubsystem(String(node.meta.subsystem_code))
-            return
-          }
+          // 其他类型（subsystem / category / 根）一律只展开/折叠，不再隐式切 Tab
           if (hasChildren) onToggle(node)
         }}
       >
@@ -90,6 +87,20 @@ function SubTreeNode({
           <Badge variant="outline" className="text-xs">
             {node.count}
           </Badge>
+        )}
+        {isSubsystem && node.meta?.subsystem_code && (
+          <button
+            type="button"
+            aria-label={`在概览中按 ${node.label} 过滤`}
+            title="在概览中按此系统过滤"
+            className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-blue-600 p-0.5 rounded transition-opacity"
+            onClick={(e) => {
+              e.stopPropagation()
+              onSelectSubsystem(String(node.meta?.subsystem_code ?? ''))
+            }}
+          >
+            <Filter className="w-3.5 h-3.5" />
+          </button>
         )}
       </div>
       {expanded && hasChildren && (
@@ -216,7 +227,7 @@ export function SubsystemTreePage({ onOpenDevice, onSelectSubsystem }: Subsystem
           ))
         )}
         <p className="text-xs text-gray-400 mt-4">
-          提示：点击子系统节点可在「概览」中按该系统过滤；点击设备节点查看详情。
+          提示：点击节点展开/折叠下级，点击设备节点查看详情；将鼠标悬停在子系统节点上，点右侧漏斗图标可在「概览」中按该系统过滤。
         </p>
       </CardContent>
     </Card>
