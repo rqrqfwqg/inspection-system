@@ -3127,14 +3127,38 @@ def _inventory_record_brief(rec) -> Optional[Dict[str, Any]]:
     }
 
 
+def _brand_model_map(db: Session, codes: List[str]) -> Dict[str, str]:
+    """设备编号集合 → 品牌型号文本（fixed_assets 优先，回落 device_archives）。
+
+    现场扫码核对用：固定资产台账的 brand_model 常形如
+    「白云电器，配电箱 G-1D9APt」，其中末尾的 G-1D9APt 即设备机身编号。
+    devices 表没有该字段，故必须回查到台账表。
+    """
+    if not codes:
+        return {}
+    out: Dict[str, str] = {}
+    for fa in db.query(FixedAsset).filter(FixedAsset.device_code.in_(codes)).all():
+        bm = (fa.brand_model or "").strip()
+        if bm and fa.device_code not in out:
+            out[fa.device_code] = bm
+    missing = [c for c in codes if c not in out]
+    if missing:
+        for da in db.query(DeviceArchive).filter(DeviceArchive.device_code.in_(missing)).all():
+            bm = (da.brand_model or "").strip()
+            if bm and da.device_code not in out:
+                out[da.device_code] = bm
+    return out
+
+
 def _inventory_device_rows(db: Session, codes: set) -> List[Dict[str, Any]]:
-    """设备编号集合 → 盘点行（名称/子系统/是否已登记/位置描述，逐级兜底）。"""
+    """设备编号集合 → 盘点行（名称/子系统/品牌型号/是否已登记/位置描述，逐级兜底）。"""
     if not codes:
         return []
     code_list = sorted(codes)
     dev_map = {d.device_code: d
                for d in db.query(Device).filter(Device.device_code.in_(code_list)).all()}
     sub_by_id = {s.id: s.name for s in db.query(Subsystem).all()}
+    bm_map = _brand_model_map(db, code_list)
     missing = [c for c in code_list if c not in dev_map]
     profs = _records_profiles(db, missing) if missing else {}
 
@@ -3146,6 +3170,7 @@ def _inventory_device_rows(db: Session, codes: set) -> List[Dict[str, Any]]:
             "device_code": code,
             "name": (d.name if d and d.name else p.get("name")) or "",
             "subsystem_name": (sub_by_id.get(d.subsystem_id) if d else None) or p.get("subsystem_name"),
+            "brand_model": bm_map.get(code, ""),
             "is_registered": d is not None,
             "is_active": bool(d.is_active) if d is not None else True,
             "location_desc": (d.location_desc if d else "") or "",
