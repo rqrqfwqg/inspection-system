@@ -5,8 +5,8 @@ import { parseScanPayload } from '@/features/scan/api'
 import { cn } from '@/lib/utils'
 import { Camera, CameraOff, Loader2, ScanLine } from 'lucide-react'
 
-/** html5-qrcode 挂载点 id（库要求真实 DOM 元素存在后才能 start） */
-const CAMERA_REGION_ID = 'scan-camera-region'
+/** html5-qrcode 需要真实 DOM 元素作为挂载点，id 按实例唯一（避免同页多实例冲突） */
+const CAMERA_REGION_PREFIX = 'scan-camera-region'
 
 /** 只声明用到的接口，避免依赖 html5-qrcode 的类型定义（该库为动态引入） */
 interface Html5QrcodeLike {
@@ -53,8 +53,9 @@ export function ScanInput({
   const [busy, setBusy] = React.useState(false)
 
   const inputRef = React.useRef<HTMLInputElement>(null)
-  const scannerRef = React.useRef<Html5QrcodeLike | null>(null)
   const busyRef = React.useRef(false)
+  // 每个实例一个挂载点 id（useId 默认含冒号，去掉以免影响选择器）
+  const regionId = `${CAMERA_REGION_PREFIX}-${React.useId().replace(/[^a-zA-Z0-9-]/g, '')}`
   // 用 ref 持有回调，保证摄像头 effect 不因父级重渲染而反复重启
   const onScanRef = React.useRef(onScan)
   React.useEffect(() => {
@@ -86,16 +87,48 @@ export function ScanInput({
   React.useEffect(() => {
     if (!cameraOn || !enableCamera) return
     let cancelled = false
+    let inst: Html5QrcodeLike | null = null
+    /** 只有 start() 真正成功后才允许 stop() */
+    let started = false
+
+    /**
+     * 安全停止。
+     * ⚠️ html5-qrcode 的 stop() 在「扫描器未运行」时会**同步抛异常**（而非返回
+     * rejected promise）。若不吞掉，异常会从 effect 清理函数冒出去，被 ErrorBoundary
+     * 捕获导致整页崩溃 —— 而摄像头不可用（无权限/无设备）恰恰是最常见的情况。
+     */
+    const safeStop = () => {
+      const s = inst
+      if (!s || !started) return
+      started = false
+      try {
+        const p = s.stop()
+        if (p && typeof (p as Promise<void>).then === 'function') {
+          ;(p as Promise<void>)
+            .then(() => {
+              try {
+                s.clear()
+              } catch {
+                /* 容器可能已卸载 */
+              }
+            })
+            .catch(() => undefined)
+        }
+      } catch {
+        /* 未运行/已暂停：忽略 */
+      }
+    }
+
     void (async () => {
       setCamError('')
       try {
         const { Html5Qrcode } = await import('html5-qrcode')
-        if (cancelled || !document.getElementById(CAMERA_REGION_ID)) return
-        const inst = new Html5Qrcode(CAMERA_REGION_ID, {
+        if (cancelled || !document.getElementById(regionId)) return
+        const qr = new Html5Qrcode(regionId, {
           verbose: false,
         }) as unknown as Html5QrcodeLike
-        scannerRef.current = inst
-        await inst.start(
+        inst = qr
+        await qr.start(
           { facingMode: 'environment' },
           { fps: 10, qrbox: { width: 230, height: 230 } },
           (text: string) => {
@@ -103,6 +136,9 @@ export function ScanInput({
           },
           () => undefined,
         )
+        started = true
+        // 启动完成时若已关闭，立即收尾（此前 started=false，清理函数不会 stop）
+        if (cancelled) safeStop()
       } catch (e) {
         if (!cancelled) {
           setCamError(e instanceof Error ? e.message : '摄像头启动失败')
@@ -110,23 +146,12 @@ export function ScanInput({
         }
       }
     })()
+
     return () => {
       cancelled = true
-      const s = scannerRef.current
-      scannerRef.current = null
-      if (s) {
-        s.stop()
-          .then(() => {
-            try {
-              s.clear()
-            } catch {
-              /* 容器可能已卸载 */
-            }
-          })
-          .catch(() => undefined)
-      }
+      safeStop()
     }
-  }, [cameraOn, enableCamera, emit])
+  }, [cameraOn, enableCamera, emit, regionId])
 
   return (
     <div className={cn('space-y-2', className)}>
@@ -174,7 +199,7 @@ export function ScanInput({
       {cameraOn && (
         <div className="space-y-1">
           <div
-            id={CAMERA_REGION_ID}
+            id={regionId}
             className="w-full overflow-hidden rounded-lg border border-gray-200 bg-gray-50 [&_video]:w-full [&_video]:rounded-lg"
           />
           <p className="text-xs text-gray-500">
