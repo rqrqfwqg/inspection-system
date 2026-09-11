@@ -602,8 +602,7 @@ async def upload_device_photo(
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="图片不能超过 10MB")
-    ext = os.path.splitext(file.filename or "photo.jpg")[1] or ".jpg"
-    fname = f"{uuid.uuid4().hex}{ext.lower()}"
+    fname = f"{uuid.uuid4().hex}{_safe_image_ext(file.content_type, file.filename)}"
     file_path = os.path.join(_PHOTO_DIR, fname)
     with open(file_path, "wb") as f:
         f.write(content)
@@ -624,6 +623,134 @@ def list_device_photos(did: int, db: Session = Depends(get_db), _: User = Depend
     if not dev:
         raise HTTPException(status_code=404, detail="设备不存在")
     rows = db.query(DevicePhoto).filter(DevicePhoto.device_code == dev.device_code)\
+        .order_by(DevicePhoto.created_at.desc()).all()
+    return [DevicePhotoResponse.model_validate(p) for p in rows]
+
+
+def _device_code_exists(db: Session, code: str) -> bool:
+    """设备编号存在性 —— 口径 = **前端设备卡能否打开**（照片入口在卡内，不可更宽）。
+
+    前端 DeviceCard 判定「设备存在」用的是 `/assets/search` 的
+    `target || nodes.length || edges.length`，三者分别对应：
+      · target → devices 表有档案；
+      · nodes  → 该 code 在关联图内**且**取到了画像（devices 或 records 画像）；
+      · edges  → 该 code 是 device_relations 某条边的端点。
+    故此处等价取 devices ∪ records ∪ relations。若只查 devices，多数现场真实设备
+    （仅台账 records / 仅有边）会一律 404，照片功能直接失效。
+
+    ⚠️ 勿加 fixed_assets：它不参与 /assets/search 的任何输出，加了会产生
+    「后端放行、前端却打不开设备卡」的死角 —— 相当于白名单了一个到不了的入口。
+    """
+    if db.query(Device).filter(Device.device_code == code).first():
+        return True
+    if db.query(Record).filter(Record.device_code == code).first():
+        return True
+    if db.query(DeviceRelation).filter(
+        (DeviceRelation.from_code == code) | (DeviceRelation.to_code == code)
+    ).first():
+        return True
+    return False
+
+
+def _resolve_photo_code(db: Session, raw_code: str) -> str:
+    """现场编号 → canonical device_code；不存在则 404。别名先反查（与 search 同序）。"""
+    code = (raw_code or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="设备编号不能为空")
+    alias = db.query(DeviceAlias).filter(DeviceAlias.alias_code == code).first()
+    if alias and alias.canonical_code:
+        code = alias.canonical_code
+    if not _device_code_exists(db, code):
+        raise HTTPException(status_code=404, detail=f"设备不存在：{code}")
+    return code
+
+
+def _is_allowed_image(content_type: Optional[str], filename: Optional[str]) -> bool:
+    """图片类型校验（比原接口更宽容一档）。
+
+    ⚠️ 小程序 wx.uploadFile 上传的 multipart 分片 Content-Type 常常不是 image/*，
+    实测多为 application/octet-stream；若沿用原接口的硬校验，真机上传会直接 400。
+    故 content_type 缺失/为八位流时**回退用扩展名判定**。
+    """
+    ct = (content_type or "").lower().split(";")[0].strip()
+    if ct in _ALLOWED_IMG:
+        return True
+    if ct in ("", "application/octet-stream"):
+        ext = os.path.splitext(filename or "")[1].lower()
+        return ext in (".jpg", ".jpeg", ".png", ".gif", ".webp")
+    return False
+
+
+_IMG_EXT_BY_CT = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+_ALLOWED_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+
+
+def _safe_image_ext(content_type: Optional[str], filename: Optional[str]) -> str:
+    """落盘扩展名收敛到图片白名单，其余一律回落 .jpg。
+
+    安全考虑：直接把 filename 的扩展名拼进存储文件名时，构造
+    `filename="shell.php"` + `content_type="image/png"`（类型校验只看 content_type）
+    就能在照片目录写出 .php 文件。该目录由 nginx 静态托管、不解析脚本，
+    实际不可执行，但仍是不该开的口子 —— 故此处强制收敛。
+    """
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext in _ALLOWED_EXT:
+        return ".jpg" if ext == ".jpeg" else ext
+    ct = (content_type or "").lower().split(";")[0].strip()
+    return _IMG_EXT_BY_CT.get(ct, ".jpg")
+
+
+@router.post("/devices/by-code/{code}/photos", response_model=DevicePhotoResponse)
+async def upload_device_photo_by_code(
+    code: str,
+    file: UploadFile = File(...),
+    note: Optional[str] = Form(None),
+    created_by: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """按**设备编号**上传现场照片（现场扫码链路专用）。
+
+    与 `/devices/{did}/photos` 的差异只有定位方式：本接口吃编号，因此
+    台账设备（devices 表无档案、无 id）同样能拍照留存。
+    文件落 backend/uploads/assets/photos/{uuid}.{ext}，返回 /ops/uploads/... URL。
+    """
+    canonical = _resolve_photo_code(db, code)
+    if not _is_allowed_image(file.content_type, file.filename):
+        raise HTTPException(status_code=400, detail="仅支持 JPG/PNG/GIF/WEBP 图片")
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="图片不能超过 10MB")
+    fname = f"{uuid.uuid4().hex}{_safe_image_ext(file.content_type, file.filename)}"
+    with open(os.path.join(_PHOTO_DIR, fname), "wb") as f:
+        f.write(content)
+    photo = DevicePhoto(
+        device_code=canonical,
+        url=f"/ops/uploads/assets/photos/{fname}",
+        note=(note or "").strip(),
+        created_by=(created_by or "").strip(),
+    )
+    db.add(photo)
+    db.commit()
+    db.refresh(photo)
+    return DevicePhotoResponse.model_validate(photo)
+
+
+@router.get("/devices/by-code/{code}/photos", response_model=List[DevicePhotoResponse])
+def list_device_photos_by_code(
+    code: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """按设备编号列出现场照片（与上传同口径，台账设备同样可查）。"""
+    canonical = _resolve_photo_code(db, code)
+    rows = db.query(DevicePhoto).filter(DevicePhoto.device_code == canonical)\
         .order_by(DevicePhoto.created_at.desc()).all()
     return [DevicePhotoResponse.model_validate(p) for p in rows]
 
