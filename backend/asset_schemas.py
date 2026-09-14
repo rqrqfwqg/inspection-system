@@ -290,3 +290,62 @@ class RoomInventoryComplete(BaseModel):
     operator: str = ""
     remark: str = ""
     source: str = "miniprogram"
+
+
+# ==================== 机身编号现场补录（批次③ T02 · §4.2/§4.4） ====================
+
+class ObservationCreate(BaseModel):
+    """POST /asset-ledger/observations 请求体（§4.4）。
+
+    落点纪律：只写 `device_serial_observations`，**绝不写** `fixed_assets`。
+    """
+    device_code: str                          # 必须已选定设备（台账存在）
+    serial_raw: str                           # 现场观测到的机身编号（原样，保真）
+    room_code: Optional[str] = None           # 观测时所在房间
+    operator: str = ""                        # 操作人（端上报，免鉴权模式）
+    source: str = "miniprogram"               # miniprogram / web
+    observed_at: Optional[str] = None         # ISO 时间字符串（端上报，离线补传可能滞后）
+    note: str = ""
+    evidence_photo_id: Optional[int] = None
+
+
+class ObservationConflict(BaseModel):
+    """冲突对象（并存待复核；HTTP 仍 200，便于前端本地化展示）。"""
+    type: str                                 # conflicts_ledger / conflicts_other_device
+    ledger_brand_serial: str = ""             # 台账 brand_model 抽取的机身编号快照
+    message: str = ""
+
+
+class ObservationCreateResponse(BaseModel):
+    success: bool = True
+    already: bool = False                     # True = 幂等命中既有 active 行，未新建
+    id: int
+    serial_norm: str = ""
+    conflict_state: str = "none"              # none / conflicts_ledger / conflicts_other_device
+    conflict: Optional[ObservationConflict] = None
+
+
+class ObservationResponse(BaseModel):
+    """补录观测行（审计字段全量回显）。"""
+    id: int
+    device_code: str
+    serial_raw: str
+    serial_norm: str
+    room_code: Optional[str] = None
+    operator: str = ""
+    source: str = "miniprogram"
+    client: str = "miniprogram"
+    observed_at: Any = None
+    created_at: Any = None
+    status: str = "active"
+    conflict_state: str = "none"
+    ledger_brand_serial: str = ""
+    evidence_photo_id: Optional[int] = None
+    note: str = ""
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ObservationDeleteResponse(BaseModel):
+    success: bool = True
+    id: int
+    status: str = "rejected"

@@ -11,11 +11,12 @@
      use_dept / owner_unit 均 100% 填充）以及 records（20 张台账表），页面一条都没接。
   另外线上还有 **1099 台设备只存在于台账 records、从未登记进 devices**，原页面直接漏掉。
 
-本模块把「devices ∪ 台账 records ∪ 固定资产」求全集合，合成一张可检索、可筛选、可预警
-的总台账，三条只读接口：
+本模块把「devices ∪ 台账 records ∪ 固定资产」求全集合，合成一张可检索、可筛选、可预警的
+总台账，四条只读接口：
   GET /assets/asset-ledger          分页列表（关键字/子系统/区域/使用单位/状态/排序）
   GET /assets/asset-ledger/summary  汇总（规模、金额、区域、子系统、使用单位、保修预警）
   GET /assets/asset-ledger/detail   单设备全字段详情（固定资产 + 档案 + 台账记录 + 关联）
+  GET /assets/asset-ledger/resolve  手动输入机身编码 → 反查台账 → 匹配设备（权威匹配内核）
 
 口径说明（重要）
 ----------------
@@ -26,8 +27,10 @@
 - 金额一律取含税价 price_tax，单位元。
 - 软删除设备（is_active=false）默认不出现，与既有 /devices 行为一致。
 - 全量行在进程内缓存 60s（约 9000 行），筛选/分页/排序在内存里做，保证口径一致且翻页秒回。
+- 机身编码匹配索引挂 `_load_all` 的**同一 60s 生命周期**上一次性构建，绝不每请求全表扫。
+  🔒 `serial_no` = **序列号**，不是机身编号，两者索引互不相通（详见 asset_code_match.py）。
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text as sa_text
 from typing import Optional, List, Dict, Any
@@ -37,12 +40,19 @@ from datetime import datetime, date
 
 from database import (
     get_db, User, Device, Subsystem, DataTable, Record, DeviceRelation,
-    FixedAsset, DeviceArchive,
+    FixedAsset, DeviceArchive, DeviceSerialObservation,
 )
 from dependencies import get_current_user as _get_current_user
 from asset_routes import (
     _fa_to_dict, _da_to_dict, _records_profiles, _relation_type_meta,
     _subsystem_name, _canonical_relation_label,
+)
+# 机身编码匹配内核（后端唯一权威实现，见 asset_code_match.py）
+from asset_code_match import (build_match_index, resolve_code,
+                              normalize_code, extract_serial_from_brand)
+from asset_schemas import (
+    ObservationCreate, ObservationCreateResponse,
+    ObservationResponse, ObservationDeleteResponse, ObservationConflict,
 )
 
 router = APIRouter(prefix="/assets", tags=["asset-ledger"])
@@ -52,6 +62,8 @@ WARRANTY_SOON_DAYS = 90
 # 全量行缓存 TTL（秒）
 _ALL_TTL = 60
 _ALL_CACHE: Dict[str, Any] = {"key": None, "ts": 0.0, "rows": []}
+# 机身编码匹配索引缓存：与 _ALL_CACHE 同生命周期（同一 60s TTL 内复用，绝不每请求全表扫）
+_MATCH_INDEX: Dict[str, Any] = {"key": None, "ts": 0.0, "idx": None}
 
 
 # ========================= 文本 / 口径工具 =========================
@@ -201,7 +213,11 @@ def _enrich_from_ledger(db: Session, rows: List[Dict[str, Any]]) -> None:
 
 
 def _load_all(db: Session) -> List[Dict[str, Any]]:
-    """全量总台账行（约 9000 行），进程内缓存 60s；后续筛选/分页都在内存做。"""
+    """全量总台账行（约 9000 行），进程内缓存 60s；后续筛选/分页都在内存做。
+
+    重建行时同步重建机身编码匹配索引（同一 60s 生命周期）；**不修改 rows 结构**，
+    故列表接口 `GET /asset-ledger` 的输出与引入匹配索引前逐字节一致。
+    """
     now = time.time()
     if _ALL_CACHE["key"] == "all" and now - _ALL_CACHE["ts"] < _ALL_TTL:
         return _ALL_CACHE["rows"]
@@ -279,7 +295,29 @@ def _load_all(db: Session) -> List[Dict[str, Any]]:
         r["relation_count"] = rel_n.get(code, 0)
 
     _ALL_CACHE.update({"key": "all", "ts": now, "rows": rows})
+    # §2.2：复用同一批行、同一生命周期建匹配索引（不修改 rows，列表接口输出不变）
+    _MATCH_INDEX.update({"key": "all", "ts": now, "idx": build_match_index(db, rows)})
     return rows
+
+
+def _get_match_index(db: Session) -> Dict[str, Any]:
+    """机身编码匹配索引（与 `_load_all` 同 60s 生命周期，绝不每请求全表扫）。"""
+    now = time.time()
+    if (_MATCH_INDEX["key"] == "all" and _MATCH_INDEX["idx"] is not None
+            and now - _MATCH_INDEX["ts"] < _ALL_TTL):
+        return _MATCH_INDEX["idx"]
+    _load_all(db)  # 重建 rows 时同步重建索引
+    return _MATCH_INDEX["idx"]
+
+
+def _invalidate_caches() -> None:
+    """补录写入后**立即**让行缓存与匹配索引失效（不等 60s TTL 自然过期）。
+
+    🔴 这是 §4.3「补录后 /resolve 可精确命中」验收的关键：若失效缺失，补录后
+    最长 60 秒 `/resolve` 仍命中不到新观测，等于补录当场失效。
+    """
+    _ALL_CACHE.update({"key": None, "ts": 0.0, "rows": []})
+    _MATCH_INDEX.update({"key": None, "ts": 0.0, "idx": None})
 
 
 # ========================= 筛选 / 排序 =========================
@@ -538,3 +576,196 @@ def asset_ledger_detail(code: str, db: Session = Depends(get_db),
         "record_count": len(records_out),
         "relations": relations_out,
     }
+
+
+@router.get("/asset-ledger/resolve")
+def resolve_asset_code(q: str = "", limit: int = 8, db: Session = Depends(get_db),
+                       _: User = Depends(_get_current_user)):
+    """手动输入机身编码 / 设备编号 → 反查台账 → 匹配设备（只读 · 权威匹配内核）。
+
+    返回 §3.2 结构：
+      {query, normalized{raw,upper,loose}, kind, exact, count, candidates[], hint?}
+
+    要点
+    ----
+    - `kind` ∈ device_code / alias / serial（机身编号）/ serial_no（序列号）/ fuzzy / none /
+      ambiguous（R2：该值被 ≥2 台设备共用，此时 exact=False 且带 shared_count）。
+    - R1：未登记（ledger_only）行的精确命中出口封顶 88（source_demoted=True），
+      不得压过已登记设备的机身编号命中（92）；已登记设备的 100 分不受影响。
+    - `match_type` ∈ device_code_exact(100) / alias_exact(98) / observation_exact(96) /
+      brand_extract_exact(92) / serial_no_exact(70) / brand_substring(60) / field_substring(40)。
+    - 🔒 `serial_no_exact`（70）是**序列号**，不是机身编号；前端必须按「序列号」标签展示。
+    - `candidates` 已按 §2.3 排序，前端只展示、不再重排；`limit` 默认 8、上限 20。
+    - 无命中时给 `hint.can_observe=true`，指引「补录为机身编号」（补录接口属批次③）。
+    - 索引复用 `_load_all` 的 60s 缓存，绝不每请求全表扫。
+    """
+    index = _get_match_index(db)
+    return resolve_code(index, q, limit)
+
+# ========================= 机身编号现场补录（批次③ T02 · §4.4）=========================
+#
+# 落点纪律：**只写 L2 现场观测层** `device_serial_observations`，**绝不写**甲方 `fixed_assets`。
+# 写入带 operator / client / observed_at 审计；`DELETE` 为软删（status='rejected'）可回滚。
+# 🔴 每次写入（POST 新建 / DELETE）后**立即失效** `_ALL_CACHE` 与 `_MATCH_INDEX`，
+#    否则补录后 `/resolve` 最长 60s 仍命中不到（违反 §4.3「补录后即可精确命中」验收）。
+
+
+def _parse_dt(v: Any) -> Optional[datetime]:
+    """端上报的 observed_at（ISO 字符串 / datetime）→ datetime；不可解析则 None。"""
+    if v is None or v == "":
+        return None
+    if isinstance(v, datetime):
+        return v
+    s = str(v).strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def _observation_other_device(idx: Dict[str, Any], device_code: str,
+                              serial_norm: str) -> bool:
+    """该 `serial_norm` 是否已属**其他设备**（其他 active 观测 **或** 其他设备抽取）。
+
+    直接读已建好的 `brand_serial` 空间（O(1)）：2 元组 = 某行 `brand_model` 抽取；
+    3 元组且 tag='observation' = 某条 active 现场观测。
+    """
+    for entry in idx["brand_serial"].get(serial_norm, []):
+        if isinstance(entry, tuple) and len(entry) == 3 and entry[2] == "observation":
+            dev = entry[0]
+        else:
+            row = entry[0] if isinstance(entry, tuple) else {}
+            dev = (row or {}).get("device_code") if isinstance(row, dict) else ""
+        if dev and dev != device_code:
+            return True
+    return False
+
+
+@router.post("/asset-ledger/observations", response_model=ObservationCreateResponse)
+def create_observation(
+    payload: ObservationCreate,
+    x_client_type: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """现场补录机身编号（§4.4）——只写观测层；幂等 / 冲突并存 / 审计 / 可逆。
+
+    - `serial_norm = normalize_code(serial_raw)['loose']`；为空 → **400**。
+    - `device_code` 必须存在于台账（`_load_all` 行集合）→ 否则 **404**。
+    - 同 `(device_code, serial_norm)` 已有 active 行 → **200 already=true**，不新建。
+    - 冲突比对对象 = 本设备 `brand_model` 的**抽取结果**（**非 `serial_no`**）：
+      抽不出 → 接受(none)；相同 → none；不同 → conflicts_ledger（并存，台账不改）。
+    - 该编号已属**其他设备** → conflicts_other_device（隔离，不进匹配索引）。
+    - 写入后**立即失效**匹配索引缓存 → 下次 /resolve 即可 `observation_exact`(96) 命中。
+    """
+    device_code = (payload.device_code or "").strip()
+    serial_raw = (payload.serial_raw or "").strip()
+    if not device_code:
+        raise HTTPException(status_code=400, detail="device_code 不能为空")
+    serial_norm = normalize_code(serial_raw)["loose"]
+    if not serial_norm:
+        raise HTTPException(
+            status_code=400,
+            detail="机身编号为空或无法归一（去掉分隔符/空白后无有效字符），请输入有效编号")
+
+    rows = _load_all(db)
+    row = next((r for r in rows if r["device_code"] == device_code), None)
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"设备 {device_code} 不存在于台账，无法补录（请先选定所属设备）")
+
+    # 幂等：命中既有 active 行（唯一索引 ux_dso_device_serial 的应用层前置）
+    existing = (db.query(DeviceSerialObservation)
+                .filter(DeviceSerialObservation.device_code == device_code,
+                        DeviceSerialObservation.serial_norm == serial_norm,
+                        DeviceSerialObservation.status == "active")
+                .first())
+    if existing is not None:
+        return ObservationCreateResponse(
+            success=True, already=True, id=existing.id,
+            serial_norm=serial_norm,
+            conflict_state=existing.conflict_state or "none")
+
+    client = (x_client_type or "").strip() or "miniprogram"
+    # 冲突比对对象 = 台账 brand_model 的**抽取结果**（v2），**不是** serial_no
+    ledger_extract = extract_serial_from_brand(row.get("brand_model"))
+
+    conflict_state = "none"
+    conflict = None
+    status = "active"
+    if _observation_other_device(_get_match_index(db), device_code, serial_norm):
+        # 防误绑扩散：该编号已属其他设备 → 隔离（status 非 active；内核只并 active）
+        status = "quarantined"
+        conflict_state = "conflicts_other_device"
+        conflict = ObservationConflict(
+            type="conflicts_other_device",
+            ledger_brand_serial=ledger_extract,
+            message=("该机身编号已为其他设备所用（现场观测或台账抽取），"
+                     "本次观测已并存并隔离、不参与匹配索引，待人工复核"))
+    else:
+        ledger_loose = normalize_code(ledger_extract)["loose"]
+        if ledger_loose and ledger_loose != serial_norm:
+            # 与台账并存（绝不覆盖台账任何字段）
+            conflict_state = "conflicts_ledger"
+            conflict = ObservationConflict(
+                type="conflicts_ledger",
+                ledger_brand_serial=ledger_extract,
+                message=("台账 brand_model 中的机身编号与现场观测不一致，"
+                         "已并存待复核，台账未被修改"))
+
+    obs = DeviceSerialObservation(
+        device_code=device_code,
+        serial_raw=serial_raw,
+        serial_norm=serial_norm,
+        room_code=(payload.room_code or "").strip() or None,
+        operator=(payload.operator or "").strip(),
+        source=(payload.source or "miniprogram").strip() or "miniprogram",
+        client=client,
+        observed_at=_parse_dt(payload.observed_at),
+        status=status,
+        conflict_state=conflict_state,
+        ledger_brand_serial=ledger_extract,
+        evidence_photo_id=payload.evidence_photo_id,
+        note=(payload.note or "").strip(),
+    )
+    db.add(obs)
+    db.commit()
+    db.refresh(obs)
+
+    _invalidate_caches()   # 🔴 补录后立即失效 → /resolve 马上可命中
+
+    return ObservationCreateResponse(
+        success=True, already=False, id=obs.id, serial_norm=serial_norm,
+        conflict_state=conflict_state, conflict=conflict)
+
+
+@router.get("/asset-ledger/observations", response_model=List[ObservationResponse])
+def list_observations(device_code: Optional[str] = None, status: Optional[str] = None,
+                      db: Session = Depends(get_db),
+                      _: User = Depends(_get_current_user)):
+    """列出补录观测：默认只看 `active`；`?status=` 可查全量（含 rejected / quarantined）。"""
+    q = db.query(DeviceSerialObservation)
+    if device_code:
+        q = q.filter(DeviceSerialObservation.device_code == device_code)
+    if status:
+        q = q.filter(DeviceSerialObservation.status == status)
+    else:
+        q = q.filter(DeviceSerialObservation.status == "active")
+    rows = q.order_by(DeviceSerialObservation.created_at.desc(),
+                      DeviceSerialObservation.id.desc()).all()
+    return [ObservationResponse.model_validate(r) for r in rows]
+
+
+@router.delete("/asset-ledger/observations/{oid}", response_model=ObservationDeleteResponse)
+def delete_observation(oid: int, db: Session = Depends(get_db),
+                       _: User = Depends(_get_current_user)):
+    """软删观测（置 status='rejected'）→ 立即从匹配索引移除（可逆，不物理删除）。"""
+    obs = (db.query(DeviceSerialObservation)
+           .filter(DeviceSerialObservation.id == oid).first())
+    if obs is None:
+        raise HTTPException(status_code=404, detail=f"观测记录 {oid} 不存在")
+    obs.status = "rejected"
+    db.commit()
+    _invalidate_caches()   # 🔴 立即失效 → 该编号马上不再命中
+    return ObservationDeleteResponse(success=True, id=obs.id, status="rejected")

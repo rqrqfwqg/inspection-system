@@ -388,3 +388,48 @@ class RoomInventoryRecord(Base):
     completed_at = Column(DateTime, default=datetime.now(timezone.utc))
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+
+
+# =====================================================================
+# 机身编码现场补录（批次③ T02）：现场观测到的「机身编号」观测层
+# =====================================================================
+
+class DeviceSerialObservation(Base):
+    """机身编号现场补录观测（批次③ · 只写 L2 观测层，绝不改甲方台账）。
+
+    设计要点（《机身编码匹配_技术设计.md》§4.2/§4.3）：
+    1) **落点**：只写本表（现场观测层），**绝不写** `fixed_assets`（甲方权威台账）；
+       观测值仅供「辅助匹配 + 待人工复核队列」，人工确认前不改台账任何字段。
+    2) **幂等**：`ux_dso_device_serial` 部分唯一索引（仅 `status='active'`）保证同
+       `(device_code, serial_norm)` 只有一条 active；重复提交返回既有行（already=true）。
+    3) **冲突比对对象 = `brand_model` 的抽取结果**（`extract_serial_from_brand`），
+       **不是 `serial_no`**：`serial_no` 是「序列号」，与「机身编号」是异类（§1.1）。
+       抽出值不同 -> `conflict_state='conflicts_ledger'`，观测照存、台账不改（并存待复核）。
+    4) **防误绑扩散**：若该 `serial_norm` 已存在于**其他设备**的 active 观测或其他设备
+       `brand_model` 抽取值中 -> `conflict_state='conflicts_other_device'`，该行以
+       `status='quarantined'` 落库，**不并入匹配索引**（内核 `_load_active_observations`
+       只取 `status='active'`，故隔离行天然不进索引），进人工待办。
+    5) **可逆**：`DELETE` 不物理删除，置 `status='rejected'`（同时从匹配索引移除）。
+    6) `serial_norm = normalize_code(serial_raw)['loose']`，是匹配索引 `brand_serial`
+       空间的键，命中即 `match_type='observation_exact'`（可信度 96，高于台账抽取 92）。
+
+    status 取值：`active`（生效）/ `rejected`（撤销）/ `superseded`（被更正行取代）/
+    `quarantined`（跨设备冲突隔离，不进索引 —— 内核只并 `active`）。
+    """
+    __tablename__ = "device_serial_observations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    device_code = Column(String, nullable=False)                # canonical 目标设备（补录必须已选定设备）
+    serial_raw = Column(String, nullable=False)                  # 现场观测到的机身编号原样输入（保真）
+    serial_norm = Column(String, nullable=False)                 # normalize_code(serial_raw)['loose']
+    room_code = Column(String, nullable=True)                    # 观测时所在房间（可空）
+    operator = Column(String, default="")                        # 操作人（端上报，免鉴权模式）
+    source = Column(String, default="miniprogram")               # miniprogram / web
+    client = Column(String, default="miniprogram")               # X-Client-Type
+    observed_at = Column(DateTime, nullable=True)                # 现场时间（端上报；离线补传可能早于 created_at）
+    created_at = Column(DateTime, default=datetime.now(timezone.utc))
+    status = Column(String, default="active")                    # active / rejected / superseded / quarantined
+    conflict_state = Column(String, default="none")              # none / conflicts_ledger / conflicts_other_device
+    ledger_brand_serial = Column(String, default="")             # 提交时台账 brand_model 抽取的机身编号快照（≠ serial_no）
+    evidence_photo_id = Column(Integer, nullable=True)           # 可选：关联 device_photos.id
+    note = Column(String, default="")

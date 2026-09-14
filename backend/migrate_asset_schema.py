@@ -48,6 +48,7 @@ NEW_TABLES = [
     "device_archives",
     "device_accessories",
     "ba_problems",
+    "device_serial_observations",
 ]
 
 
@@ -106,6 +107,47 @@ def create_new_tables():
     print(f"[迁移] 已确认新增表存在（{len(created)}/{len(NEW_TABLES)}）：{', '.join(created)}")
 
 
+# device_serial_observations 的部分唯一索引（`Base.metadata.create_all` **不会**创建
+# 带 `WHERE status='active'` 的部分唯一索引）+ 常规索引；`IF NOT EXISTS` 保证幂等。
+DSO_INDEXES = (
+    ("ux_dso_device_serial",
+     "CREATE UNIQUE INDEX IF NOT EXISTS ux_dso_device_serial"
+     " ON device_serial_observations(device_code, serial_norm) WHERE status = 'active'"),
+    ("ix_dso_serial_norm",
+     "CREATE INDEX IF NOT EXISTS ix_dso_serial_norm"
+     " ON device_serial_observations(serial_norm)"),
+    ("ix_dso_device",
+     "CREATE INDEX IF NOT EXISTS ix_dso_device"
+     " ON device_serial_observations(device_code)"),
+)
+
+
+def migrate_device_serial_observations():
+    """为 device_serial_observations 建部分唯一索引 + 常规索引（幂等）。
+
+    `create_all` 只建表、不建「带 WHERE 的部分唯一索引」，故须在此显式建立；
+    `CREATE ... IF NOT EXISTS` 保证反复执行安全（第二次不报错、索引仍在）。
+    """
+    inspector = inspect(engine)
+    if not inspector.has_table("device_serial_observations"):
+        print("[迁移] device_serial_observations 表不存在，跳过索引创建。")
+        return
+    with engine.begin() as conn:
+        existing = {r[0] for r in conn.execute(text(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+            " AND tbl_name = 'device_serial_observations'")).all()}
+        created = []
+        for name, ddl in DSO_INDEXES:
+            if name in existing:
+                continue
+            conn.execute(text(ddl))
+            created.append(name)
+    if created:
+        print(f"[迁移] device_serial_observations 已建索引：{', '.join(created)}")
+    else:
+        print("[迁移] device_serial_observations 索引已齐备，无需创建。")
+
+
 def main():
     print("=" * 60)
     print("T3GTC 资产模块迁移开始")
@@ -114,6 +156,7 @@ def main():
     migrate_devices()
     migrate_import_batches()
     create_new_tables()
+    migrate_device_serial_observations()
     print("=" * 60)
     print("迁移完成 ✓")
     print("=" * 60)
