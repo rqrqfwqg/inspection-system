@@ -1164,6 +1164,7 @@ def link_crossrefs(
     # ---- 2) 逐张启用表统计命中 ----
     others = db.query(DataTable).filter(
         DataTable.is_active == True, DataTable.id != table_id).all()
+    targets: List[Dict[str, Any]] = []
     scanned = 0
     for t in others:
         tfields = db.query(FieldDef).filter(FieldDef.table_id == t.id).all()
