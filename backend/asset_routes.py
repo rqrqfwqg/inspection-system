@@ -3111,60 +3111,23 @@ def seed_assets(db: Session):
         ("remark", "备注", "text", [], False, False),
     ])
 
-    # BA 系统 · VRV 空调（hvac，源自《BA系统设备清单_整理汇总.xlsx》- VRV空调）
-    add_table("hvac", "ba_vrv", "VRV空调", [
+    # BA 系统 · 暖通点表（hvac，2026-09-15 由 VRV空调/一体化空调/排风机/市政排风 四表合一）
+    # 来源靠 category 列承载；device_code 为统一悬挂键（records.device_code 100% 填充）。
+    add_table("hvac", "ba_hvac", "暖通BA点表", [
         ("device_code", "设备编号", "device_ref", [], True, True),
-        ("seq", "序号", "number", [], False, False),
-        ("group", "组别", "text", [], False, False),
-        ("equip_name", "设备名称", "text", [], False, False),
-        ("brand", "品牌", "text", [], False, False),
-        ("model", "型号", "text", [], False, False),
-        ("install_date", "安装日期", "date", [], False, False),
-        ("protocol", "通讯协议", "text", [], False, False),
-        ("ddc_addr", "DDC地址", "text", [], False, False),
-        ("responsible", "维护责任人", "text", [], False, False),
-        ("remark", "备注", "text", [], False, False),
-    ])
-
-    # BA 系统 · 一体化空调（hvac，源自 一体化空调）
-    add_table("hvac", "ba_integrated_ac", "一体化空调", [
-        ("device_code", "设备编号", "device_ref", [], True, True),
-        ("seq", "序号", "number", [], False, False),
-        ("group", "组别", "text", [], False, False),
-        ("room", "房间", "text", [], False, False),
-        ("equip_name", "设备名称", "text", [], False, False),
-        ("brand", "品牌", "text", [], False, False),
-        ("model", "型号", "text", [], False, False),
-        ("install_date", "安装日期", "date", [], False, False),
-        ("responsible", "维护责任人", "text", [], False, False),
-        ("remark", "备注", "text", [], False, False),
-    ])
-
-    # BA 系统 · 排风机（hvac，源自 排风机）
-    add_table("hvac", "ba_exhaust_fan", "排风机", [
-        ("device_code", "设备编号", "device_ref", [], True, True),
+        ("category", "来源类别", "select", ["VRV空调", "一体化空调", "排风机", "市政排风"], False, False),
         ("seq", "序号", "number", [], False, False),
         ("group", "组别", "text", [], False, False),
         ("floor", "层", "text", [], False, False),
+        ("room", "房间", "text", [], False, False),
         ("auto_manual", "手自动", "select", ["自动", "手动", "关机"], False, False),
         ("status", "状态", "select", ["在线", "离线", "设备不在线", "正常", "故障"], False, False),
+        ("protocol", "通讯协议", "text", [], False, False),
+        ("ddc_addr", "DDC地址", "text", [], False, False),
         ("equip_name", "设备名称", "text", [], False, False),
         ("brand", "品牌", "text", [], False, False),
         ("model", "型号", "text", [], False, False),
-        ("responsible", "维护责任人", "text", [], False, False),
-        ("remark", "备注", "text", [], False, False),
-    ])
-
-    # BA 系统 · 市政排风（hvac，源自 市政排风）
-    add_table("hvac", "ba_municipal_exhaust", "市政排风", [
-        ("device_code", "设备编号", "device_ref", [], True, True),
-        ("seq", "序号", "number", [], False, False),
-        ("group", "组别", "text", [], False, False),
-        ("auto_manual", "手自动", "select", ["自动", "手动", "关机"], False, False),
-        ("status", "状态", "select", ["在线", "离线", "设备不在线", "正常", "故障"], False, False),
-        ("equip_name", "设备名称", "text", [], False, False),
-        ("brand", "品牌", "text", [], False, False),
-        ("model", "型号", "text", [], False, False),
+        ("install_date", "安装日期", "date", [], False, False),
         ("responsible", "维护责任人", "text", [], False, False),
         ("remark", "备注", "text", [], False, False),
     ])
@@ -3185,26 +3148,17 @@ def seed_assets(db: Session):
         ("remark", "备注", "text", [], False, False),
     ])
 
-    # BA 系统 · 一氧化碳检测（weak，源自 一氧化碳检测）
-    add_table("weak", "ba_co_detection", "一氧化碳检测", [
+    # BA 系统 · 弱电气体监测点表（weak，2026-09-15 由 一氧化碳检测/管廊气体监测 两表合一）
+    # 独立成表，不并入 weak_devices：后者是资产台账字段（品牌型号/位置/使用部门…），
+    # 本表是 BA 监控点位字段（序号/组别/阈值/状态），跨层合会污染台账层次。
+    add_table("weak", "ba_gas_monitor", "气体监测BA点表", [
         ("device_code", "设备编号", "device_ref", [], True, True),
-        ("seq", "序号", "number", [], False, False),
-        ("group", "组别", "text", [], False, False),
-        ("status", "状态", "select", ["在线", "离线", "设备不在线", "正常", "故障"], False, False),
-        ("equip_name", "设备名称", "text", [], False, False),
-        ("brand", "品牌", "text", [], False, False),
-        ("model", "型号", "text", [], False, False),
-        ("threshold", "报警阈值", "text", [], False, False),
-        ("responsible", "维护责任人", "text", [], False, False),
-        ("remark", "备注", "text", [], False, False),
-    ])
-
-    # BA 系统 · 管廊气体监测（weak，源自 管廊气体监测）
-    add_table("weak", "ba_gallery_gas", "管廊气体监测", [
-        ("device_code", "设备编号", "device_ref", [], True, True),
+        ("category", "来源类别", "select", ["一氧化碳检测", "管廊气体监测"], False, False),
         ("seq", "序号", "number", [], False, False),
         ("group", "组别", "text", [], False, False),
         ("floor", "层", "text", [], False, False),
+        ("status", "状态", "select", ["在线", "离线", "设备不在线", "正常", "故障"], False, False),
+        ("threshold", "报警阈值", "text", [], False, False),
         ("equip_name", "设备名称", "text", [], False, False),
         ("brand", "品牌", "text", [], False, False),
         ("model", "型号", "text", [], False, False),
@@ -3374,7 +3328,7 @@ def seed_assets(db: Session):
     db.commit()
 
     print("[初始化] 分系统资料管理种子数据已就绪（7 子系统 / 10 设备 / 7 关联 / 11 示范记录；"
-          "另含 10 张真实台账表：电柜清单/机房信息/BA-VRV/一体化空调/排风机/市政排风/潜污泵/CO检测/管廊气体/问题清单；"
+          "另含 8 张真实台账表：电柜清单/机房信息/暖通BA点表/弱电气体BA点表/潜污泵/问题清单 等；"
           "BA 子系统映射 7 行，幂等）")
 
 

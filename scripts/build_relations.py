@@ -2,7 +2,7 @@
 
 ===== 关联逻辑标记（权威规则，详见 docs/ASSET_MANAGEMENT_DESIGN.md C.4.1）=====
 数据源 LINKS = [(来源资料表 code, 引用字段 key, 子系统 code, 关系类型), ...]
-  当前仅两类：power_cabinets(room_no) + ba_integrated_ac(room) → room_master(机房编号)
+  当前仅两类：power_cabinets(room_no) + ba_hvac(room) → room_master(机房编号)
 归一化 norm(s)：s.strip().upper() → 字母数字间补连字符(GW2F->GW-2F) → 去尾部 -N 子序号
 解析 resolve(room_no)：
   1) 精确命中机房主表 → 返回
@@ -89,7 +89,7 @@ def link(table_code, field, rel_type, subsystem_code, stats):
 
 stats = {"new": 0, "dup": 0, "skip": 0}
 link("power_cabinets", "room_no", "所在机房", "power", stats)
-link("ba_integrated_ac", "room", "所在机房", "hvac", stats)
+link("ba_hvac", "room", "所在机房", "hvac", stats)
 
 print(f"[{'DRY-RUN' if DRY else 'COMMIT'}] 电柜+一体化空调 → 机房 关联构建：")
 print(f"  新建边(new)={stats['new']}  已存在跳过(dup)={stats['dup']}  无匹配跳过(skip)={stats['skip']}")

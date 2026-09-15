@@ -60,7 +60,7 @@ def fld_val(rec, key):
 # 关联源定义（与 build_relations.py 一致）
 LINKS = [
     ("power_cabinets", "room_no", "power", "所在机房"),
-    ("ba_integrated_ac", "room", "hvac", "所在机房"),
+    ("ba_hvac", "room", "hvac", "所在机房"),
 ]
 
 gap_rows = []

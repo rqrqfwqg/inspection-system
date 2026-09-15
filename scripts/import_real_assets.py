@@ -25,13 +25,15 @@ import openpyxl                                       # noqa: E402
 JOBS = [
     ("GTC和停车楼电柜清单-统计汇总.xlsx", "原始数据", 0, "power_cabinets", "code"),
     ("机房信息汇总.xlsx", "机房信息汇总", 0, "room_master", "code"),
-    ("BA系统设备清单_整理汇总.xlsx", "VRV空调", 1, "ba_vrv", "code"),
-    ("BA系统设备清单_整理汇总.xlsx", "一体化空调", 1, "ba_integrated_ac", "code"),
-    ("BA系统设备清单_整理汇总.xlsx", "排风机", 1, "ba_exhaust_fan", "code"),
-    ("BA系统设备清单_整理汇总.xlsx", "市政排风", 1, "ba_municipal_exhaust", "code"),
+    # BA 暖通 4 sheet 已于 2026-09-15 合并进 ba_hvac（来源写 category 列，导入后需回填）
+    ("BA系统设备清单_整理汇总.xlsx", "VRV空调", 1, "ba_hvac", "code"),
+    ("BA系统设备清单_整理汇总.xlsx", "一体化空调", 1, "ba_hvac", "code"),
+    ("BA系统设备清单_整理汇总.xlsx", "排风机", 1, "ba_hvac", "code"),
+    ("BA系统设备清单_整理汇总.xlsx", "市政排风", 1, "ba_hvac", "code"),
     ("BA系统设备清单_整理汇总.xlsx", "潜污泵", 1, "ba_submersible_pump", "code"),
-    ("BA系统设备清单_整理汇总.xlsx", "一氧化碳检测", 1, "ba_co_detection", "code"),
-    ("BA系统设备清单_整理汇总.xlsx", "管廊气体监测", 1, "ba_gallery_gas", "code"),
+    # BA 弱电气体 2 sheet 已于 2026-09-15 合并进 ba_gas_monitor（来源写 category 列，导入后需回填）
+    ("BA系统设备清单_整理汇总.xlsx", "一氧化碳检测", 1, "ba_gas_monitor", "code"),
+    ("BA系统设备清单_整理汇总.xlsx", "管廊气体监测", 1, "ba_gas_monitor", "code"),
     ("BA系统设备清单_整理汇总.xlsx", "问题清单", 2, "ba_issue_list", "seq"),
 ]
 
