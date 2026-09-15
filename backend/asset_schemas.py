@@ -349,3 +349,49 @@ class ObservationDeleteResponse(BaseModel):
     success: bool = True
     id: int
     status: str = "rejected"
+
+
+# ==================== 设备现场定位观测（批次⑤ · 扫码即记坐标） ====================
+
+class GeoObservationCreate(BaseModel):
+    """POST /asset-ledger/geo-observations 请求体。
+
+    落点纪律：只写 `device_geo_observations`，**绝不改**台账任何位置字段。
+    """
+    device_code: str                          # 必须已选定设备（台账存在）
+    latitude: float                           # 纬度（gcj02）
+    longitude: float                          # 经度（gcj02）
+    accuracy: Optional[float] = None          # 水平精度半径（米）—— 判断坐标可信度的关键
+    altitude: Optional[float] = None          # 海拔（米）
+    coord_type: str = "gcj02"                 # gcj02 / wgs84
+    room_code: Optional[str] = None           # 扫码时所在房间
+    scan_source: str = "camera"               # camera / album / manual
+    operator: str = ""                        # 操作人（端上报，免鉴权模式）
+    source: str = "miniprogram"               # miniprogram / web
+    observed_at: Optional[str] = None         # ISO 时间字符串（离线补传可能滞后）
+
+
+class GeoObservationCreateResponse(BaseModel):
+    success: bool = True
+    id: int
+    device_code: str
+    created: bool = True                      # 恒 True：本表不做幂等合并（每次扫码一条）
+
+
+class GeoObservationResponse(BaseModel):
+    """定位观测行（审计字段全量回显）。"""
+    id: int
+    device_code: str
+    latitude: float
+    longitude: float
+    accuracy: Optional[float] = None
+    altitude: Optional[float] = None
+    coord_type: str = "gcj02"
+    room_code: Optional[str] = None
+    scan_source: str = "camera"
+    operator: str = ""
+    source: str = "miniprogram"
+    client: str = "miniprogram"
+    observed_at: Any = None
+    created_at: Any = None
+    model_config = ConfigDict(from_attributes=True)

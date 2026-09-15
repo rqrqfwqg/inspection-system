@@ -40,7 +40,7 @@ from datetime import datetime, date
 
 from database import (
     get_db, User, Device, Subsystem, DataTable, Record, DeviceRelation,
-    FixedAsset, DeviceArchive, DeviceSerialObservation,
+    FixedAsset, DeviceArchive, DeviceSerialObservation, DeviceGeoObservation,
 )
 from dependencies import get_current_user as _get_current_user
 from asset_routes import (
@@ -53,6 +53,7 @@ from asset_code_match import (build_match_index, resolve_code,
 from asset_schemas import (
     ObservationCreate, ObservationCreateResponse,
     ObservationResponse, ObservationDeleteResponse, ObservationConflict,
+    GeoObservationCreate, GeoObservationCreateResponse, GeoObservationResponse,
 )
 
 router = APIRouter(prefix="/assets", tags=["asset-ledger"])
@@ -769,3 +770,108 @@ def delete_observation(oid: int, db: Session = Depends(get_db),
     db.commit()
     _invalidate_caches()   # 🔴 立即失效 → 该编号马上不再命中
     return ObservationDeleteResponse(success=True, id=obs.id, status="rejected")
+
+
+# ==================== 设备现场定位观测（批次⑤ · 扫码即记坐标） ====================
+#
+# 纪律（与机身编号补录一致）：
+#   - **只写 `device_geo_observations`**，绝不改 `devices` / `fixed_assets` 的位置字段；
+#   - **每次扫码一条**，不做幂等合并（同设备多次扫码 = 多条，用于判断是否被移动过）；
+#   - 定位失败时**前端不上报**，绝不塞 (0,0) 假坐标污染数据；
+#   - device_code 必须存在于台账（同补录口径），否则 404，防止把坐标挂到不存在的设备上。
+
+_GEO_LAT_RANGE = (-90.0, 90.0)
+_GEO_LNG_RANGE = (-180.0, 180.0)
+
+
+@router.post("/asset-ledger/geo-observations",
+             response_model=GeoObservationCreateResponse)
+def create_geo_observation(
+    payload: GeoObservationCreate,
+    x_client_type: Optional[str] = Header(None),
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """扫码时上报一条设备现场定位（每次一条 · 只增不改台账）。
+
+    - `device_code` 必须存在于台账 → 否则 **404**；
+    - 经纬度缺失 / 非数值 / 超范围 / 为 (0,0) → **400**（(0,0) 多为定位失败的兜底值）；
+    - **不做幂等**：不返回 already，重复扫码就是多条历史（这是刻意设计）。
+    """
+    device_code = (payload.device_code or "").strip()
+    if not device_code:
+        raise HTTPException(status_code=400, detail="device_code 不能为空")
+
+    lat_raw, lng_raw = payload.latitude, payload.longitude
+    if lat_raw is None or lng_raw is None:
+        raise HTTPException(status_code=400, detail="latitude / longitude 不能为空")
+    try:
+        lat = float(lat_raw)
+        lng = float(lng_raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="latitude / longitude 必须是数值")
+    if not (_GEO_LAT_RANGE[0] <= lat <= _GEO_LAT_RANGE[1]):
+        raise HTTPException(status_code=400,
+                            detail=f"latitude 超出合法范围（{_GEO_LAT_RANGE[0]}~{_GEO_LAT_RANGE[1]}）")
+    if not (_GEO_LNG_RANGE[0] <= lng <= _GEO_LNG_RANGE[1]):
+        raise HTTPException(status_code=400,
+                            detail=f"longitude 超出合法范围（{_GEO_LNG_RANGE[0]}~{_GEO_LNG_RANGE[1]}）")
+    if lat == 0.0 and lng == 0.0:
+        raise HTTPException(status_code=400,
+                            detail="坐标 (0,0) 视为无效定位（多为定位失败兜底值），请勿上报")
+
+    rows = _load_all(db)
+    if not any(r["device_code"] == device_code for r in rows):
+        raise HTTPException(status_code=404,
+                            detail=f"设备 {device_code} 不存在于台账，无法记录定位")
+
+    acc = payload.accuracy
+    try:
+        acc = float(acc) if acc is not None and acc != "" else None
+    except (TypeError, ValueError):
+        acc = None
+    alt = payload.altitude
+    try:
+        alt = float(alt) if alt is not None and alt != "" else None
+    except (TypeError, ValueError):
+        alt = None
+
+    row = DeviceGeoObservation(
+        device_code=device_code,
+        latitude=lat,
+        longitude=lng,
+        accuracy=acc,
+        altitude=alt,
+        coord_type=(payload.coord_type or "gcj02").strip() or "gcj02",
+        room_code=(payload.room_code or "").strip() or None,
+        scan_source=(payload.scan_source or "camera").strip() or "camera",
+        operator=(payload.operator or "").strip(),
+        source=(payload.source or "miniprogram").strip() or "miniprogram",
+        client=(x_client_type or "").strip() or "miniprogram",
+        observed_at=_parse_dt(payload.observed_at),
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return GeoObservationCreateResponse(
+        success=True, id=row.id, device_code=device_code, created=True)
+
+
+@router.get("/asset-ledger/geo-observations",
+            response_model=List[GeoObservationResponse])
+def list_geo_observations(device_code: Optional[str] = None, limit: int = 20,
+                          db: Session = Depends(get_db),
+                          _: User = Depends(_get_current_user)):
+    """列出设备定位观测（**最新在前**）；`?device_code=` 指定设备，缺省返回最近 limit 条。"""
+    try:
+        n = int(limit or 20)
+    except (TypeError, ValueError):
+        n = 20
+    n = max(1, min(n, 200))
+    q = db.query(DeviceGeoObservation)
+    if device_code:
+        q = q.filter(DeviceGeoObservation.device_code == device_code.strip())
+    rows = (q.order_by(DeviceGeoObservation.created_at.desc(),
+                       DeviceGeoObservation.id.desc())
+            .limit(n).all())
+    return [GeoObservationResponse.model_validate(r) for r in rows]

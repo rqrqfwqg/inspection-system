@@ -49,6 +49,7 @@ NEW_TABLES = [
     "device_accessories",
     "ba_problems",
     "device_serial_observations",
+    "device_geo_observations",
 ]
 
 

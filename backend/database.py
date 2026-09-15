@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Boolean, ForeignKey, JSON, Numeric, Date
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Boolean, ForeignKey, JSON, Numeric, Date, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime, timezone
@@ -433,3 +433,39 @@ class DeviceSerialObservation(Base):
     ledger_brand_serial = Column(String, default="")             # 提交时台账 brand_model 抽取的机身编号快照（≠ serial_no）
     evidence_photo_id = Column(Integer, nullable=True)           # 可选：关联 device_photos.id
     note = Column(String, default="")
+
+
+class DeviceGeoObservation(Base):
+    """设备现场定位观测（扫码即记一条 · 只增不改台账 · 批次⑤）。
+
+    背景：现场盘点时「设备在哪」过去只靠房间号，而房间归属覆盖率很低；
+    批次⑤ 起，扫码时同步把手机定位（经纬度）记一条观测，形成设备的空间位置证据链。
+
+    设计要点：
+    1) **只记观测、不改台账**：与 `device_serial_observations` 同纪律 —— 本表只增，
+       `devices` / `fixed_assets` 的任何位置字段都不被改写。
+    2) **每次扫码一条**（不做覆盖）：同一设备多次扫码保留历史，可用于
+       ① 判断设备是否被移动过 ② 交叉验证定位漂移 ③ 现场复核留证。
+    3) **坐标类型固定 `gcj02`**：微信 `uni.getLocation` 默认返回国测局坐标（gcj02），
+       与高德/腾讯地图底图一致；不混用 wgs84，否则叠到地图上会整体偏移。
+    4) **精度 `accuracy` 必存**：室内（机房 / 管廊 / 负二层）定位漂移大，
+       精度半径是判断「这条坐标可不可信」的关键；缺了它后续核验会被误导。
+    5) **定位失败不阻断扫码**：室内或未授权时 `getLocation` 可能失败，
+       此时前端**不上报**（本表无记录 = 当时没取到定位），绝不塞 (0,0) 假坐标。
+    """
+    __tablename__ = "device_geo_observations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    device_code = Column(String, nullable=False, index=True)   # canonical 设备编号
+    latitude = Column(Float, nullable=False)                    # 纬度（gcj02）
+    longitude = Column(Float, nullable=False)                   # 经度（gcj02）
+    accuracy = Column(Float, nullable=True)                     # 水平精度半径（米）
+    altitude = Column(Float, nullable=True)                     # 海拔（米，可空）
+    coord_type = Column(String, default="gcj02")                # gcj02 / wgs84
+    room_code = Column(String, nullable=True)                   # 扫码时所在房间（可空）
+    scan_source = Column(String, default="camera")              # camera / album / manual
+    operator = Column(String, default="")                       # 操作人（端上报）
+    source = Column(String, default="miniprogram")              # miniprogram / web
+    client = Column(String, default="miniprogram")              # X-Client-Type
+    observed_at = Column(DateTime, nullable=True)               # 现场时间（端上报）
+    created_at = Column(DateTime, default=datetime.now(timezone.utc), index=True)
