@@ -138,11 +138,23 @@ def _warranty_state(end_iso: Optional[str]) -> Optional[str]:
 
 # ========================= 全量行装配（devices ∪ 台账 ∪ 固定资产） =========================
 
+# 图纸提取类子系统：其 records 保留 device_code（供 /search、/detail 按回路编号、
+# 配电箱编码直接关联检索），但**不并入资产总台账**，否则图纸设备会污染台账口径
+# （实测 elec_dwg 子系统 7937 条会让 total 从 8977 涨到 1.6 万）。
+_LEDGER_EXCLUDED_SUBSYSTEMS = ("elec_dwg",)
+_EXCLUDED_SUBSYS_IN = ",".join("'%s'" % c for c in _LEDGER_EXCLUDED_SUBSYSTEMS)
+
 _ALL_SQL = """
 WITH allc AS (
     SELECT device_code FROM devices
     UNION
-    SELECT device_code FROM records WHERE device_code IS NOT NULL AND device_code <> ''
+    SELECT device_code FROM records
+     WHERE device_code IS NOT NULL AND device_code <> ''
+       AND NOT EXISTS (
+           SELECT 1 FROM data_tables t
+             JOIN subsystems s ON s.id = t.subsystem_id
+            WHERE t.id = records.table_id
+              AND s.code IN (/*EXCL*/))
     UNION
     SELECT device_code FROM fixed_assets
 )
@@ -177,7 +189,7 @@ SELECT a.device_code        AS device_code,
 FROM allc a
 LEFT JOIN devices d      ON d.device_code = a.device_code
 LEFT JOIN fixed_assets f ON f.device_code = a.device_code
-"""
+""".replace("/*EXCL*/", _EXCLUDED_SUBSYS_IN)
 
 
 def _enrich_from_ledger(db: Session, rows: List[Dict[str, Any]]) -> None:
