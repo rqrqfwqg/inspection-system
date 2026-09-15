@@ -144,6 +144,43 @@ export interface LinkFieldStat {
 }
 
 /** GET /assets/link/table/{tid} —— 单表联动画像 */
+/** GET /assets/link/crossrefs —— 跨表字段关联（拿一条记录的编号到其他表搜索） */
+export interface CrossRefKey {
+  key: string
+  label: string
+  value: string
+}
+
+export interface CrossRefMatch {
+  field: string
+  label: string
+  count: number
+  /** 该字段命中的具体编号样例（最多 5 个） */
+  values: string[]
+}
+
+export interface CrossRefTarget {
+  table_id: number
+  code: string
+  name: string
+  subsystem_id?: number | null
+  total: number
+  matches: CrossRefMatch[]
+}
+
+export interface CrossRefResponse {
+  record: {
+    id: number
+    device_code?: string | null
+    table_id: number
+    table_name: string
+    table_code: string
+  }
+  keys: CrossRefKey[]
+  targets: CrossRefTarget[]
+  scanned: number
+}
+
 export interface LinkTableDetail {
   table: {
     table_id: number

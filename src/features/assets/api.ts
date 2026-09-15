@@ -25,6 +25,7 @@ import type {
   ManualQueueResponse,
   ManualAssociateResult,
   DeviceLinkResponse,
+  CrossRefResponse,
 } from './types'
 
 const BASE = '/assets'
@@ -42,6 +43,13 @@ export async function getLinkOverview(): Promise<LinkOverview> {
 /** GET /link/table/{tid} —— 单张资料表的画像（覆盖率 + 每个字段的真实填充率 + 未解析 TOP）。 */
 export async function getLinkTable(tableId: number): Promise<LinkTableDetail> {
   return api.get<LinkTableDetail>(`${BASE}/link/table/${tableId}`)
+}
+
+/** GET /link/crossrefs —— 跨表字段关联：拿记录的编号值到其他启用资料表搜索命中 */
+export async function getCrossRefs(tableId: number, recordId: number): Promise<CrossRefResponse> {
+  return api.get<CrossRefResponse>(
+    `${BASE}/link/crossrefs?table_id=${tableId}&record_id=${recordId}`,
+  )
 }
 
 /** GET /link/auto-rules —— 自动关联规则清单与候选规模（预览，不写库）。 */

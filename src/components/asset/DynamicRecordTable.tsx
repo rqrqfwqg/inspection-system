@@ -22,6 +22,8 @@ interface Props {
   onSelectionChange?: (ids: number[]) => void
   /** 行内「转移」：把该条记录按字段映射挪到别的资料表 */
   onTransfer?: (r: RecordItem) => void
+  /** 行内「跨表关联」：拿该记录的编号值到其他资料表搜索命中（crossrefs 弹窗） */
+  onCrossRefs?: (r: RecordItem) => void
   /** 表头右侧「去数据表管理处理这张表」——把可视化 / 检索侧与数据表管理打通 */
   onOpenTable?: () => void
   /** 提供后，每条记录左侧多出可点击的「关联键」列 → 打开该编号（records → 设备 方向联动） */
@@ -38,6 +40,7 @@ export default function DynamicRecordTable({
   selectedIds = [],
   onSelectionChange,
   onTransfer,
+  onCrossRefs,
   onOpenTable,
   onOpenDevice,
 }: Props) {
@@ -46,7 +49,7 @@ export default function DynamicRecordTable({
       ? fields.map((f) => ({ key: f.key, label: f.label }))
       : Object.keys(records[0]?.data ?? {}).map((k) => ({ key: k, label: k }))
 
-  const hasActions = !!(onEdit || onDelete || onTransfer)
+  const hasActions = !!(onEdit || onDelete || onTransfer || onCrossRefs)
   const selected = new Set(selectedIds)
   const allChecked = records.length > 0 && records.every((r) => selected.has(r.id))
 
@@ -164,6 +167,17 @@ export default function DynamicRecordTable({
                           onClick={() => onTransfer(r)}
                         >
                           <ArrowRightLeft className="w-4 h-4" />
+                        </Button>
+                      )}
+                      {onCrossRefs && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          title="跨表关联：拿该记录的编号到其他表搜索"
+                          className="text-indigo-600"
+                          onClick={() => onCrossRefs(r)}
+                        >
+                          <Link2 className="w-4 h-4" />
                         </Button>
                       )}
                       {onEdit && (

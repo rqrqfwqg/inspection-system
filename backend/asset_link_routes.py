@@ -55,8 +55,10 @@
 """
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+
+import json
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, text as sa_text
 from typing import Dict, List, Any, Optional, Set, Tuple
 
 from database import (
@@ -1048,3 +1050,168 @@ def link_table(tid: int, db: Session = Depends(get_db), _: User = Depends(_get_c
         "unresolved_top": unresolved_top,
         "field_count": returned,
     }
+
+
+# =====================================================================
+# 跨表字段关联（cross-table drill-through，2026-09-15 用户提出）
+# =====================================================================
+# 场景：在一张资料表选中某条记录，拿它的编号字段值（device_code + 各 *_code /
+# is_relation_key 字段）到其他启用资料表里搜索：哪张表命中、命中哪个字段、
+# 具体是哪个编号值命中几条 —— 前端「关联」弹窗据此一键跳转。
+# 纯只读，不写库；VALUES 经 json_each 展开做等值匹配（兼容目标字段为数组的情况）。
+
+_CROSSREF_MIN_LEN = 2          # 钥匙值最短长度（过滤空串/单字符脏值）
+_CROSSREF_VALUE_LIMIT = 5      # 每个命中字段回显的编号样例上限
+
+
+def _codeish_keys(fields) -> List[Tuple[str, str]]:
+    """可作跨表钥匙的字段 (key, label)：is_relation_key 或 key 以 _code 结尾。"""
+    out, seen = [], set()
+    ordered = sorted(fields, key=lambda x: (0 if x.is_relation_key else 1, x.sort_order or 0))
+    for f in ordered:
+        if f.key in seen:
+            continue
+        if f.is_relation_key or f.key == "device_code" or f.key.endswith("_code"):
+            seen.add(f.key)
+            out.append((f.key, f.label))
+    return out
+
+
+def _cr_match(col_expr: str) -> str:
+    """col_expr（标量或 JSON 数组）与 :vals 数组存在等值成员的 SQLite 表达式。"""
+    return (
+        "EXISTS (SELECT 1 FROM json_each(:vals) je, "
+        "json_each(CASE WHEN json_typeof({c})='array' THEN {c} "
+        "ELSE json_array({c}) END) de "
+        "WHERE CAST(de.value AS TEXT) = CAST(je.value AS TEXT))"
+    ).format(c=col_expr)
+
+
+@router.get("/crossrefs")
+def link_crossrefs(
+    table_id: int,
+    record_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """跨表字段关联：拿一条记录的编号值到其他启用资料表搜索命中。
+
+    返回 targets: [{table, total, matches: [{field, label, count, values[]}]}]
+    按命中数降序；只返回 total>0 的表。纯只读。
+    """
+    src = db.query(DataTable).filter(DataTable.id == table_id).first()
+    if not src:
+        raise HTTPException(status_code=404, detail="source table not found")
+    rec = db.query(Record).filter(
+        Record.table_id == table_id, Record.id == record_id).first()
+    if not rec:
+        raise HTTPException(status_code=404, detail="record not found")
+
+    # ---- 1) 本条记录的钥匙值（去重保序，跳过空/脏值）----
+    keys_meta: Dict[str, Dict[str, str]] = {}
+    vals: List[str] = []
+
+    def _add(v, key: str, label: str) -> None:
+        if isinstance(v, (list, tuple)):
+            for x in v:
+                _add(x, key, label)
+            return
+        t = str(v).strip() if v is not None else ""
+        if len(t) < _CROSSREF_MIN_LEN or t.lower() in ("none", "null", "-"):
+            return
+        keys_meta.setdefault(key, {"key": key, "label": label})
+        if t not in vals:
+            vals.append(t)
+
+    if rec.device_code:
+        _add(rec.device_code, "device_code", "关联键")
+    for k, lb in _codeish_keys(db.query(FieldDef).filter(FieldDef.table_id == table_id).all()):
+        _add((rec.data or {}).get(k), k, lb)
+
+    payload = {
+        "record": {
+            "id": rec.id, "device_code": rec.device_code,
+            "table_id": table_id, "table_name": src.name, "table_code": src.code,
+        },
+        "keys": [],
+        "targets": [],
+        "scanned": 0,
+    }
+    # keys：值 -> 来源字段（一个值可能来自多个字段，取第一个来源）
+    val_src: Dict[str, Tuple[str, str]] = {}
+    if rec.device_code and str(rec.device_code).strip():
+        val_src[str(rec.device_code).strip()] = ("device_code", "关联键")
+    for k, lb in _codeish_keys(db.query(FieldDef).filter(FieldDef.table_id == table_id).all()):
+        v = (rec.data or {}).get(k)
+        items = v if isinstance(v, (list, tuple)) else [v]
+        for x in items:
+            t = str(x).strip() if x is not None else ""
+            if len(t) >= _CROSSREF_MIN_LEN and t.lower() not in ("none", "null", "-") and t not in val_src:
+                val_src[t] = (k, lb)
+    payload["keys"] = [
+        {"key": val_src[v][0], "label": val_src[v][1], "value": v} for v in vals if v in val_src
+    ]
+
+    if not vals:
+        return payload
+
+    vals_json = json.dumps(vals, ensure_ascii=False)
+
+    # ---- 2) 逐张启用表统计命中 ----
+    others = db.query(DataTable).filter(
+        DataTable.is_active == True, DataTable.id != table_id).all()
+    scanned = 0
+    for t in others:
+        tfields = db.query(FieldDef).filter(FieldDef.table_id == t.id).all()
+        seen, cols = set(), []
+        for k, lb in [("device_code", "关联键")] + _codeish_keys(tfields):
+            if k in seen:
+                continue
+            seen.add(k)
+            col = ("r.device_code" if k == "device_code"
+                   else "json_extract(r.data, '$.%s')" % k)
+            cols.append((k, lb, col))
+        if not cols:
+            continue
+        scanned += 1
+        cond = " OR ".join("(%s)" % _cr_match(c) for _, _, c in cols)
+        sums = ", ".join(
+            "SUM(CASE WHEN %s THEN 1 ELSE 0 END) AS c%d" % (_cr_match(c), i)
+            for i, (k, lb, c) in enumerate(cols))
+        sql = sa_text(
+            "SELECT COUNT(*) AS total, %(sums)s "
+            "FROM records r JOIN data_tables t ON t.id = r.table_id "
+            "WHERE t.is_active = 1 AND t.id = :tid AND (%(cond)s)"
+            % {"sums": sums, "cond": cond})
+        row = db.execute(sql, {"vals": vals_json, "tid": t.id}).fetchone()
+        total = int(row[0] or 0)
+        if total <= 0:
+            continue
+        matches = []
+        for i, (k, lb, c) in enumerate(cols):
+            n = int(row[i + 1] or 0)
+            if n <= 0:
+                continue
+            # 回显该字段命中的具体编号（本记录钥匙值的交集样例）
+            vsql = sa_text(
+                "SELECT je.value FROM json_each(:vals) je "
+                "WHERE EXISTS (SELECT 1 FROM records r JOIN data_tables t ON t.id = r.table_id "
+                "WHERE t.id = :tid AND t.is_active = 1 AND (%(m)s)) LIMIT %(lim)d"
+                % {"m": _cr_match(c), "lim": _CROSSREF_VALUE_LIMIT})
+            try:
+                hit_vals = [str(x[0]) for x in db.execute(
+                    vsql, {"vals": vals_json, "tid": t.id}).fetchall()]
+            except Exception:
+                hit_vals = []
+            matches.append({"field": k, "label": lb, "count": n, "values": hit_vals})
+        matches.sort(key=lambda m: -m["count"])
+        targets.append({
+            "table_id": t.id, "code": t.code, "name": t.name,
+            "subsystem_id": t.subsystem_id,
+            "total": total, "matches": matches,
+        })
+
+    targets.sort(key=lambda x: -x["total"])
+    payload["targets"] = targets
+    payload["scanned"] = scanned
+    return payload

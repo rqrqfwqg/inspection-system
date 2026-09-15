@@ -5,6 +5,7 @@ import { assetApi } from '@/services/assetApi'
 import DynamicRecordTable from '@/components/asset/DynamicRecordTable'
 import RecordEditDialog from '@/components/asset/RecordEditDialog'
 import RecordTransferDialog from '@/components/asset/RecordTransferDialog'
+import CrossRefDialog from '@/components/asset/CrossRefDialog'
 import type { TransferResult } from '@/types/asset'
 import { getLinkOverview, getLinkTable } from '@/features/assets/api'
 import type { LinkOverview, LinkTableDetail } from '@/features/assets/types'
@@ -76,6 +77,9 @@ export default function AssetLedgerPage() {
   const [transferOpen, setTransferOpen] = useState(false)
   // 单表内行级搜索：便于从大量记录里挑出分错系统的那些
   const [rowQ, setRowQ] = useState('')
+  // 跨表关联弹窗 + 跳转待应用的过滤值（跳到目标表后自动填进行级搜索框）
+  const [crossRecord, setCrossRecord] = useState<RecordItem | null>(null)
+  const pendingRowQRef = useRef<string | null>(null)
 
   // 联动画像（与「资产可视化」同源）：卡片列表看覆盖率，单表看未解析 TOP
   const [linkOverview, setLinkOverview] = useState<LinkOverview | null>(null)
@@ -143,6 +147,10 @@ export default function AssetLedgerPage() {
       const [f, r] = await Promise.all([assetApi.listFields(tid), assetApi.listRecords(tid)])
       setFields(f)
       setRecords(r)
+      if (pendingRowQRef.current) {
+        setRowQ(pendingRowQRef.current)
+        pendingRowQRef.current = null
+      }
     } catch (e) {
       toast({
         title: '加载记录失败',
@@ -155,6 +163,14 @@ export default function AssetLedgerPage() {
   }
 
   const openTable = (tid: number) => navigate(`/asset/ledger/${tid}`)
+
+  /** 跨表关联跳转：切到目标表并按命中编号过滤（loadRecords 后自动应用） */
+  const handleCrossJump = (tid: number, value: string) => {
+    setCrossRecord(null)
+    if (tid === tableId) { setRowQ(value); return }
+    pendingRowQRef.current = value
+    navigate(`/asset/ledger/${tid}`)
+  }
 
   const backToCatalog = () => navigate('/asset/ledger')
 
@@ -514,6 +530,7 @@ export default function AssetLedgerPage() {
               selectedIds={selectedIds}
               onSelectionChange={setSelectedIds}
               onTransfer={(r) => openTransfer([r.id])}
+              onCrossRefs={(r) => setCrossRecord(r)}
             />
           )}
         </CardContent>
@@ -535,6 +552,14 @@ export default function AssetLedgerPage() {
         recordIds={transferIds}
         tables={tables}
         onDone={handleTransferred}
+      />
+
+      <CrossRefDialog
+        open={!!crossRecord}
+        onOpenChange={(o) => { if (!o) setCrossRecord(null) }}
+        tableId={Number(tableId)}
+        record={crossRecord}
+        onJump={handleCrossJump}
       />
     </div>
   )
