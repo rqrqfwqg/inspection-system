@@ -2821,7 +2821,8 @@ def tree_subsystem(
             if keyword and keyword not in d.device_code and keyword not in (d.name or ""):
                 continue
             nodes.append({
-                "key": f"d:{d.device_code}", "type": "device", "label": d.name, "count": 0,
+                "key": f"d:{d.device_code}", "type": "device",
+                "label": f"{d.name or d.device_code}（{d.device_code}）", "count": 0,
                 "has_children": False,
                 "meta": {"device_code": d.device_code, "status": d.is_active,
                          "record_count": int(by_code.get(d.device_code, 0))},
@@ -3366,7 +3367,11 @@ def tree_device(
         避免万级设备平铺。root 口径（见 meta.root_criterion）：
         active 设备且未作为任何 `device_relations(relation_type='配件从属')` 的
         to_code 者即主设备；配件(DeviceAccessory)恒为叶节点。
-    - parent=`g:<subsystem_code>`：返回该子系统下的主设备列表（type:device, is_root=true）。
+    - parent=`g:<subsystem_code>`：返回该子系统下的「设备类型」分组（按设备名称聚合，
+        2026-09-15 新增——此前直接平铺主设备，弱电 3885 台无法浏览；
+        实测收敛：弱电 3885->64 组 / 电力 1170->10 组 / 照明 52->2 组），count=组内主设备数。
+    - parent=`t:<subsystem_code>:<设备名>`：返回该组主设备清单
+        （label 带编号区分同名设备；is_root=true；配件/子设备可继续下钻）。
     - parent=`d:<device_code>`：返回该设备的
         (1) 配件子树（device_accessories，叶节点 type:accessory），
         (2) 经 `device_relations(relation_type='配件从属')` 关联的子设备
@@ -3461,12 +3466,63 @@ def tree_device(
         sub = db.query(Subsystem).filter(Subsystem.code == code).first()
         if not sub:
             return []
-        q = db.query(Device).filter(
+        # 第二层：按设备名称分组（同名聚合），组内主设备数降序
+        q = db.query(Device.name, func.count(Device.id)).filter(
             Device.subsystem_id == sub.id, Device.is_active == True)
         if sub_codes:
             q = q.filter(Device.device_code.notin_(sub_codes))
-        for d in q.order_by(Device.device_code).all():
-            nodes.append(device_node(d.device_code, is_root=True))
+        rows = q.group_by(Device.name).all()
+        rows.sort(key=lambda r: (-(r[1] or 0), r[0] or ""))
+        for name, cnt in rows:
+            nodes.append({
+                "key": f"t:{code}:{name}", "type": "device", "label": name or "未命名设备",
+                "count": int(cnt or 0), "has_children": True,
+                "meta": {"is_group": True, "group_label": "设备类型分组",
+                         "subsystem_code": code, "device_name": name,
+                         "group_criterion": "按设备名称分组（同名设备聚合）；点开查看该类设备清单。"},
+            })
+        return nodes
+
+    if parent.startswith("t:"):
+        # 第三层：某子系统下同名设备清单（label 带编号，解决「交换机」×N 分不清）
+        sub_code, _, dev_name_key = parent[2:].partition(":")
+        sub = db.query(Subsystem).filter(Subsystem.code == sub_code).first()
+        if not sub:
+            return []
+        dq = db.query(Device).filter(
+            Device.subsystem_id == sub.id, Device.name == dev_name_key,
+            Device.is_active == True)
+        if sub_codes:
+            dq = dq.filter(Device.device_code.notin_(sub_codes))
+        devs = dq.order_by(Device.device_code).all()
+        codes = [d.device_code for d in devs]
+        acc_map: Dict[str, int] = {}
+        child_map: Dict[str, List[str]] = {}
+        if codes:
+            for pc, c in db.query(
+                DeviceAccessory.parent_device_code,
+                func.count(DeviceAccessory.id),
+            ).filter(DeviceAccessory.parent_device_code.in_(codes)).group_by(
+                DeviceAccessory.parent_device_code).all():
+                acc_map[pc] = int(c or 0)
+            for fc, tc in db.query(DeviceRelation.from_code, DeviceRelation.to_code).filter(
+                DeviceRelation.relation_type == "配件从属",
+                DeviceRelation.from_code.in_(codes),
+            ).all():
+                lst = child_map.setdefault(fc, [])
+                if tc not in lst:
+                    lst.append(tc)
+        for d in devs:
+            ccode = d.device_code
+            kids = child_map.get(ccode, [])
+            acc = acc_map.get(ccode, 0)
+            nodes.append({
+                "key": f"d:{ccode}", "type": "device",
+                "label": f"{d.name or ccode}（{ccode}）",
+                "count": acc, "has_children": bool(kids) or acc > 0,
+                "meta": {"device_code": ccode, "has_accessory": acc > 0,
+                         "sub_device_count": len(kids), "is_root": True},
+            })
         return nodes
 
     if parent.startswith("d:"):

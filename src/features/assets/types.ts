@@ -526,6 +526,9 @@ export interface DeviceHierarchyNode {
   has_children?: boolean
   meta?: {
     is_group?: boolean
+    group_label?: string
+    group_criterion?: string
+    device_name?: string
     subsystem_code?: string
     device_code?: string
     accessory_id?: number

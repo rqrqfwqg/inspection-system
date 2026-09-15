@@ -239,8 +239,8 @@ export function DeviceHierarchyTreePage({ onOpenDevice }: DeviceHierarchyTreePag
             ))
           )}
           <p className="text-xs text-gray-400 mt-4">
-            提示：根层为「按子系统分组」的主设备入口；点分组展开主设备，点主设备查看详情，
-            展开主设备可见其配件与「配件从属」子设备。
+            提示：层级为 子系统 → 设备类型（同名聚合）→ 主设备（带编号）→ 配件 / 子设备；
+            点类型分组展开设备清单，点主设备查看详情。
           </p>
         </CardContent>
       </Card>
@@ -258,7 +258,7 @@ export function DeviceHierarchyTreePage({ onOpenDevice }: DeviceHierarchyTreePag
                 <NodeIcon node={selectedNode} />
                 <span className="font-medium text-gray-800 truncate">{selectedNode.label}</span>
                 <Badge variant="secondary" className="text-xs">
-                  {selectedNode.meta?.is_group ? '子系统分组' : selectedNode.type === 'accessory' ? '配件' : '设备'}
+                  {selectedNode.meta?.is_group ? String(selectedNode.meta?.group_label || '子系统分组') : selectedNode.type === 'accessory' ? '配件' : '设备'}
                 </Badge>
               </div>
               {selectedIsDevice && (
