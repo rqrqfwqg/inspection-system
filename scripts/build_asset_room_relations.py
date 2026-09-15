@@ -27,7 +27,7 @@ REL_TYPE = "所在机房"
 # 固定资产台账家族（device_code 与 fixed_assets 同号）
 ASSET_TABLES = [
     "power_panels", "water_equipment", "hvac_equipment", "lighting_fixtures",
-    "weak_cctv", "weak_access_gate", "weak_network", "fire_equipment",
+    "weak_devices", "fire_equipment",
     "other_equipment", "elevator_escalator",
 ]
 

@@ -345,10 +345,14 @@ def delete_subsystem(sid: int, db: Session = Depends(get_db), _: User = Depends(
 # ========================= 资料表 =========================
 
 @router.get("/tables", response_model=List[DataTableResponse])
-def list_tables(subsystem_id: Optional[int] = None, db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+def list_tables(subsystem_id: Optional[int] = None, include_inactive: bool = False,
+                db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """资料表列表。默认只返回启用中的表 —— 合表后的旧表以 is_active=False 停用，不再出现。"""
     q = db.query(DataTable)
     if subsystem_id:
         q = q.filter(DataTable.subsystem_id == subsystem_id)
+    if not include_inactive:
+        q = q.filter(DataTable.is_active == True)
     rows = q.order_by(DataTable.sort_order, DataTable.id).all()
     result = []
     for t in rows:
@@ -1798,6 +1802,7 @@ def _record_count_maps(db: Session) -> Dict[str, Any]:
     """返回 {"by_code": {device_code: 记录数}, "by_sub": {subsystem_id: 记录数}}。
 
     口径：records.device_code 即资料记录挂在哪个编号上（可能是设备、机房或图纸图元）。
+    **只统计 is_active 的资料表** —— 合表时旧表停用后不再计数（2026-09-15 弱电三表合一引入）。
     一次 GROUP BY 取回（线上约 1.3 万组，毫秒级），进程内缓存 60s ——
     与 asset_ledger 的 60s 缓存同一节奏，避免树每次展开都全表扫。
     """
@@ -1808,7 +1813,8 @@ def _record_count_maps(db: Session) -> Dict[str, Any]:
     by_code = {
         code: int(cnt)
         for code, cnt in db.query(Record.device_code, func.count(Record.id))
-        .filter(Record.device_code.isnot(None))
+        .join(DataTable, DataTable.id == Record.table_id)
+        .filter(Record.device_code.isnot(None), DataTable.is_active == True)
         .group_by(Record.device_code)
         .all()
         if code
@@ -1816,11 +1822,13 @@ def _record_count_maps(db: Session) -> Dict[str, Any]:
     by_sub = dict(
         db.query(DataTable.subsystem_id, func.count(Record.id))
         .join(Record, Record.table_id == DataTable.id)
+        .filter(DataTable.is_active == True)
         .group_by(DataTable.subsystem_id)
         .all()
     )
     sub_tables = dict(
         db.query(DataTable.subsystem_id, func.count(DataTable.id))
+        .filter(DataTable.is_active == True)
         .group_by(DataTable.subsystem_id)
         .all()
     )
@@ -3221,43 +3229,15 @@ def seed_assets(db: Session):
 
 
     # ==================== 基础台账（源自固定资产主档导入，与数据表管理 1:1） ====================
-    # 弱电系统 · 视频监控台账
-    add_table("weak", "weak_cctv", "视频监控台账", [
-        ("monitor_code", "设备编号", "device_ref", [], True, True),
-        ("device_name", "设备名称", "text", [], False, False),
-        ("category", "设备类别", "select", ["视频监控设备", "摄像头"], False, False),
-        ("brand_model", "品牌型号", "text", [], False, False),
-        ("location", "安装位置", "text", [], False, False),
-        ("building", "楼栋", "text", [], False, False),
-        ("floor", "楼层", "text", [], False, False),
-        ("use_dept", "使用部门", "text", [], False, False),
-        ("responsible", "维护责任人", "text", [], False, False),
-        ("transfer_no", "移交编号", "text", [], False, False),
-        ("recv_date", "接收日期", "date", [], False, False),
-        ("remark", "备注", "text", [], False, False),
-    ])
-
-    # 弱电系统 · 门禁道闸台账
-    add_table("weak", "weak_access_gate", "门禁道闸台账", [
+    # 弱电系统 · 弱电设备台账（2026-09-15 由 视频监控/网络设备/门禁道闸 三表合一）
+    # 三表字段完全同构（12 字段同名同类型），仅关系键名不同；合并后关系键统一 device_code。
+    # 旧表 weak_cctv / weak_network / weak_access_gate 已 is_active=False 停用，保留可回滚。
+    add_table("weak", "weak_devices", "弱电设备台账", [
         ("device_code", "设备编号", "device_ref", [], True, True),
         ("device_name", "设备名称", "text", [], False, False),
-        ("category", "设备类别", "select", ["门禁", "道闸", "停车场系统"], False, False),
-        ("brand_model", "品牌型号", "text", [], False, False),
-        ("location", "安装位置", "text", [], False, False),
-        ("building", "楼栋", "text", [], False, False),
-        ("floor", "楼层", "text", [], False, False),
-        ("use_dept", "使用部门", "text", [], False, False),
-        ("responsible", "维护责任人", "text", [], False, False),
-        ("transfer_no", "移交编号", "text", [], False, False),
-        ("recv_date", "接收日期", "date", [], False, False),
-        ("remark", "备注", "text", [], False, False),
-    ])
-
-    # 弱电系统 · 网络设备台账
-    add_table("weak", "weak_network", "网络设备台账", [
-        ("net_code", "设备编号", "device_ref", [], True, True),
-        ("device_name", "设备名称", "text", [], False, False),
-        ("category", "设备类别", "select", ["交换机", "机柜", "存储/服务器", "终端/工控", "其他"], False, False),
+        ("category", "设备类别", "select", ["视频监控设备", "摄像头", "交换机", "机柜", "存储/服务器",
+                                            "终端/工控", "环境监控", "其他", "其他设备",
+                                            "门禁", "道闸", "停车场系统"], False, False),
         ("brand_model", "品牌型号", "text", [], False, False),
         ("location", "安装位置", "text", [], False, False),
         ("building", "楼栋", "text", [], False, False),
