@@ -1,5 +1,8 @@
 import * as React from 'react'
-import { ChevronRight, ChevronDown, Boxes, Cpu, Layers, FolderTree, Filter } from 'lucide-react'
+import {
+  ChevronRight, ChevronDown, Boxes, Cpu, Layers, FolderTree, Filter,
+  Zap, Building2, Building, Server, Cable, Package, Plug, Database, Table2, FileText,
+} from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { useToast } from '@/hooks/use-toast'
@@ -14,9 +17,26 @@ interface SubsystemTreePageProps {
   onSelectSubsystem: (code: string) => void
 }
 
+/** 含编号的节点用等宽字体，便于核对回路号 / 箱编码 */
+const MONO_TYPES = new Set<SubsystemNode['type']>([
+  'device', 'power_circuit', 'power_box', 'power_trafo', 'power_item', 'record',
+])
+
 function SubNodeIcon({ type }: { type: SubsystemNode['type'] }) {
   if (type === 'device') return <Cpu className="w-4 h-4 text-blue-500" />
   if (type === 'subsystem') return <Boxes className="w-4 h-4 text-indigo-500" />
+  if (type === 'power_root') return <Zap className="w-4 h-4 text-amber-600" />
+  if (type === 'power_layer') return <Layers className="w-4 h-4 text-amber-600" />
+  if (type === 'power_substation') return <Building2 className="w-4 h-4 text-rose-600" />
+  if (type === 'power_trafo') return <Zap className="w-4 h-4 text-orange-500" />
+  if (type === 'power_panel') return <Server className="w-4 h-4 text-orange-500" />
+  if (type === 'power_circuit') return <Cable className="w-4 h-4 text-teal-600" />
+  if (type === 'power_box') return <Package className="w-4 h-4 text-teal-600" />
+  if (type === 'power_floor') return <Building className="w-4 h-4 text-violet-500" />
+  if (type === 'power_item') return <Plug className="w-4 h-4 text-gray-500" />
+  if (type === 'table_group') return <Database className="w-4 h-4 text-slate-500" />
+  if (type === 'table') return <Table2 className="w-4 h-4 text-slate-500" />
+  if (type === 'record') return <FileText className="w-4 h-4 text-gray-400" />
   return <Layers className="w-4 h-4 text-gray-500" />
 }
 
@@ -56,6 +76,7 @@ function SubTreeNode({
           isDevice ? 'hover:bg-blue-50' : 'hover:bg-gray-50'
         )}
         style={{ paddingLeft: depth * 16 + 8 }}
+        title={node.meta?.upstream ? `上级：${String(node.meta.upstream)}` : undefined}
         onClick={() => {
           if (isDevice) {
             onOpenDevice(String(node.meta?.device_code ?? ''))
@@ -78,7 +99,7 @@ function SubTreeNode({
         <span
           className={cn(
             'flex-1 truncate text-sm',
-            isDevice ? 'text-blue-700 font-mono' : 'text-gray-800'
+            isDevice ? 'text-blue-700 font-mono' : MONO_TYPES.has(node.type) ? 'font-mono text-gray-700' : 'text-gray-800'
           )}
         >
           {node.label}
@@ -203,7 +224,7 @@ export function SubsystemTreePage({ onOpenDevice, onSelectSubsystem }: Subsystem
     <Card>
       <CardHeader className="py-3">
         <CardTitle className="text-base flex items-center gap-2">
-          <FolderTree className="w-4 h-4" />子系统树（子系统 → 分类 → 设备）
+          <FolderTree className="w-4 h-4" />子系统树（子系统 → 分类 / 供电分层 → 设备）
         </CardTitle>
       </CardHeader>
       <CardContent>
@@ -227,7 +248,9 @@ export function SubsystemTreePage({ onOpenDevice, onSelectSubsystem }: Subsystem
           ))
         )}
         <p className="text-xs text-gray-400 mt-4">
-          提示：点击节点展开/折叠下级，点击设备节点查看详情；将鼠标悬停在子系统节点上，点右侧漏斗图标可在「概览」中按该系统过滤。
+          提示：点击节点展开/折叠下级，点击设备节点查看详情；悬停在子系统节点上点右侧漏斗图标，可在「概览」中按该系统过滤。
+          电力系统下的「供电系统分层」按供电方向逐级下钻：变电所 → 变压器 → 低压配电屏 → 配电回路 → 配电箱 → 楼层配电设备；
+          节点悬停可见其上级归属。
         </p>
       </CardContent>
     </Card>

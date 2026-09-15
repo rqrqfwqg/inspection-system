@@ -380,7 +380,26 @@ export interface AreaNode {
 // ==================== 子系统树（GET /trees/subsystem） ====================
 
 /** 子系统树节点。meta.record_count/table_count 为 2026-09-15 新增，让树直接反映资料表数据 */
-export type SubsystemNodeType = 'subsystem' | 'category' | 'device'
+export type SubsystemNodeType =
+  | 'subsystem'
+  | 'category'
+  | 'device'
+  /** 供电系统分层（系统图 → 平面图 → 台账）：入口 / 层 / 变电所 / 分组 */
+  | 'power_root'
+  | 'power_layer'
+  | 'power_substation'
+  | 'power_group'
+  /** 供电分层明细：变压器 / 低压配电屏 / 配电回路 / 配电箱 / 楼层 / 图纸图元 */
+  | 'power_trafo'
+  | 'power_panel'
+  | 'power_circuit'
+  | 'power_box'
+  | 'power_floor'
+  | 'power_item'
+  /** 资料表节点 */
+  | 'table_group'
+  | 'table'
+  | 'record'
 
 export interface SubsystemNode {
   key: string
@@ -399,6 +418,25 @@ export interface SubsystemNode {
     record_count?: number
     /** 仅 subsystem 节点：该子系统下的资料表数量 */
     table_count?: number
+    /** 供电分层：当前节点挂在哪个上级（变电所 / 回路 / 配电箱 / 楼层） */
+    upstream?: string
+    /** 供电分层：所属变电所编码（WP-B / SP-B / EP-B / G-B；空串表示未标注） */
+    substation_code?: string
+    /** 供电分层：层 key（L0..L5）与层名 */
+    layer?: string
+    layer_name?: string
+    desc?: string
+    /** 供电分层：所在楼层 / 配电箱编码 / 上游回路编号 */
+    floor?: string
+    box_code?: string
+    upstream_circuits?: string
+    /** 供电分层：回路的下游配电箱（最多 30 个）与总数 */
+    downstream?: string[]
+    n_downstream?: number
+    /** 资料表节点 */
+    table_id?: number
+    table_code?: string
+    record_id?: number
     [key: string]: unknown
   }
   [key: string]: unknown

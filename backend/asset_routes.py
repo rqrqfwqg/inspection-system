@@ -2122,6 +2122,541 @@ def area_stats(
     }
 
 
+# ==================== 供电系统分层（系统图 → 平面图 → 台账） ====================
+# 把「图纸提取」数据按物理供电链组织成可下钻层级，供「系统层级 → 电力系统」使用：
+#     变电所 → 变压器 → 低压配电屏 → 配电回路 → 配电箱 → 楼层配电设备
+# 数据源是 elec_dwg 子系统的 records，**只读**。
+# ⚠️ 严禁把这些表的 subsystem_id 改到 power：资产总台账靠子系统 code `elec_dwg`
+#    做排除（见 asset_ledger_routes._LEDGER_EXCLUDED_SUBSYSTEMS），一旦改归属，
+#    7937 条图纸记录会灌进台账，total 从 8977 涨到约 1.6 万。
+#    因此这里用「挂载」而非「搬家」—— 电力系统节点下引用同一批 records。
+
+_PWR_TTL = 60                      # 秒；与 records 计数缓存同节奏
+_PWR_CACHE: Dict[str, Any] = {"ts": 0.0, "idx": None}
+_PWR_BOX_RE = re.compile(r"^[A-Za-z0-9\-_.~]+$")
+_PWR_SEP_RE = re.compile(u"[\u3001,;\uff1b/|]+")
+_PWR_DETAIL_CAP = 300              # 单次展开返回的明细上限
+
+# (层 key, 序号, 名称, 供电含义)
+_PWR_LAYERS = [
+    ("L0", u"\u2460", u"变电所", u"电源入口 · 10kV 进线"),
+    ("L1", u"\u2461", u"变压器", u"降压至 0.4kV"),
+    ("L2", u"\u2462", u"低压配电屏", u"出线屏组"),
+    ("L3", u"\u2463", u"配电回路", u"系统图回路编号"),
+    ("L4", u"\u2464", u"配电箱", u"竖向干线箱 / 末端箱"),
+    ("L5", u"\u2465", u"楼层配电设备", u"平面图末端点位"),
+]
+
+
+def _pwr_s(v) -> str:
+    return v.strip() if isinstance(v, str) else ""
+
+
+def _pwr_is_box(v: str) -> bool:
+    return bool(v) and len(v) <= 40 and _PWR_BOX_RE.match(v) is not None
+
+
+def _pwr_split(v) -> List[str]:
+    out: List[str] = []
+    for one in _PWR_SEP_RE.split(_pwr_s(v)):
+        one = one.strip()
+        if one and one not in out:
+            out.append(one)
+    return out
+
+
+def _pwr_safe(part) -> str:
+    """编号若含 : / 会破坏树 key 分段，换成全角字符（前端只当 key 透传）。"""
+    return _pwr_s(part).replace(":", u"\uff1a").replace("/", u"\uff0f")
+
+
+def _pwr_node(key, ntype, label, count, has_children=True, **meta):
+    return {"key": key, "type": ntype, "label": label, "count": count,
+            "has_children": bool(has_children), "meta": meta}
+
+
+def _pwr_index(db: Session) -> Optional[Dict[str, Any]]:
+    """加载 elec_dwg 全量 records 并建供电链索引；进程内缓存 60s。"""
+    now = time.time()
+    cache = _PWR_CACHE
+    if cache["idx"] is not None and now - cache["ts"] < _PWR_TTL:
+        return cache["idx"]
+
+    sub = db.query(Subsystem).filter(Subsystem.code == "elec_dwg").first()
+    if sub is None:
+        cache["ts"] = now
+        cache["idx"] = None
+        return None
+
+    tid_map: Dict[str, int] = {}
+    # 显式按 id 升序：万一同一子系统下出现同 code 的表（本地测试库曾出现），
+    # 取 id 最大的那张，避免因查询顺序不同而静默取到旧表。
+    for t in db.query(DataTable).filter(DataTable.subsystem_id == sub.id) \
+            .order_by(DataTable.id).all():
+        tid_map[t.code] = t.id
+
+    def load(code: str) -> List[Dict[str, Any]]:
+        tid = tid_map.get(code)
+        if tid is None:
+            return []
+        return [r.data or {} for r in db.query(Record).filter(Record.table_id == tid).all()]
+
+    # ---- 变电所（顶层电源）----
+    ss_list: List[Dict[str, str]] = []
+    ss_name: Dict[str, str] = {}
+    for s in load("elec_substation"):
+        code, name = _pwr_s(s.get("substation_code")), _pwr_s(s.get("name"))
+        if not code:
+            continue
+        ss_list.append({"code": code, "name": name})
+        ss_name[code] = name
+
+    def to_ss(v) -> str:
+        """records 里的 substation 形如 'WP-B 西停车楼'，按「编码 + 空格」前缀归并。"""
+        v = _pwr_s(v)
+        if not v:
+            return ""
+        for code in ss_name:
+            if v == code or v.startswith(code + " "):
+                return code
+        return ""
+
+    # ---- 变压器 / 低压屏 / 回路，按变电所归并 ----
+    trafo_by_ss: Dict[str, List[Dict[str, Any]]] = {}
+    for t in load("elec_transformer"):
+        trafo_by_ss.setdefault(to_ss(t.get("substation")), []).append(t)
+
+    panel_by_ss: Dict[str, List[Dict[str, Any]]] = {}
+    for p in load("elec_lv_panel"):
+        panel_by_ss.setdefault(to_ss(p.get("substation")), []).append(p)
+
+    circuit_by_ss: Dict[str, List[Dict[str, Any]]] = {}
+    circuit_by_code: Dict[str, Dict[str, Any]] = {}
+    for c in load("elec_circuit"):
+        cc = _pwr_s(c.get("circuit_code"))
+        if cc:
+            circuit_by_code[cc] = c
+        circuit_by_ss.setdefault(to_ss(c.get("substation")), []).append(c)
+
+    # ---- 配电箱：三个视角的并集（系统图干线箱 / 平面图末端箱 / 设备挂载箱）----
+    riser_boxes: Dict[str, Dict[str, Any]] = {}
+    for b in load("elec_riser_box"):
+        bc = _pwr_s(b.get("box_code"))
+        if _pwr_is_box(bc):
+            riser_boxes[bc] = b
+
+    box_up: Dict[str, List[str]] = {}
+    box_ss: Dict[str, str] = {}
+    for b in load("elec_box_circuit"):
+        bc = _pwr_s(b.get("box_code"))
+        if not _pwr_is_box(bc):
+            continue
+        # 先建键：有箱编码但 upstream_circuits 为空的行，也必须出现在箱列表里
+        # （线上 94 条中有 32 条上级回路为空，用循环内 setdefault 会把它们整条丢掉）
+        box_up.setdefault(bc, [])
+        for cc in _pwr_split(b.get("upstream_circuits")):
+            if cc not in box_up[bc]:
+                box_up[bc].append(cc)
+
+    dev_by_box: Dict[str, List[Dict[str, Any]]] = {}
+    box_floor: Dict[str, str] = {}
+    for d in load("elec_floor_device"):
+        bc = _pwr_s(d.get("box_code"))
+        dev_by_box.setdefault(bc, []).append(d)
+        if bc and bc not in box_floor:
+            box_floor[bc] = _pwr_s(d.get("floor"))
+
+    # 干线箱的上级回路补进 box_up（该字段多数为空，有则并入）
+    for bc, b in riser_boxes.items():
+        for cc in _pwr_split(b.get("upstream_circuits")):
+            if cc not in box_up.setdefault(bc, []):
+                box_up[bc].append(cc)
+
+    # 箱的归属变电所：干线箱 substation → 末端箱 circuit_substation → 上游回路 substation
+    for bc, b in riser_boxes.items():
+        ss = to_ss(b.get("substation"))
+        if ss:
+            box_ss[bc] = ss
+    for bc in list(box_up):
+        if box_ss.get(bc):
+            continue
+        # 一个箱的上游回路可能跨多个变电所（图纸里确实存在）。
+        # 只有候选唯一时才定归属；多候选一律留在「未标注」—— 不猜。
+        cands = set()
+        for cc in box_up[bc]:
+            c = circuit_by_code.get(cc)
+            if c is not None:
+                ss = to_ss(c.get("substation"))
+                if ss:
+                    cands.add(ss)
+        if len(cands) == 1:
+            box_ss[bc] = cands.pop()
+
+    all_boxes = set(riser_boxes) | set(box_up)
+    for bc in dev_by_box:
+        if _pwr_is_box(bc):
+            all_boxes.add(bc)
+
+    box_by_circuit: Dict[str, List[str]] = {}
+    for bc, ccs in box_up.items():
+        for cc in ccs:
+            box_by_circuit.setdefault(cc, []).append(bc)
+    box_by_ss: Dict[str, List[str]] = {}
+    for bc in sorted(all_boxes):
+        box_by_ss.setdefault(box_ss.get(bc, ""), []).append(bc)
+
+    floor_of_box: Dict[str, str] = {}
+    for bc in sorted(all_boxes):
+        floor_of_box[bc] = box_floor.get(bc, "")
+
+    idx: Dict[str, Any] = {
+        "subsystems": ss_list, "ss_name": ss_name,
+        "trafo_by_ss": trafo_by_ss, "panel_by_ss": panel_by_ss,
+        "circuit_by_ss": circuit_by_ss, "circuit_by_code": circuit_by_code,
+        "riser_boxes": riser_boxes, "box_up": box_up, "box_ss": box_ss,
+        "box_by_circuit": box_by_circuit, "box_by_ss": box_by_ss,
+        "dev_by_box": dev_by_box, "floor_of_box": floor_of_box,
+        "all_boxes": sorted(all_boxes),
+        "n_trafo": sum(len(v) for v in trafo_by_ss.values()),
+        "n_panel": sum(len(v) for v in panel_by_ss.values()),
+        "n_panel_face": sum(int(p.get("panel_count") or 0)
+                            for v in panel_by_ss.values() for p in v),
+        "n_circuit": sum(len(v) for v in circuit_by_ss.values()),
+        "n_device": sum(len(v) for v in dev_by_box.values()),
+    }
+    cache["ts"] = now
+    cache["idx"] = idx
+    return idx
+
+
+def _pwr_counts(idx: Dict[str, Any]) -> Dict[str, int]:
+    return {
+        "L0": len(idx["subsystems"]),
+        "L1": idx["n_trafo"],
+        "L2": idx["n_panel"],
+        "L3": idx["n_circuit"],
+        "L4": len(idx["all_boxes"]),
+        "L5": idx["n_device"],
+    }
+
+
+def _pwr_root_node() -> Dict[str, Any]:
+    return _pwr_node("pwr:root", "power_root",
+                     u"供电系统分层（系统图 → 平面图 → 台账）", None, True,
+                     note=u"变电所 → 变压器 → 低压配电屏 → 配电回路 → 配电箱 → 楼层配电设备")
+
+
+def _pwr_cap(rows: List[Any], key: str) -> List[Any]:
+    return rows[:_PWR_DETAIL_CAP]
+
+
+def _tree_power_layers(rest: str, db: Session) -> List[Dict[str, Any]]:
+    """pwr: 前缀下的逐级下钻。
+
+    pwr:root                → 6 个供电层
+    pwr:L:<L0..L5>          → 该层明细
+    pwr:SS:<变电所码>        → 该所下辖分类（变压器/低压屏/回路/配电箱）
+    pwr:SS:<码>:<kind>      → 该分类明细
+    pwr:C:<回路编号>         → 回路下游配电箱
+    pwr:B:<箱编码>           → 箱下游楼层设备
+    pwr:F:<楼层>             → 该层按配电箱分组
+    """
+    idx = _pwr_index(db)
+    if idx is None:
+        return []
+    if rest == "root":
+        counts = _pwr_counts(idx)
+        return [
+            _pwr_node("pwr:L:" + lk, "power_layer",
+                      u"%s %s（%d）" % (num, name, counts.get(lk, 0)), counts.get(lk, 0), True,
+                      layer=lk, layer_name=name, desc=desc)
+            for lk, num, name, desc in _PWR_LAYERS
+        ]
+
+    parts = rest.split(":")
+    head = parts[0]
+    if head == "L":
+        return _pwr_layer_detail(parts[1] if len(parts) > 1 else "", idx)
+    if head == "SS":
+        return _pwr_ss_detail(parts[1] if len(parts) > 1 else "",
+                              parts[2] if len(parts) > 2 else "", idx)
+    if head == "C":
+        return _pwr_circuit_detail(":".join(parts[1:]), idx)
+    if head == "B":
+        return _pwr_box_detail(":".join(parts[1:]), idx)
+    if head == "F":
+        return _pwr_floor_detail(":".join(parts[1:]), idx)
+    return []
+
+
+def _pwr_layer_detail(layer: str, idx: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if layer == "L0":
+        out = []
+        for s in idx["subsystems"]:
+            code = s["code"]
+            n = (len(idx["trafo_by_ss"].get(code, [])) + len(idx["panel_by_ss"].get(code, []))
+                 + len(idx["circuit_by_ss"].get(code, [])))
+            out.append(_pwr_node("pwr:SS:" + _pwr_safe(code), "power_substation",
+                                 u"%s %s" % (code, s["name"]), n, True,
+                                 substation_code=code, name=s["name"],
+                                 upstream=u"10kV 电源进线",
+                                 n_trafo=len(idx["trafo_by_ss"].get(code, [])),
+                                 n_panel=len(idx["panel_by_ss"].get(code, [])),
+                                 n_circuit=len(idx["circuit_by_ss"].get(code, [])),
+                                 n_box=len(idx["box_by_ss"].get(code, []))))
+        return out
+
+    if layer == "L1":
+        out = []
+        for ss, rows in sorted(idx["trafo_by_ss"].items()):
+            for t in rows:
+                code = _pwr_s(t.get("trafo_code")) or u"（未编号）"
+                cap = t.get("capacity_kva")
+                out.append(_pwr_node("pwr:T:" + _pwr_safe(code), "power_trafo",
+                                     u"%s · %s kVA" % (code, cap if cap else u"?"), 0, False,
+                                     upstream=(idx["ss_name"].get(ss) or u"未标注变电所"),
+                                     substation_code=ss, note=_pwr_s(t.get("note"))))
+        return out[: _PWR_DETAIL_CAP]
+
+    if layer == "L2":
+        out = []
+        for ss, rows in sorted(idx["panel_by_ss"].items()):
+            for p in rows:
+                grp = _pwr_s(p.get("panel_group")) or u"（未命名屏组）"
+                _ss_label = idx["ss_name"].get(ss) or u"未标注变电所"
+                out.append(_pwr_node("pwr:PA:" + _pwr_safe(ss) + ":" + _pwr_safe(grp),
+                                     "power_panel",
+                                     u"%s（%s 面）· %s" % (grp, p.get("panel_count") or 0, _ss_label),
+                                     0, False,
+                                     upstream=(idx["ss_name"].get(ss) or u"未标注变电所"),
+                                     substation_code=ss,
+                                     panel_from=_pwr_s(p.get("panel_from")),
+                                     panel_to=_pwr_s(p.get("panel_to"))))
+        return out[: _PWR_DETAIL_CAP]
+
+    if layer == "L3":
+        return _pwr_grouped_by_ss(idx, "circuit")
+
+    if layer == "L4":
+        return _pwr_grouped_by_ss(idx, "box")
+
+    if layer == "L5":
+        floors: Dict[str, int] = {}
+        for d in idx["dev_by_box"].values():
+            for one in d:
+                fl = _pwr_s(one.get("floor")) or u"未标注楼层"
+                floors[fl] = floors.get(fl, 0) + 1
+        return [
+            _pwr_node("pwr:F:" + _pwr_safe(fl), "power_floor", fl, cnt, True, floor=fl)
+            for fl, cnt in sorted(floors.items(), key=lambda x: -x[1])
+        ]
+    return []
+
+
+def _pwr_grouped_by_ss(idx: Dict[str, Any], kind: str) -> List[Dict[str, Any]]:
+    """回路层 / 配电箱层：先按变电所分组（未标注排最后）。"""
+    out = []
+    if kind == "circuit":
+        groups = idx["circuit_by_ss"]
+        for ss, rows in sorted(groups.items()):
+            name = idx["ss_name"].get(ss) or u"未标注变电所"
+            out.append(_pwr_node("pwr:SS:" + _pwr_safe(ss) + ":circuit", "power_group",
+                                 u"%s（%d 条回路）" % (name, len(rows)), len(rows), True,
+                                 substation_code=ss, include_unmarked=(ss == "")))
+    else:
+        for ss, boxes in sorted(idx["box_by_ss"].items()):
+            name = idx["ss_name"].get(ss) or u"未标注变电所"
+            out.append(_pwr_node("pwr:SS:" + _pwr_safe(ss) + ":box", "power_group",
+                                 u"%s（%d 个配电箱）" % (name, len(boxes)), len(boxes), True,
+                                 substation_code=ss, include_unmarked=(ss == "")))
+    return out
+
+
+def _pwr_ss_detail(ss: str, kind: str, idx: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """变电所节点：无 kind 时列出下辖分类；带 kind 时列出该类明细。"""
+    code = ""
+    for c in idx["ss_name"]:
+        if _pwr_safe(c) == ss:
+            code = c
+            break
+    if code == "" and ss in (u"", u"未标注变电所"):
+        code = ""
+    name = idx["ss_name"].get(code) or u"未标注变电所"
+
+    if not kind:
+        return [
+            _pwr_node("pwr:SS:" + _pwr_safe(code) + ":trafo", "power_group",
+                      u"变压器（%d）" % len(idx["trafo_by_ss"].get(code, [])),
+                      len(idx["trafo_by_ss"].get(code, [])), True, substation_code=code),
+            _pwr_node("pwr:SS:" + _pwr_safe(code) + ":panel", "power_group",
+                      u"低压配电屏（%d 组）" % len(idx["panel_by_ss"].get(code, [])),
+                      len(idx["panel_by_ss"].get(code, [])), True, substation_code=code),
+            _pwr_node("pwr:SS:" + _pwr_safe(code) + ":circuit", "power_group",
+                      u"配电回路（%d）" % len(idx["circuit_by_ss"].get(code, [])),
+                      len(idx["circuit_by_ss"].get(code, [])), True, substation_code=code),
+            _pwr_node("pwr:SS:" + _pwr_safe(code) + ":box", "power_group",
+                      u"配电箱（%d）" % len(idx["box_by_ss"].get(code, [])),
+                      len(idx["box_by_ss"].get(code, [])), True, substation_code=code),
+        ]
+
+    if kind == "trafo":
+        return [_pwr_node("pwr:T:" + _pwr_safe(_pwr_s(t.get("trafo_code"))), "power_trafo",
+                          u"%s · %s kVA" % (_pwr_s(t.get("trafo_code")) or u"（未编号）",
+                                            t.get("capacity_kva") or u"?"),
+                          0, False, upstream=name, substation_code=code,
+                          note=_pwr_s(t.get("note")))
+                for t in idx["trafo_by_ss"].get(code, [])]
+
+    if kind == "panel":
+        return [_pwr_node("pwr:PA:" + _pwr_safe(code) + ":" + _pwr_safe(_pwr_s(p.get("panel_group"))),
+                          "power_panel",
+                          u"%s（%s 面）" % (_pwr_s(p.get("panel_group")) or u"（未命名）",
+                                            p.get("panel_count") or 0),
+                          0, False, upstream=name, substation_code=code,
+                          panel_from=_pwr_s(p.get("panel_from")), panel_to=_pwr_s(p.get("panel_to")))
+                for p in idx["panel_by_ss"].get(code, [])]
+
+    if kind == "circuit":
+        rows = idx["circuit_by_ss"].get(code, [])
+        out = []
+        for c in rows:
+            cc = _pwr_s(c.get("circuit_code")) or u"（未编号）"
+            downs = idx["box_by_circuit"].get(cc, [])
+            out.append(_pwr_node("pwr:C:" + _pwr_safe(cc), "power_circuit",
+                                 u"%s%s" % (cc, u"　⇢ %d 个下游箱" % len(downs) if downs else u""),
+                                 0, bool(downs), upstream=name, substation_code=code,
+                                 role=_pwr_s(c.get("role")), cable=_pwr_s(c.get("cable_section")),
+                                 in_ledger=_pwr_s(c.get("in_ledger")),
+                                 cabinets=_pwr_s(c.get("ledger_cabinets"))[:120],
+                                 verify=_pwr_s(c.get("verify_result")),
+                                 downstream=list(downs)[:30], n_downstream=len(downs)))
+        return out[: _PWR_DETAIL_CAP]
+
+    if kind == "box":
+        boxes = idx["box_by_ss"].get(code, [])
+        out = []
+        for bc in boxes[: _PWR_DETAIL_CAP]:
+            n_dev = len(idx["dev_by_box"].get(bc, []))
+            label = bc + (u"　⇢ %d 台设备" % n_dev if n_dev else u"")
+            out.append(_pwr_node("pwr:B:" + _pwr_safe(bc), "power_box", label,
+                                 n_dev or 0, n_dev > 0, upstream=name, substation_code=code,
+                                 upstream_circuits="、".join(idx["box_up"].get(bc, []))[:80],
+                                 floor=idx["floor_of_box"].get(bc, ""),
+                                 in_riser=(bc in idx["riser_boxes"])))
+        return out
+    return []
+
+
+def _pwr_circuit_detail(circuit_code: str, idx: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """回路节点展开：下游配电箱。"""
+    cc = circuit_code
+    for k in idx["circuit_by_code"]:
+        if _pwr_safe(k) == circuit_code:
+            cc = k
+            break
+    out = []
+    for bc in idx["box_by_circuit"].get(cc, []):
+        n_dev = len(idx["dev_by_box"].get(bc, []))
+        ss = idx["box_ss"].get(bc, "")
+        out.append(_pwr_node("pwr:B:" + _pwr_safe(bc), "power_box",
+                             bc + (u"　⇢ %d 台设备" % n_dev if n_dev else u""),
+                             n_dev or 0, n_dev > 0,
+                             upstream=u"回路 %s" % cc, substation_code=ss,
+                             upstream_circuits=cc,
+                             floor=idx["floor_of_box"].get(bc, ""),
+                             in_riser=(bc in idx["riser_boxes"])))
+    return out
+
+
+def _pwr_box_detail(box_code: str, idx: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """配电箱节点展开：下游楼层配电设备。"""
+    bc = box_code
+    for k in idx["dev_by_box"]:
+        if k and _pwr_safe(k) == box_code:
+            bc = k
+            break
+    rows = idx["dev_by_box"].get(bc, [])
+    out = []
+    for i, d in enumerate(rows[:_PWR_DETAIL_CAP]):
+        dt = _pwr_s(d.get("device_type")) or u"配电设备"
+        room = _pwr_s(d.get("nearby_room"))
+        out.append(_pwr_node("pwr:D:%s:%d" % (_pwr_safe(bc), i), "power_item",
+                             u"%s%s" % (dt, u"（%s）" % room if room else u""), 0, False,
+                             floor=_pwr_s(d.get("floor")), building=_pwr_s(d.get("building")),
+                             box_code=bc, upstream=u"配电箱 %s" % bc,
+                             device_code=_pwr_s(d.get("device_code")),
+                             in_ledger=_pwr_s(d.get("in_ledger"))))
+    return out
+
+
+def _pwr_floor_detail(floor: str, idx: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """楼层节点展开：该层按配电箱分组（无编码的单独归一组）。"""
+    by_box: Dict[str, int] = {}
+    for d in idx["dev_by_box"].values():
+        for one in d:
+            if (_pwr_s(one.get("floor")) or u"未标注楼层") != floor:
+                continue
+            bc = _pwr_s(one.get("box_code"))
+            key = bc if _pwr_is_box(bc) else u"（未标注配电箱）"
+            by_box[key] = by_box.get(key, 0) + 1
+    return [
+        _pwr_node("pwr:B:" + _pwr_safe(bc) if bc != u"（未标注配电箱）" else "pwr:NB:" + _pwr_safe(floor),
+                  "power_box", u"%s（%d 台）" % (bc, cnt), cnt, True,
+                  floor=floor, box_code=bc, upstream=floor)
+        for bc, cnt in sorted(by_box.items(), key=lambda x: -x[1])
+    ][: _PWR_DETAIL_CAP]
+
+
+def _pwr_table_nodes(db: Session, subsystem_code: str) -> List[Dict[str, Any]]:
+    sub = db.query(Subsystem).filter(Subsystem.code == subsystem_code).first()
+    if sub is None:
+        return []
+    n = db.query(DataTable).filter(DataTable.subsystem_id == sub.id).count()
+    if not n:
+        return []
+    return [_pwr_node("tabroot:" + subsystem_code, "table_group",
+                      u"资料表（%d）" % n, n, True, subsystem_code=subsystem_code)]
+
+
+def _tree_table_root(subsystem_code: str, db: Session) -> List[Dict[str, Any]]:
+    sub = db.query(Subsystem).filter(Subsystem.code == subsystem_code).first()
+    if sub is None:
+        return []
+    out = []
+    for t in db.query(DataTable).filter(DataTable.subsystem_id == sub.id)             .order_by(DataTable.id).all():
+        cnt = db.query(Record).filter(Record.table_id == t.id).count()
+        out.append(_pwr_node("tab:%d" % t.id, "table", t.name or t.code, cnt, True,
+                             table_id=t.id, table_code=t.code, subsystem_code=subsystem_code))
+    return out
+
+
+def _tree_table_records(tid: int, db: Session) -> List[Dict[str, Any]]:
+    t = db.query(DataTable).filter(DataTable.id == tid).first()
+    if t is None:
+        return []
+    rows = db.query(Record).filter(Record.table_id == tid).order_by(Record.id).all()
+    out = []
+    for r in rows[:_PWR_DETAIL_CAP]:
+        code = _pwr_s(r.device_code) or u"（无编号）"
+        data = r.data or {}
+        hint = u" · ".join(
+            u"%s" % _pwr_s(v) for v in list(data.values())[:2] if _pwr_s(v)
+        )[:60]
+        out.append(_pwr_node("rec:%d:%d" % (tid, r.id), "record",
+                             u"%s%s" % (code, u" — " + hint if hint else u""), 0, False,
+                             record_id=r.id, table_id=tid, device_code=code))
+    return out
+
+
+def _pwr_append_entries(nodes: List[Dict[str, Any]], code: str, db: Session) -> None:
+    """给「电力系统」「电气配电（图纸提取）」节点挂上供电分层入口与资料表列表。"""
+    if code not in ("power", "elec_dwg"):
+        return
+    if _pwr_index(db) is not None:
+        nodes.append(_pwr_root_node())
+    nodes.extend(_pwr_table_nodes(db, code))
+
+
 @router.get("/trees/subsystem")
 def tree_subsystem(
     subsystem_code: Optional[str] = None,
@@ -2193,7 +2728,21 @@ def tree_subsystem(
                     "meta": {"category_code": None, "subsystem_code": code,
                              "record_count": _rec_sum(maps, uncat)},
                 })
+        _pwr_append_entries(nodes, code, db)
         return nodes
+
+    if parent.startswith("pwr:"):
+        return _tree_power_layers(parent[4:], db)
+
+    if parent.startswith("tabroot:"):
+        return _tree_table_root(parent[8:], db)
+
+    if parent.startswith("tab:"):
+        try:
+            _tid = int(parent[4:])
+        except ValueError:
+            return []
+        return _tree_table_records(_tid, db)
 
     if parent.startswith("cat:"):
         catkey = parent[4:]
