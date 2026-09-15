@@ -786,7 +786,9 @@ def link_overview(db: Session = Depends(get_db), _: User = Depends(_get_current_
       unresolved_top  未解析关联键 TOP（在 records 出现、但既非设备也非机房编号）
     """
     subs = db.query(Subsystem).order_by(Subsystem.sort_order, Subsystem.id).all()
-    tables = db.query(DataTable).order_by(DataTable.sort_order, DataTable.id).all()
+    # 只统计启用中的表 —— 合表后旧表 is_active=False，不得进入任何计数（表数/记录数/覆盖率）
+    tables = db.query(DataTable).filter(DataTable.is_active == True) \
+        .order_by(DataTable.sort_order, DataTable.id).all()
 
     field_cnt = dict(
         db.query(FieldDef.table_id, func.count(FieldDef.id)).group_by(FieldDef.table_id).all()
@@ -800,7 +802,13 @@ def link_overview(db: Session = Depends(get_db), _: User = Depends(_get_current_
     dev_codes, room_codes = _resolvable_codesets(db)
 
     # 一次取回 (table_id, device_code)，Python 内聚合（避免 JOIN 扇出）
-    pairs: List[Tuple[int, Any]] = db.query(Record.table_id, Record.device_code).all()
+    # 同样只取启用表的记录，避免停用表残留记录污染总量/覆盖率
+    _active_tids = {t.id for t in tables}
+    pairs: List[Tuple[int, Any]] = [
+        (tid, code)
+        for tid, code in db.query(Record.table_id, Record.device_code).all()
+        if tid in _active_tids
+    ]
 
     per_table: Dict[int, Dict[str, Any]] = {}
     unresolved: Dict[str, Dict[str, Any]] = {}
@@ -905,7 +913,11 @@ def link_overview(db: Session = Depends(get_db), _: User = Depends(_get_current_
             "devices": int(db.query(func.count(Device.id)).scalar() or 0),
             "rooms": int(db.query(func.count(Room.id)).scalar() or 0),
             "tables": len(tables),
-            "fields": int(db.query(func.count(FieldDef.id)).scalar() or 0),
+            "fields": int(
+                db.query(func.count(FieldDef.id))
+                .filter(FieldDef.table_id.in_(_active_tids))
+                .scalar() or 0
+            ) if _active_tids else 0,
             "records": records_total,
             "relations": src_counts["total"],
             "relations_auto": src_counts["auto"],

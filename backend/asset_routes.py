@@ -305,7 +305,24 @@ def _da_to_dict(da: "DeviceArchive") -> Dict[str, Any]:
 
 @router.get("/subsystems", response_model=List[SubsystemResponse])
 def list_subsystems(db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
-    return db.query(Subsystem).order_by(Subsystem.sort_order, Subsystem.id).all()
+    """子系统列表。附带「启用中的」资料表数与记录数。
+
+    停用表（合表后的旧表）不计入 —— 与 /tables、/trees/subsystem、/link/overview 同口径。
+    """
+    rows = db.query(Subsystem).order_by(Subsystem.sort_order, Subsystem.id).all()
+    out = []
+    for s in rows:
+        d = SubsystemResponse.model_validate(s)
+        d.table_count = db.query(DataTable).filter(
+            DataTable.subsystem_id == s.id, DataTable.is_active == True  # noqa: E712
+        ).count()
+        d.records = db.query(Record).join(
+            DataTable, DataTable.id == Record.table_id
+        ).filter(
+            DataTable.subsystem_id == s.id, DataTable.is_active == True  # noqa: E712
+        ).count()
+        out.append(d)
+    return out
 
 @router.post("/subsystems", response_model=SubsystemResponse)
 def create_subsystem(data: SubsystemCreate, db: Session = Depends(get_db), _: User = Depends(_require_admin)):
@@ -2199,7 +2216,7 @@ def _pwr_index(db: Session) -> Optional[Dict[str, Any]]:
     tid_map: Dict[str, int] = {}
     # 显式按 id 升序：万一同一子系统下出现同 code 的表（本地测试库曾出现），
     # 取 id 最大的那张，避免因查询顺序不同而静默取到旧表。
-    for t in db.query(DataTable).filter(DataTable.subsystem_id == sub.id) \
+    for t in db.query(DataTable).filter(DataTable.subsystem_id == sub.id, DataTable.is_active == True) \
             .order_by(DataTable.id).all():
         tid_map[t.code] = t.id
 
@@ -2647,7 +2664,7 @@ def _pwr_table_nodes(db: Session, subsystem_code: str) -> List[Dict[str, Any]]:
     sub = db.query(Subsystem).filter(Subsystem.code == subsystem_code).first()
     if sub is None:
         return []
-    n = db.query(DataTable).filter(DataTable.subsystem_id == sub.id).count()
+    n = db.query(DataTable).filter(DataTable.subsystem_id == sub.id, DataTable.is_active == True).count()
     if not n:
         return []
     return [_pwr_node("tabroot:" + subsystem_code, "table_group",
@@ -2659,7 +2676,7 @@ def _tree_table_root(subsystem_code: str, db: Session) -> List[Dict[str, Any]]:
     if sub is None:
         return []
     out = []
-    for t in db.query(DataTable).filter(DataTable.subsystem_id == sub.id)             .order_by(DataTable.id).all():
+    for t in db.query(DataTable).filter(DataTable.subsystem_id == sub.id, DataTable.is_active == True)             .order_by(DataTable.id).all():
         cnt = db.query(Record).filter(Record.table_id == t.id).count()
         out.append(_pwr_node("tab:%d" % t.id, "table", t.name or t.code, cnt, True,
                              table_id=t.id, table_code=t.code, subsystem_code=subsystem_code))

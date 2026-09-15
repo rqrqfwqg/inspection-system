@@ -105,8 +105,22 @@ function SubTreeNode({
           {node.label}
         </span>
         {node.count != null && (
-          <Badge variant="outline" className="text-xs">
+          <Badge
+            variant="outline"
+            className="text-xs tabular-nums"
+            title={isSubsystem ? '本系统登记设备数' : undefined}
+          >
             {node.count}
+          </Badge>
+        )}
+        {/* 子系统节点补资料表口径：停用表（合表后的旧表）不计入，故合表后此处表数会明显下降 */}
+        {isSubsystem && node.meta?.table_count != null && (
+          <Badge
+            variant="secondary"
+            className="text-xs tabular-nums font-normal"
+            title={`启用中的资料表 ${node.meta.table_count} 张 / 记录 ${node.meta.record_count ?? 0} 条。合表后旧表已停用，不计入。`}
+          >
+            {node.meta.table_count} 张表 · {(node.meta.record_count ?? 0).toLocaleString('zh-CN')} 条
           </Badge>
         )}
         {isSubsystem && node.meta?.subsystem_code && (

@@ -25,6 +25,9 @@ class SubsystemUpdate(BaseModel):
 class SubsystemResponse(SubsystemBase):
     id: int
     created_at: Any
+    # 启用中的资料表数 / 记录数（停用表不计入；由 list_subsystems 填充）
+    table_count: int = 0
+    records: int = 0
     model_config = ConfigDict(from_attributes=True)
 
 
