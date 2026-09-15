@@ -409,6 +409,10 @@ class DeviceSerialObservation(Base):
        `brand_model` 抽取值中 -> `conflict_state='conflicts_other_device'`，该行以
        `status='quarantined'` 落库，**不并入匹配索引**（内核 `_load_active_observations`
        只取 `status='active'`，故隔离行天然不进索引），进人工待办。
+    4b) **来源闸**：即便 `status='active'`，也必须 `source` 落在
+       `asset_code_match.TRUSTED_OBSERVATION_SOURCES`（miniprogram / web）白名单内才进索引。
+       理由：本表可被绕过 API 的批量脚本直写；2026-09-14 曾有 2694 条 `source='ledger_text'`
+       的台账镜像行以 96 分压过台账抽取 92 分。非现场来源的数据**只作审计留痕**，不参与匹配。
     5) **可逆**：`DELETE` 不物理删除，置 `status='rejected'`（同时从匹配索引移除）。
     6) `serial_norm = normalize_code(serial_raw)['loose']`，是匹配索引 `brand_serial`
        空间的键，命中即 `match_type='observation_exact'`（可信度 96，高于台账抽取 92）。

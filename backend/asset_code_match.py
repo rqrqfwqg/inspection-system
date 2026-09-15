@@ -193,6 +193,18 @@ DEMOTED_CAP = 88
 #:      设备编号自指**优先于**共用值歧义（见 `resolve_code` 内 R3' 判定）。
 SHARED_VALUE_FIELDS: Tuple[str, ...] = ("asset_code", "serial_no", "brand_model")
 
+#: 可信的观测来源白名单 —— **只有现场提交的观测才进匹配索引**。
+#: 为何必须白名单：`device_serial_observations` 是「现场观测层」，其命中记
+#: `observation_exact` = 96 分，**高于**台账抽取 `brand_extract_exact` = 92 分
+#: （设计本意：现场看到铭牌比台账文字更权威）。但该表可被**绕过 API 的批量脚本直写**：
+#: 2026-09-14 一次性审计脚本把 2694 条台账自身抽取值以 `source='ledger_text'` /
+#: `operator='audit_consolidation'` 灌入（其中 **2183 条与当前台账抽取不一致**），
+#: 这些行并非现场观测 —— 一旦并入索引，就会凭空产生大批高置信度、与甲方台账冲突的编号。
+#: 故此处取**白名单语义**：仅经 `POST /asset-ledger/observations` 落库的来源算现场观测。
+#: 该接口写库时把空值兜底为 `'miniprogram'`（`source=(payload.source or "miniprogram")`），
+#: **绝不写空串/None**；小程序端也不传 `source`（走后端默认值）→ 白名单不会误杀真实数据。
+TRUSTED_OBSERVATION_SOURCES: Tuple[str, ...] = ("miniprogram", "web")
+
 #: 无命中时的补录提示（§3.2）
 _NO_HIT_HINT: Dict[str, Any] = {
     "can_observe": True,
@@ -203,14 +215,28 @@ _NO_HIT_HINT: Dict[str, Any] = {
 # ========================= §2.2 索引构建 =========================
 
 def _load_active_observations(db: Session) -> List[Dict[str, Any]]:
-    """读取现场补录观测（批次③ 的表）；**表不存在则返回空**，保证批次②独立部署。
+    """读取**现场补录**观测（批次③ 的表）；**表不存在则返回空**，保证批次②独立部署。
 
     `device_serial_observations.serial_norm` 存的即现场观测到的**机身编号**（loose 形态）。
+
+    两道闸，缺一不可：
+    1) `status = 'active'` —— 撤销(rejected) / 被更正(superseded) / 跨设备隔离(quarantined)
+      一律不进索引（隔离行本就不在 active 集合，见 `DeviceSerialObservation` docstring 第 4 点）。
+    2) **`source` 必须落在 `TRUSTED_OBSERVATION_SOURCES` 白名单内** —— 绕过 API 直写库的
+       台账镜像 / 审计批量行（如 `source='ledger_text'`）**不算现场观测**，不得进索引；
+       理由见该常量注释（观测 96 分高于台账 92 分，放进来等于让非现场来源压过甲方台账）。
+       白名单取 `LOWER(COALESCE(source,''))`：大小写不敏感，且 NULL 一律视为不可信。
     """
+    names = ["s%d" % i for i in range(len(TRUSTED_OBSERVATION_SOURCES))]
+    placeholders = ", ".join(":%s" % n for n in names)
+    params = dict(zip(names, TRUSTED_OBSERVATION_SOURCES))
     try:
-        rows = db.execute(sa_text(
-            "SELECT device_code, serial_raw, serial_norm"
-            " FROM device_serial_observations WHERE status = 'active'")).all()
+        rows = db.execute(
+            sa_text("SELECT device_code, serial_raw, serial_norm"
+                    " FROM device_serial_observations"
+                    " WHERE status = 'active'"
+                    "   AND LOWER(COALESCE(source, '')) IN (%s)" % placeholders),
+            params).all()
     except Exception:
         return []  # 表不存在（批次②）或其它只读异常 → 跳过，不阻断
     return [dict(r._mapping) for r in rows]
@@ -290,6 +316,7 @@ def build_match_index(db: Session, rows: List[Dict[str, Any]]) -> Dict[str, Any]
         pass
 
     # 机身编号空间：现场补录观测（批次③ 表；缺表则空）
+    # ⚠️ 只并 active **且** 来源可信（source 白名单）的行 —— 见 _load_active_observations。
     for o in _load_active_observations(db):
         norm = normalize_code(o.get("serial_norm"))
         key = norm["loose"] or (o.get("serial_norm") or "")

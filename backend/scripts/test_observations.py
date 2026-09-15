@@ -462,6 +462,51 @@ def main():
               and nr[0].get("source") == "miniprogram",
               f"= {nr[0] if nr else None}")
 
+        # ---------------- ⑩ source 白名单：非现场来源不得进匹配索引 ----------------
+        print("=" * 78)
+        print("⑩ source 白名单：直写库的台账镜像行不参与匹配（回归 09-14 批量灌库）")
+        with database.engine.begin() as conn:
+            for raw, normv, src in (("SRC-TRUST-1", "srctrust1", "miniprogram"),
+                                    ("SRC-UNTRUST-1", "srcuntrust1", "ledger_text"),
+                                    ("SRC-NULLSRC-1", "srcnullsrc1", None)):
+                conn.execute(sa_text(
+                    "INSERT INTO device_serial_observations"
+                    " (device_code, serial_raw, serial_norm, status, operator, source,"
+                    "  client, conflict_state, ledger_brand_serial, note)"
+                    " VALUES (:c, :raw, :n, 'active', 'tester', :src,"
+                    "  'miniprogram', 'none', '', '')"),
+                    {"c": D, "raw": raw, "n": normv, "src": src})
+        alr._invalidate_caches()   # 直写库不经 API → 手动失效 60s 缓存
+
+        st, d = _resolve(c, "SRC-TRUST-1")
+        check("⑩ source=miniprogram：进索引并命中 observation_exact",
+              st == 200 and _has(d, D, "observation_exact"), f"kind={d.get('kind')}")
+
+        st, d = _resolve(c, "SRC-UNTRUST-1")
+        check("⑩ source=ledger_text：**不进**匹配索引（不得命中 observation_exact）",
+              st == 200 and not _has(d, mtype="observation_exact") and d.get("kind") == "none",
+              f"kind={d.get('kind')} count={d.get('count')}")
+
+        st, d = _resolve(c, "SRC-NULLSRC-1")
+        check("⑩ source 为 NULL：**不进**匹配索引（白名单从严）",
+              st == 200 and not _has(d, mtype="observation_exact") and d.get("kind") == "none",
+              f"kind={d.get('kind')} count={d.get('count')}")
+
+        # 审计可见性不受影响：列表接口仍返回全部 active 行（含不可信来源）
+        r = c.get(OBS, params={"device_code": D})
+        norms = {x.get("serial_norm") for x in (r.json() if r.status_code == 200 else [])}
+        check("⑩ 列表接口仍可见不可信来源（审计不隐藏，只是不参与匹配）",
+              r.status_code == 200
+              and {"srctrust1", "srcuntrust1", "srcnullsrc1"} <= norms,
+              f"n={len(norms)}")
+
+        # 清理本段插入的行，保持运行库干净
+        with database.engine.begin() as conn:
+            conn.execute(sa_text(
+                "DELETE FROM device_serial_observations"
+                " WHERE serial_norm IN ('srctrust1','srcuntrust1','srcnullsrc1')"))
+        alr._invalidate_caches()
+
     print("=" * 78)
     print(f"===== 结果: PASS={passed}  FAIL={failed} =====")
     sys.exit(1 if failed else 0)
