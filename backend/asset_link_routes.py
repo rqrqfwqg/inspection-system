@@ -1080,8 +1080,12 @@ def _codeish_keys(fields) -> List[Tuple[str, str]]:
 def _cr_match(col_expr: str) -> str:
     """col_expr（标量或 JSON 数组）与 :vals 数组存在等值成员的 SQLite 表达式。"""
     return (
+        # 服务器 SQLite 无 json_typeof（3.45.1 Ubuntu 构建缺失，2026-09-15 实测）：
+        # 数组判定改用 json_valid + 首字符是否 '['；json_valid 兜底防
+        # 「以 [ 开头的普通文本」被 json_each 解析报 malformed JSON。
         "EXISTS (SELECT 1 FROM json_each(:vals) je, "
-        "json_each(CASE WHEN json_typeof({c})='array' THEN {c} "
+        "json_each(CASE WHEN json_valid({c}) = 1 "
+        "AND substr(CAST({c} AS TEXT), 1, 1) = '[' THEN {c} "
         "ELSE json_array({c}) END) de "
         "WHERE CAST(de.value AS TEXT) = CAST(je.value AS TEXT))"
     ).format(c=col_expr)
