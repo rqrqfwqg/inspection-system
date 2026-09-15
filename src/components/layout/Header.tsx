@@ -23,7 +23,7 @@ export default function Header({ onMenuClick }: HeaderProps) {
   const avatarSrc = user?.avatar || null
 
   return (
-    <header className="sticky top-0 z-30 h-16 bg-white border-b border-gray-200 px-4 lg:px-6">
+    <header className="sticky top-0 z-30 h-16 flex-shrink-0 bg-white border-b border-gray-200 px-4 lg:px-6">
       <div className="flex items-center justify-between h-full">
         {/* 左侧：移动端菜单按钮 */}
         <div className="flex items-center">
