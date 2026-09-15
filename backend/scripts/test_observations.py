@@ -439,6 +439,29 @@ def main():
               and all(x.get("status") == "rejected" for x in body),
               f"n={len(body)}")
 
+        # ---------------- ⑨ 历史 NULL 行的兼容（回归 2026-09-15 线上 500） ----------------
+        print("=" * 78)
+        print("⑨ 兼容历史行：字符串列 NULL 时 GET 归一为默认值（回归线上 500）")
+        with database.engine.begin() as conn:
+            conn.execute(sa_text(
+                "INSERT INTO device_serial_observations"
+                " (device_code, serial_raw, serial_norm, status, operator, source,"
+                "  client, conflict_state, ledger_brand_serial, note)"
+                " VALUES (:c, 'NULLROW-1', 'nullrow1', 'active', NULL, NULL,"
+                "  NULL, NULL, NULL, NULL)"), {"c": D})
+        r = c.get(OBS, params={"device_code": D})
+        check("⑨ 含 NULL 字符串列的行：GET 不再 500", r.status_code == 200,
+              f"status={r.status_code}")
+        rows = r.json() if r.status_code == 200 else []
+        nr = [x for x in rows if x.get("serial_norm") == "nullrow1"]
+        check("⑨ NULL 归一为字符串默认值（client/status/conflict_state/note）",
+              bool(nr) and nr[0].get("client") == "miniprogram"
+              and nr[0].get("status") == "active"
+              and nr[0].get("conflict_state") == "none"
+              and nr[0].get("note") == "" and nr[0].get("operator") == ""
+              and nr[0].get("source") == "miniprogram",
+              f"= {nr[0] if nr else None}")
+
     print("=" * 78)
     print(f"===== 结果: PASS={passed}  FAIL={failed} =====")
     sys.exit(1 if failed else 0)

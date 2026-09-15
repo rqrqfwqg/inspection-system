@@ -1,5 +1,5 @@
 """分系统资料管理 · Pydantic Schemas"""
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from typing import Optional, List, Any, Dict
 
 
@@ -325,7 +325,36 @@ class ObservationCreateResponse(BaseModel):
     conflict: Optional[ObservationConflict] = None
 
 
-class ObservationResponse(BaseModel):
+class _NullTolerantModel(BaseModel):
+    """响应模型基类：把 ORM 行里为 NULL 的字符串列归一为字段默认值。
+
+    为什么需要：本模块这些表用 `Column(String, default=...)` 定义字符串列，而
+    **`default=` 只作用于 INSERT，不代表 NOT NULL** —— 历史行或批量脚本写入会留下 NULL。
+    pydantic v2 的 `from_attributes` 只在属性「缺失」时套默认值，属性为 `None` 时直接判
+    类型错误，于是 `model_validate(row)` 抛 ValidationError，整条 GET 变成 500
+    （2026-09-15 线上实测：2694 行 NULL 批量行把 `/observations` 打成 500）。
+
+    这里在 before 阶段只对「默认值是字符串」的字段做 None → 默认值，其余原样透传；
+    响应契约因此恒为字符串，且完全不碰写库路径。
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_null_with_default(cls, data):
+        if data is None or isinstance(data, dict):
+            return data
+        out = {}
+        for name, field in cls.model_fields.items():
+            value = getattr(data, name, None)
+            if value is None and isinstance(field.default, str):
+                out[name] = field.default
+            else:
+                out[name] = value
+        return out
+
+
+class ObservationResponse(_NullTolerantModel):
     """补录观测行（审计字段全量回显）。"""
     id: int
     device_code: str
@@ -378,7 +407,7 @@ class GeoObservationCreateResponse(BaseModel):
     created: bool = True                      # 恒 True：本表不做幂等合并（每次扫码一条）
 
 
-class GeoObservationResponse(BaseModel):
+class GeoObservationResponse(_NullTolerantModel):
     """定位观测行（审计字段全量回显）。"""
     id: int
     device_code: str
