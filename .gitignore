@@ -64,3 +64,17 @@ backend/test_frontend_api.html
 # DB 备份与本地一次性 QA 脚本（不进版本库）
 backend/app.db.bak.*
 backend/_test_import_engine.py
+
+# ---------------------------------------------------------------------------
+# 本地一次性脚本 / 编辑备份 / QA 输出（不进版本库）
+# 规则限定到具体目录：`_*.py` 若全局写会连带忽略 __init__.py，务必带路径前缀。
+# ---------------------------------------------------------------------------
+backend/_*.py
+backend/scripts/_*.py
+backend/scripts/out_*.txt
+backend/scripts/out_*.json
+scripts/_*.py
+*.bak
+*.bak_*
+backend/app.db*
+backend/*.err
