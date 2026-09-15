@@ -56,9 +56,17 @@ export function SearchPage({ onOpenDevice }: SearchPageProps) {
     }
   }
 
-  const currentCode = result?.device?.device_code
-    ? String(result.device.device_code)
+  const currentCode = result?.target?.device_code
+    ? String(result.target.device_code)
     : code.trim()
+
+  // 后端 SearchResult 的关联边字段为 edges（{from,to,type}）；此处统一成 RelationEdge 形状供渲染
+  const relEdges: RelationEdge[] = (result?.edges || []).map((e) => ({
+    id: 0,
+    from_code: String(e.from ?? ''),
+    to_code: String(e.to ?? ''),
+    relation_type: e.type ?? '关联',
+  }))
 
   return (
     <div className="space-y-4">
@@ -108,7 +116,7 @@ export function SearchPage({ onOpenDevice }: SearchPageProps) {
               </Button>
             </CardHeader>
             <CardContent>
-              <FieldList data={result.device ?? null} emptyText="未检索到设备基础信息" />
+              <FieldList data={(result.target ?? null) as unknown as Record<string, unknown>} emptyText="未检索到设备基础信息" />
             </CardContent>
           </Card>
 
@@ -211,16 +219,15 @@ export function SearchPage({ onOpenDevice }: SearchPageProps) {
           <Card>
             <CardHeader className="py-3">
               <CardTitle className="text-base flex items-center gap-2">
-                <Link2 className="w-4 h-4" />关联设备（{result.relations?.length ?? 0}）
+                <Link2 className="w-4 h-4" />关联设备（{relEdges.length}）
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {!result.relations || result.relations.length === 0 ? (
+              {relEdges.length === 0 ? (
                 <p className="text-sm text-gray-500">无</p>
               ) : (
                 <ul className="space-y-1 text-sm">
-                  {result.relations.map((e, i) => {
-                    const edge = e as unknown as RelationEdge
+                  {relEdges.map((edge, i) => {
                     const other =
                       edge.from_code === currentCode ? edge.to_code : edge.from_code
                     return (

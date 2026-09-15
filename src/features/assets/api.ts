@@ -17,9 +17,99 @@ import type {
   BaSystemNode,
   ImportResult,
   ImportTemplate,
+  LinkOverview,
+  LinkTableDetail,
+  AutoRulesResponse,
+  AutoAssociatePreview,
+  AutoAssociateResult,
+  ManualQueueResponse,
+  ManualAssociateResult,
+  DeviceLinkResponse,
 } from './types'
 
 const BASE = '/assets'
+
+/**
+ * GET /link/overview —— 全局联动画像（资料表 ↔ 设备 ↔ 关联）。
+ *
+ * 这是把「资产可视化」与「数据表管理」打通的那根轴：一次请求返回全局总量、
+ * 子系统维度、每张资料表的关联覆盖率、关系类型分布、未解析关联键 TOP。
+ */
+export async function getLinkOverview(): Promise<LinkOverview> {
+  return api.get<LinkOverview>(`${BASE}/link/overview`)
+}
+
+/** GET /link/table/{tid} —— 单张资料表的画像（覆盖率 + 每个字段的真实填充率 + 未解析 TOP）。 */
+export async function getLinkTable(tableId: number): Promise<LinkTableDetail> {
+  return api.get<LinkTableDetail>(`${BASE}/link/table/${tableId}`)
+}
+
+/** GET /link/auto-rules —— 自动关联规则清单与候选规模（预览，不写库）。 */
+export async function getAutoRules(): Promise<AutoRulesResponse> {
+  return api.get<AutoRulesResponse>(`${BASE}/link/auto-rules`)
+}
+
+/** POST /link/auto-associate —— 执行自动关联（dryRun=true 仅预览；ruleIds 可只跑指定规则）。 */
+export async function runAutoAssociate(opts: {
+  ruleIds?: string[]
+  dryRun?: boolean
+  limit?: number
+} = {}): Promise<AutoAssociatePreview | AutoAssociateResult> {
+  return api.post<AutoAssociatePreview | AutoAssociateResult>(`${BASE}/link/auto-associate`, {
+    rule_ids: opts.ruleIds,
+    dry_run: !!opts.dryRun,
+    limit: opts.limit,
+  })
+}
+
+/** DELETE /link/auto-associate —— 回滚自动关联（只删 source=auto，绝不误删人工关联）。 */
+export async function rollbackAutoAssociate(opts: { batch?: string; rule?: string } = {}): Promise<{
+  deleted: number
+  batch: string | null
+  rule: string | null
+}> {
+  const q = new URLSearchParams()
+  if (opts.batch) q.set('batch', opts.batch)
+  if (opts.rule) q.set('rule', opts.rule)
+  const s = q.toString()
+  return api.delete<{ deleted: number; batch: string | null; rule: string | null }>(
+    `${BASE}/link/auto-associate${s ? '?' + s : ''}`
+  )
+}
+
+/**
+ * GET /link/manual-queue —— 无法自动关联的编号队列（含候选建议）。
+ * 这是「小程序现场人工关联」的数据源：桌面看到队列，现场扫码兜底。
+ */
+export async function getManualQueue(opts: { limit?: number; tableId?: number } = {}): Promise<ManualQueueResponse> {
+  const q = new URLSearchParams()
+  if (opts.limit) q.set('limit', String(opts.limit))
+  if (opts.tableId) q.set('only_table', String(opts.tableId))
+  const s = q.toString()
+  return api.get<ManualQueueResponse>(`${BASE}/link/manual-queue${s ? '?' + s : ''}`)
+}
+
+/** POST /link/manual-associate —— 人工建边（端点放宽：设备 / 机房 / 资料域编号均可）。 */
+export async function manualAssociate(body: {
+  fromCode: string
+  toCode: string
+  relationType: string
+  operator?: string
+  note?: string
+}): Promise<ManualAssociateResult> {
+  return api.post<ManualAssociateResult>(`${BASE}/link/manual-associate`, {
+    from_code: body.fromCode,
+    to_code: body.toCode,
+    relation_type: body.relationType,
+    operator: body.operator,
+    note: body.note,
+  })
+}
+
+/** GET /link/device/{code} —— 单设备（或机房）的联动总览：资料记录 + 关联边（自动/人工）+ 分组。 */
+export async function getDeviceLink(code: string): Promise<DeviceLinkResponse> {
+  return api.get<DeviceLinkResponse>(`${BASE}/link/device/${encodeURIComponent(code)}`)
+}
 
 /** GET /subsystems —— 7 个子系统（power/fire/weak/lighting/water/hvac/other） */
 export async function getSubsystems(): Promise<Subsystem[]> {

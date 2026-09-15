@@ -1787,6 +1787,56 @@ def _room_label(room: Room) -> str:
     return f"{nm}（{room.code}）" if nm else room.code
 
 
+# =====================================================================
+# 资料记录数辅助（2026-09-15）：让「子系统树 / 区域树」直接反映数据表管理的数据
+# =====================================================================
+_REC_CNT_CACHE: Dict[str, Any] = {"ts": 0.0, "by_code": {}, "by_sub": {}}
+_REC_CNT_TTL = 60  # 秒；records 变更后最迟 1 分钟生效
+
+
+def _record_count_maps(db: Session) -> Dict[str, Any]:
+    """返回 {"by_code": {device_code: 记录数}, "by_sub": {subsystem_id: 记录数}}。
+
+    口径：records.device_code 即资料记录挂在哪个编号上（可能是设备、机房或图纸图元）。
+    一次 GROUP BY 取回（线上约 1.3 万组，毫秒级），进程内缓存 60s ——
+    与 asset_ledger 的 60s 缓存同一节奏，避免树每次展开都全表扫。
+    """
+    now = time.time()
+    c = _REC_CNT_CACHE
+    if now - c["ts"] < _REC_CNT_TTL and c["by_code"]:
+        return c
+    by_code = {
+        code: int(cnt)
+        for code, cnt in db.query(Record.device_code, func.count(Record.id))
+        .filter(Record.device_code.isnot(None))
+        .group_by(Record.device_code)
+        .all()
+        if code
+    }
+    by_sub = dict(
+        db.query(DataTable.subsystem_id, func.count(Record.id))
+        .join(Record, Record.table_id == DataTable.id)
+        .group_by(DataTable.subsystem_id)
+        .all()
+    )
+    sub_tables = dict(
+        db.query(DataTable.subsystem_id, func.count(DataTable.id))
+        .group_by(DataTable.subsystem_id)
+        .all()
+    )
+    c["ts"] = now
+    c["by_code"] = by_code
+    c["by_sub"] = by_sub
+    c["sub_tables"] = sub_tables
+    return c
+
+
+def _rec_sum(maps: Dict[str, Any], codes) -> int:
+    """一组设备编号的资料记录数合计。"""
+    m = maps["by_code"]
+    return sum(m.get(c, 0) for c in codes)
+
+
 @router.get("/trees/area")
 def tree_area(
     building: Optional[str] = None,
@@ -1809,6 +1859,7 @@ def tree_area(
     固定资产 fuzzy 归属不计入房间数，仅以 meta.asset_pending 提示待核实。
     """
     idx = _area_index(db)
+    maps = _record_count_maps(db)
     rooms_dev: Dict[str, set] = idx["rooms"]
     room_rows = db.query(Room).filter(Room.is_active == True).all()
     if area:
@@ -1855,6 +1906,7 @@ def tree_area(
                 "meta": {"device_code": c, "name": m.get("name"),
                          "subsystem_code": m.get("subsystem_code"),
                          "subsystem_name": m.get("subsystem_name"),
+                         "record_count": maps["by_code"].get(c, 0),
                          "room_code": room_code, "status": True},
             })
         return out
@@ -1874,9 +1926,10 @@ def tree_area(
             if kw and not room_matches(r) and not codes:
                 continue
             b = r.building or "未标注楼栋"
-            a = agg.setdefault(b, {"count": 0, "rooms": 0, "floors": set()})
+            a = agg.setdefault(b, {"count": 0, "rooms": 0, "floors": set(), "rec": 0})
             a["count"] += len(codes)
             a["rooms"] += 1
+            a["rec"] += _rec_sum(maps, codes)
             a["floors"].add(r.floor or "未标注楼层")
         for b, a in sorted(agg.items()):
             if only_with_devices and a["count"] == 0:
@@ -1885,6 +1938,7 @@ def tree_area(
                 "key": f"b:{b}", "type": "building", "label": b, "count": a["count"],
                 "has_children": True,
                 "meta": {"building": b, "floor_count": len(a["floors"]), "room_count": a["rooms"],
+                         "record_count": a["rec"],
                          "area": _classify_area(b),
                          "asset_pending": idx["fuzzy"]["by_building"].get(b, 0)},
             })
@@ -1902,16 +1956,18 @@ def tree_area(
             if kw and not room_matches(r) and not codes:
                 continue
             f = r.floor or "未标注楼层"
-            a = agg_f.setdefault(f, {"count": 0, "rooms": 0})
+            a = agg_f.setdefault(f, {"count": 0, "rooms": 0, "rec": 0})
             a["count"] += len(codes)
             a["rooms"] += 1
+            a["rec"] += _rec_sum(maps, codes)
         for f, a in sorted(agg_f.items()):
             if only_with_devices and a["count"] == 0:
                 continue
             nodes.append({
                 "key": f"f:{b}:{f}", "type": "floor", "label": f"{b} {f}", "count": a["count"],
                 "has_children": True,
-                "meta": {"building": b, "floor": f, "room_count": a["rooms"]},
+                "meta": {"building": b, "floor": f, "room_count": a["rooms"],
+                         "record_count": a["rec"]},
             })
         return nodes
 
@@ -1929,6 +1985,7 @@ def tree_area(
                 "has_children": len(codes) > 0,
                 "meta": {"room_code": r.code, "room_name": r.name, "building": r.building,
                          "floor": r.floor, "room_type": r.room_type,
+                         "record_count": _rec_sum(maps, codes),
                          "self_record": idx["self_records"].get(r.code)},
             })
         return out
@@ -1946,9 +2003,10 @@ def tree_area(
             if kw and not room_matches(r) and not codes:
                 continue
             t = (r.room_type or "").strip() or "未标注类型"
-            a = agg_t.setdefault(t, {"count": 0, "rooms": 0})
+            a = agg_t.setdefault(t, {"count": 0, "rooms": 0, "rec": 0})
             a["count"] += len(codes)
             a["rooms"] += 1
+            a["rec"] += _rec_sum(maps, codes)
         # 组间排序：设备多的在前，同数按名称（让最常下钻的类型浮到顶部）
         for t, a in sorted(agg_t.items(), key=lambda kv: (-kv[1]["count"], kv[0])):
             if only_with_devices and a["count"] == 0:
@@ -1956,7 +2014,8 @@ def tree_area(
             nodes.append({
                 "key": f"g:{b}:{f}:{t}", "type": "room_type", "label": t,
                 "count": a["count"], "has_children": True,
-                "meta": {"building": b, "floor": f, "room_type": t, "room_count": a["rooms"]},
+                "meta": {"building": b, "floor": f, "room_type": t, "room_count": a["rooms"],
+                         "record_count": a["rec"]},
             })
         return nodes
 
@@ -2077,6 +2136,8 @@ def tree_subsystem(
     if only_problems:
         for bp in db.query(BaProblem.device_code).filter(BaProblem.device_code.isnot(None)).all():
             problem_devices.add(bp.device_code)
+    maps = _record_count_maps(db)
+    sub_tables = maps.get("sub_tables") or {}
     dev_name = {d.device_code: d.name for d in db.query(Device.device_code, Device.name).all()}
 
     def dev_filter(codes: set) -> set:
@@ -2096,7 +2157,10 @@ def tree_subsystem(
             cnt = db.query(Device).filter(Device.subsystem_id == s.id, Device.is_active == True).count()
             nodes.append({
                 "key": f"sub:{s.code}", "type": "subsystem", "label": s.name, "count": cnt,
-                "has_children": True, "meta": {"subsystem_code": s.code, "icon": s.icon},
+                "has_children": True,
+                "meta": {"subsystem_code": s.code, "icon": s.icon,
+                         "record_count": int(maps["by_sub"].get(s.id, 0)),
+                         "table_count": int(sub_tables.get(s.id, 0))},
             })
         return nodes
 
@@ -2112,7 +2176,9 @@ def tree_subsystem(
                 continue
             nodes.append({
                 "key": f"cat:{c.code}", "type": "category", "label": c.name or c.code, "count": len(codes),
-                "has_children": True, "meta": {"category_code": c.code, "subsystem_code": code},
+                "has_children": True,
+                "meta": {"category_code": c.code, "subsystem_code": code,
+                         "record_count": _rec_sum(maps, codes)},
             })
         # 未分类设备（属于该子系统但无 category）
         sub = db.query(Subsystem).filter(Subsystem.code == code).first()
@@ -2123,7 +2189,9 @@ def tree_subsystem(
             if uncat:
                 nodes.append({
                     "key": f"cat:_uncat_{code}", "type": "category", "label": "未分类", "count": len(uncat),
-                    "has_children": True, "meta": {"category_code": None, "subsystem_code": code},
+                    "has_children": True,
+                    "meta": {"category_code": None, "subsystem_code": code,
+                             "record_count": _rec_sum(maps, uncat)},
                 })
         return nodes
 
@@ -2143,14 +2211,18 @@ def tree_subsystem(
                     d = db.query(Device).filter(Device.device_code == fa.device_code, Device.is_active == True).first()
                     if d:
                         devs.append(d)
+        by_code = maps["by_code"]
         for d in devs:
             if only_problems and d.device_code not in problem_devices:
                 continue
-            if keyword and keyword not in d.device_code and keyword not in d.name:
+            # 注意：d.name 可为 None，直接用 `in` 会 TypeError（历史 bug，2026-09-15 修）
+            if keyword and keyword not in d.device_code and keyword not in (d.name or ""):
                 continue
             nodes.append({
                 "key": f"d:{d.device_code}", "type": "device", "label": d.name, "count": 0,
-                "has_children": False, "meta": {"device_code": d.device_code, "status": d.is_active},
+                "has_children": False,
+                "meta": {"device_code": d.device_code, "status": d.is_active,
+                         "record_count": int(by_code.get(d.device_code, 0))},
             })
         return nodes
 

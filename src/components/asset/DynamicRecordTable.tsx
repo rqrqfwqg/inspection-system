@@ -8,7 +8,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Button } from '@/components/ui/button'
-import { Pencil, Trash2, ArrowRightLeft } from 'lucide-react'
+import { Pencil, Trash2, ArrowRightLeft, ExternalLink, Link2 } from 'lucide-react'
 
 interface Props {
   title: string
@@ -22,6 +22,10 @@ interface Props {
   onSelectionChange?: (ids: number[]) => void
   /** 行内「转移」：把该条记录按字段映射挪到别的资料表 */
   onTransfer?: (r: RecordItem) => void
+  /** 表头右侧「去数据表管理处理这张表」——把可视化 / 检索侧与数据表管理打通 */
+  onOpenTable?: () => void
+  /** 提供后，每条记录左侧多出可点击的「关联键」列 → 打开该编号（records → 设备 方向联动） */
+  onOpenDevice?: (code: string) => void
 }
 
 export default function DynamicRecordTable({
@@ -34,6 +38,8 @@ export default function DynamicRecordTable({
   selectedIds = [],
   onSelectionChange,
   onTransfer,
+  onOpenTable,
+  onOpenDevice,
 }: Props) {
   const cols: { key: string; label: string }[] =
     fields.length > 0
@@ -58,9 +64,23 @@ export default function DynamicRecordTable({
 
   return (
     <div className="rounded-lg border overflow-hidden">
-      <div className="bg-gray-50 px-4 py-2 text-sm font-medium text-gray-700 flex items-center justify-between">
-        <span>{title}</span>
-        <span className="text-xs text-gray-400">{records.length} 条</span>
+      <div className="bg-gray-50 px-4 py-2 text-sm font-medium text-gray-700 flex items-center justify-between gap-2">
+        <span className="truncate">{title}</span>
+        <span className="flex items-center gap-2 shrink-0">
+          <span className="text-xs text-gray-400">{records.length} 条</span>
+          {onOpenTable && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs text-blue-600"
+              title="在数据表管理中打开这张表"
+              onClick={onOpenTable}
+            >
+              <ExternalLink className="w-3.5 h-3.5 mr-1" />
+              数据表管理
+            </Button>
+          )}
+        </span>
       </div>
       <div className="overflow-x-auto">
         <Table>
@@ -77,6 +97,14 @@ export default function DynamicRecordTable({
                   />
                 </TableHead>
               )}
+              {onOpenDevice && (
+                <TableHead className="whitespace-nowrap">
+                  <span className="inline-flex items-center gap-1">
+                    <Link2 className="w-3.5 h-3.5 text-gray-400" />
+                    关联键
+                  </span>
+                </TableHead>
+              )}
               {cols.map((c) => (
                 <TableHead key={c.key}>{c.label}</TableHead>
               ))}
@@ -86,7 +114,7 @@ export default function DynamicRecordTable({
           <TableBody>
             {records.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={cols.length + (selectable ? 1 : 0) + (hasActions ? 1 : 0)} className="text-center py-6 text-gray-500">
+                <TableCell colSpan={cols.length + (selectable ? 1 : 0) + (hasActions ? 1 : 0) + (onOpenDevice ? 1 : 0)} className="text-center py-6 text-gray-500">
                   暂无记录
                 </TableCell>
               </TableRow>
@@ -102,6 +130,24 @@ export default function DynamicRecordTable({
                         onChange={() => toggleOne(r.id)}
                         aria-label={`选择记录 ${r.device_code}`}
                       />
+                    </TableCell>
+                  )}
+                  {onOpenDevice && (
+                    <TableCell className="whitespace-nowrap">
+                      {r.device_code ? (
+                        <button
+                          type="button"
+                          className="font-mono text-xs text-blue-700 hover:underline"
+                          title="打开该编号的设备详情"
+                          onClick={() => onOpenDevice(r.device_code)}
+                        >
+                          {r.device_code}
+                        </button>
+                      ) : (
+                        <span className="text-xs text-amber-600" title="该记录没有关联键，无法挂到任何设备">
+                          未填
+                        </span>
+                      )}
                     </TableCell>
                   )}
                   {cols.map((c) => (

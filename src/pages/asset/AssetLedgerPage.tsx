@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import type { Subsystem, DataTable, FieldDef, RecordItem } from '@/types/asset'
 import { assetApi } from '@/services/assetApi'
 import DynamicRecordTable from '@/components/asset/DynamicRecordTable'
 import RecordEditDialog from '@/components/asset/RecordEditDialog'
 import RecordTransferDialog from '@/components/asset/RecordTransferDialog'
 import type { TransferResult } from '@/types/asset'
+import { getLinkOverview, getLinkTable } from '@/features/assets/api'
+import type { LinkOverview, LinkTableDetail } from '@/features/assets/types'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -29,6 +31,11 @@ import {
   Layers,
   PencilLine,
   ArrowRightLeft,
+  Link2,
+  Cpu,
+  Hand,
+  CheckCircle2,
+  ExternalLink,
 } from 'lucide-react'
 
 /**
@@ -69,6 +76,28 @@ export default function AssetLedgerPage() {
   const [transferOpen, setTransferOpen] = useState(false)
   // 单表内行级搜索：便于从大量记录里挑出分错系统的那些
   const [rowQ, setRowQ] = useState('')
+
+  // 联动画像（与「资产可视化」同源）：卡片列表看覆盖率，单表看未解析 TOP
+  const [linkOverview, setLinkOverview] = useState<LinkOverview | null>(null)
+  const [linkDetail, setLinkDetail] = useState<LinkTableDetail | null>(null)
+
+  // 联动画像：一次取全局（卡片覆盖率），单表视图再取该表明细
+  useEffect(() => {
+    let cancelled = false
+    getLinkOverview()
+      .then((d) => { if (!cancelled) setLinkOverview(d) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    if (!tableId) { setLinkDetail(null); return }
+    let cancelled = false
+    getLinkTable(tableId)
+      .then((d) => { if (!cancelled) setLinkDetail(d) })
+      .catch(() => { if (!cancelled) setLinkDetail(null) })
+    return () => { cancelled = true }
+  }, [tableId])
 
   useEffect(() => {
     let cancelled = false
@@ -313,11 +342,38 @@ export default function AssetLedgerPage() {
                       维护
                     </span>
                   </div>
-                  {t.relation_key_label && (
-                    <p className="text-[11px] text-gray-400 mt-2 truncate">
-                      关联键：{t.relation_key_label}
-                    </p>
-                  )}
+                  {(() => {
+                    const lk = linkOverview?.tables.find((x) => x.table_id === t.id)
+                    if (!lk) {
+                      return t.relation_key_label ? (
+                        <p className="text-[11px] text-gray-400 mt-2 truncate">
+                          关联键：{t.relation_key_label}
+                        </p>
+                      ) : null
+                    }
+                    const p = Math.round((lk.coverage || 0) * 100)
+                    const tone = p >= 95 ? 'bg-green-500' : p >= 60 ? 'bg-cyan-500' : p > 0 ? 'bg-amber-500' : 'bg-gray-300'
+                    return (
+                      <div className="mt-2 space-y-1.5">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] text-gray-500 shrink-0">关联覆盖率</span>
+                          <div className="flex-1 h-1.5 rounded bg-gray-100 overflow-hidden">
+                            <div className={`h-full ${tone}`} style={{ width: `${p}%` }} />
+                          </div>
+                          <span className="text-[11px] text-gray-600 tabular-nums w-9 text-right">{p}%</span>
+                        </div>
+                        <div className="flex items-center gap-2 text-[11px]">
+                          <span className="text-green-700">命中 {lk.resolved_devices + lk.resolved_rooms}</span>
+                          {lk.unresolved > 0 && (
+                            <span className="text-amber-700">未命中 {lk.unresolved}</span>
+                          )}
+                          <span className="text-gray-400 ml-auto">
+                            {t.relation_key_label ? `关联键：${t.relation_key_label}` : '无关联键'}
+                          </span>
+                        </div>
+                      </div>
+                    )
+                  })()}
                 </CardContent>
               </Card>
             ))}
@@ -345,6 +401,11 @@ export default function AssetLedgerPage() {
             <h1 className="text-xl font-bold text-gray-900 flex items-center gap-2">
               {activeTable?.name || `表 #${tableId}`}
               <Badge variant="outline">{records.length} 条</Badge>
+              {linkDetail && (
+                <Badge variant="outline" className="text-green-700 border-green-300 bg-green-50">
+                  关联覆盖 {(linkDetail.coverage.coverage * 100).toFixed(0)}%
+                </Badge>
+              )}
               {activeTable?.subsystem_name && <Badge variant="secondary">{activeTable.subsystem_name}</Badge>}
             </h1>
             <p className="text-xs text-gray-400 mt-0.5">
@@ -381,6 +442,39 @@ export default function AssetLedgerPage() {
           onChange={handleFileChange}
         />
       </div>
+
+      {/* 联动画像条：与「资料配置 / 联动中心」同源（GET /assets/link/table/{tid}） */}
+      {linkDetail && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border bg-gray-50/60 px-3 py-2 text-xs">
+          <span className="inline-flex items-center gap-1 text-gray-600">
+            <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
+            命中设备 {linkDetail.coverage.resolved_devices} · 机房{' '}
+            {linkDetail.coverage.resolved_rooms}
+          </span>
+          <span className="inline-flex items-center gap-1 text-gray-600">
+            <Cpu className="h-3.5 w-3.5 text-gray-400" />
+            去重设备 {linkDetail.coverage.distinct_devices}
+          </span>
+          <span className="inline-flex items-center gap-1 text-cyan-700">
+            <Link2 className="h-3.5 w-3.5" />
+            自动关联 {linkDetail.relations.auto}
+          </span>
+          <span className="inline-flex items-center gap-1 text-slate-600">
+            <Hand className="h-3.5 w-3.5" />
+            人工关联 {linkDetail.relations.manual}
+          </span>
+          {linkDetail.coverage.unresolved > 0 && (
+            <span className="text-amber-700">未解析 {linkDetail.coverage.unresolved}</span>
+          )}
+          <Link
+            to="/asset-viz?tab=link"
+            className="ml-auto inline-flex items-center gap-1 text-blue-600 hover:underline"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+            联动中心
+          </Link>
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         {selectedIds.length > 0 && (

@@ -25,6 +25,26 @@ interface SimNode {
 interface SimLink {
   source: string
   target: string
+  /** 关系类型（供电/所在机房/冷源…），用于标签与配色 */
+  type?: string
+  /** 边来源：auto=系统自动关联（虚线） / manual=人工建立（实线） */
+  origin?: string
+}
+
+/** 边来源 → 线型：自动关联用虚线，人工关联用实线（一眼可辨）。 */
+export function originDash(origin: string | undefined): string | undefined {
+  return origin === 'auto' ? '5 3' : undefined
+}
+
+/** 关系类型 → 配色（与后端 relation_types.kind 语义对齐：power/cooling/locate/other） */
+function kindStyle(type: string | undefined): { stroke: string; label: string } {
+  const t = type || ''
+  if (/供|配电|取电/.test(t)) return { stroke: '#f59e0b', label: '#b45309' } // 供配电 · 琥珀
+  if (/冷/.test(t)) return { stroke: '#06b6d4', label: '#0e7490' } // 冷源 · 青
+  if (/机房|所在|位置/.test(t)) return { stroke: '#94a3b8', label: '#475569' } // 位置归属 · 石板灰
+  if (/控制/.test(t)) return { stroke: '#8b5cf6', label: '#6d28d9' }
+  if (/信号/.test(t)) return { stroke: '#10b981', label: '#047857' }
+  return { stroke: '#cbd5e1', label: '#64748b' }
 }
 
 interface RelationGraphProps {
@@ -108,7 +128,7 @@ export function RelationGraph({ centerCode, edges, problems, onSelectNode }: Rel
       else if (f !== centerCode && t !== centerCode) other = f
       if (!other) continue
       addDevice(other)
-      links.push({ source: center.id, target: `d:${other}` })
+      links.push({ source: center.id, target: `d:${other}`, type: e.relation_type })
     }
 
     problems.forEach((p, idx) => {
@@ -251,6 +271,17 @@ export function RelationGraph({ centerCode, edges, problems, onSelectNode }: Rel
 
   const byId = byIdRef.current
 
+  // 图上出现过的关系类型 → 计数与配色（只展示真实存在的图例，不留空图例）
+  const typeCount: Record<string, number> = {}
+  for (const l of linksRef.current) {
+    const t = l.type || '关联'
+    typeCount[t] = (typeCount[t] || 0) + 1
+  }
+  const typeLegend: [string, { stroke: string; label: string }][] = Object.keys(typeCount)
+    .sort((a, b) => typeCount[b] - typeCount[a])
+    .slice(0, 6)
+    .map((t) => [t, kindStyle(t)])
+
   if (!hasContent) {
     return <p className="text-sm text-gray-500 py-8 text-center">该设备暂无可展示的关联与问题。</p>
   }
@@ -268,8 +299,27 @@ export function RelationGraph({ centerCode, edges, problems, onSelectNode }: Rel
         {linksRef.current.map((l, i) => {
           const a = byId.get(l.source); const b = byId.get(l.target)
           if (!a || !b) return null
+          const st = kindStyle(l.type)
           return (
-            <line key={`e-${i}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke="#cbd5e1" strokeWidth={1.5} />
+            <g key={`e-${i}`}>
+              <line
+                x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                stroke={st.stroke}
+                strokeWidth={1.8}
+                strokeDasharray={originDash(l.origin)}
+              />
+              {l.type ? (
+                <text
+                  x={(a.x + b.x) / 2}
+                  y={(a.y + b.y) / 2 - 3}
+                  textAnchor="middle"
+                  fill={st.label}
+                  className="text-[9px] pointer-events-none"
+                >
+                  {l.type}
+                </text>
+              ) : null}
+            </g>
           )
         })}
         {nodesRef.current.map((n) => {
@@ -296,7 +346,7 @@ export function RelationGraph({ centerCode, edges, problems, onSelectNode }: Rel
           )
         })}
       </svg>
-      <div className="flex flex-wrap items-center gap-4 text-xs text-gray-500">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-500">
         <span className="flex items-center gap-1">
           <span className="inline-block w-3 h-3 rounded-full bg-blue-600" /> 当前设备
         </span>
@@ -307,6 +357,27 @@ export function RelationGraph({ centerCode, edges, problems, onSelectNode }: Rel
           <span className="inline-block w-3 h-3 rounded-full bg-red-500" /> BA 问题（{problems.length}）
         </span>
         <span className="text-gray-400">可拖拽节点 / 点击节点跳转</span>
+      </div>
+      {/* 关系类型 + 来源图例：让「自动关联 / 人工关联」在图上可辨 */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
+        {typeLegend.map(([t, st]) => (
+          <span key={t} className="flex items-center gap-1 text-gray-600">
+            <span className="inline-block w-5 h-0 border-t-2" style={{ borderColor: st.stroke }} />
+            {t}（{typeCount[t] || 0}）
+          </span>
+        ))}
+        <span className="flex items-center gap-1 text-gray-600">
+          <svg width="22" height="8" className="inline-block">
+            <line x1="0" y1="4" x2="22" y2="4" stroke="#475569" strokeWidth="1.8" strokeDasharray="5 3" />
+          </svg>
+          自动关联
+        </span>
+        <span className="flex items-center gap-1 text-gray-600">
+          <svg width="22" height="8" className="inline-block">
+            <line x1="0" y1="4" x2="22" y2="4" stroke="#475569" strokeWidth="1.8" />
+          </svg>
+          人工关联
+        </span>
       </div>
     </div>
   )

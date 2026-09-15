@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { LayoutDashboard, Map, Boxes, Search, Upload, Share2, Network } from 'lucide-react'
+import { LayoutDashboard, Map, Boxes, Search, Upload, Share2, Network, Link2 } from 'lucide-react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { DashboardPage } from './DashboardPage'
 import { AreaTreePage } from './AreaTreePage'
@@ -9,6 +9,7 @@ import { DeviceHierarchyTreePage } from './DeviceHierarchyTreePage'
 import { BaSystemTreePage } from './BaSystemTreePage'
 import { SearchPage } from './SearchPage'
 import { ImportCenterPage } from './ImportCenterPage'
+import LinkCenterPage from './LinkCenterPage'
 import { DeviceDetailDrawer } from './DeviceDetailDrawer'
 
 const TABS = [
@@ -17,6 +18,7 @@ const TABS = [
   { key: 'subsystem', label: '子系统树', icon: Boxes },
   { key: 'device', label: '设备层级', icon: Share2 },
   { key: 'ba', label: 'BA系统', icon: Network },
+  { key: 'link', label: '联动中心', icon: Link2 },
   { key: 'search', label: '检索', icon: Search },
   { key: 'import', label: '导入', icon: Upload },
 ] as const
@@ -41,9 +43,28 @@ export default function AssetsLayout() {
   const [drawerCode, setDrawerCode] = React.useState<string | null>(null)
   const [subsystemFilter, setSubsystemFilter] = React.useState<string | undefined>(undefined)
 
-  const openDevice = React.useCallback((code: string) => {
-    if (code) setDrawerCode(code)
-  }, [])
+  // ?code= 深链：数据表管理/扫码页等外部页面可直接打开某对象的详情抽屉
+  const codeParam = searchParams.get('code')
+
+  const openDevice = React.useCallback(
+    (code: string) => {
+      if (!code) return
+      setDrawerCode(code)
+      const next = new URLSearchParams(searchParams)
+      next.set('code', code)
+      setSearchParams(next, { replace: true })
+    },
+    [searchParams, setSearchParams]
+  )
+
+  const closeDevice = React.useCallback(() => {
+    setDrawerCode(null)
+    if (searchParams.get('code')) {
+      const next = new URLSearchParams(searchParams)
+      next.delete('code')
+      setSearchParams(next, { replace: true })
+    }
+  }, [searchParams, setSearchParams])
 
   const selectSubsystem = React.useCallback(
     (code: string) => {
@@ -79,6 +100,7 @@ export default function AssetsLayout() {
           <DashboardPage
             subsystemFilter={subsystemFilter}
             onClearFilter={() => setSubsystemFilter(undefined)}
+            onNavigateTab={setActiveTab}
           />
         </TabsContent>
         <TabsContent value="area">
@@ -93,6 +115,9 @@ export default function AssetsLayout() {
         <TabsContent value="ba">
           <BaSystemTreePage onOpenDevice={openDevice} />
         </TabsContent>
+        <TabsContent value="link">
+          <LinkCenterPage />
+        </TabsContent>
         <TabsContent value="search">
           <SearchPage onOpenDevice={openDevice} />
         </TabsContent>
@@ -102,12 +127,12 @@ export default function AssetsLayout() {
       </Tabs>
 
       <DeviceDetailDrawer
-        deviceCode={drawerCode}
-        open={!!drawerCode}
+        deviceCode={drawerCode ?? codeParam}
+        open={!!(drawerCode ?? codeParam)}
         onOpenChange={(o) => {
-          if (!o) setDrawerCode(null)
+          if (!o) closeDevice()
         }}
-        onNavigate={(c) => setDrawerCode(c)}
+        onNavigate={(c) => openDevice(c)}
       />
     </div>
   )

@@ -292,12 +292,26 @@ export interface DeviceSuggestItem {
 }
 
 export interface SearchResult {
+  /** 命中对象（设备；未登记 devices 的台账编号为 null，用 profile 兜底） */
   target: Device | null
   found: boolean
   nodes: SearchNode[]
   edges: SearchEdge[]
   groups: SearchGroup[]
   total_records: number
+  // ===== 扩展聚合（与 asset_schemas.SearchResult 一一对应，2026-09-15 补齐）=====
+  /** 固定资产财务块（无则 null） */
+  fixed_asset?: Record<string, any> | null
+  /** 设备档案块（无则 null） */
+  archive?: Record<string, any> | null
+  /** 配件列表 */
+  accessories?: Record<string, any>[]
+  /** 所属机房 {room_code, room_name, building, floor} */
+  room?: Record<string, any> | null
+  /** BA 问题列表 */
+  problems?: Record<string, any>[]
+  /** 编号别名溯源 */
+  aliases?: Record<string, any>[]
   profile?: DeviceProfile | null
   power_chain?: PowerChain | null
 }

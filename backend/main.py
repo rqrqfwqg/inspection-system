@@ -25,6 +25,7 @@ from cad_routes import router as cad_router
 from asset_routes import router as asset_router, seed_assets
 # 资产总台账（设备台账升级）：独立模块，避免 asset_routes 继续膨胀
 from asset_ledger_routes import router as asset_ledger_router
+from asset_link_routes import router as asset_link_router
 from dependencies import get_current_user, require_admin, AUTH_DISABLED
 
 from contextlib import asynccontextmanager
@@ -105,6 +106,7 @@ api_router = APIRouter(prefix="/ops/api")
 api_router.include_router(cad_router)      # /ops/api/cad/...
 api_router.include_router(asset_router)    # /ops/api/assets/...
 api_router.include_router(asset_ledger_router)  # /ops/api/assets/asset-ledger...
+api_router.include_router(asset_link_router)    # /ops/api/assets/link...（可视化×数据表联动）
 
 # ==================== 健康检查 ====================
 

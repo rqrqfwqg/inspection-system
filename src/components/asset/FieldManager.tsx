@@ -28,10 +28,12 @@ const TYPE_LABELS: Record<FieldType, string> = {
 interface Props {
   tableId: number
   fields: FieldDef[]
+  /** field.id -> 真实填充率 0..1（来自 /assets/link/table/{tid}，与记录数据联动） */
+  fillRates?: Record<number, number>
   onChanged: () => void
 }
 
-export default function FieldManager({ tableId, fields, onChanged }: Props) {
+export default function FieldManager({ tableId, fields, fillRates, onChanged }: Props) {
   const { toast } = useToast()
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<FieldDef | null>(null)
@@ -112,19 +114,26 @@ export default function FieldManager({ tableId, fields, onChanged }: Props) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h4 className="text-sm font-medium text-gray-700">字段定义（{fields.length}）</h4>
+        <h4 className="text-sm font-medium text-gray-700">
+          字段定义（{fields.length}）
+          <span className="ml-2 text-xs font-normal text-gray-400">
+            填充率取自真实记录，随数据更新
+          </span>
+        </h4>
         <Button size="sm" variant="outline" onClick={openAdd}>
           <Plus className="w-4 h-4 mr-1" />
           新增字段
         </Button>
       </div>
       <div className="space-y-2">
-        {fields.map((f) => (
+        {fields.map((f) => {
+          const fillRate = fillRates?.[f.id]
+          return (
           <div
             key={f.id}
             className="flex items-center justify-between rounded-md border px-3 py-2"
           >
-            <div className="text-sm">
+            <div className="text-sm min-w-0">
               <span className="font-medium">{f.label}</span>
               <span className="text-gray-400 ml-2 text-xs">{f.key}</span>
               <span className="ml-2 inline-flex gap-1 align-middle">
@@ -132,6 +141,26 @@ export default function FieldManager({ tableId, fields, onChanged }: Props) {
                 {f.is_relation_key && <Badge variant="default">关联键</Badge>}
                 {f.is_required && <Badge variant="outline">必填</Badge>}
               </span>
+              {fillRate !== undefined && (
+                <span className="ml-2 inline-flex items-center gap-1 align-middle">
+                  <span className="inline-block h-1.5 w-14 overflow-hidden rounded-full bg-gray-100">
+                    <span
+                      className={
+                        'block h-full rounded-full ' +
+                        (fillRate >= 0.9
+                          ? 'bg-emerald-500'
+                          : fillRate >= 0.5
+                            ? 'bg-amber-500'
+                            : 'bg-rose-500')
+                      }
+                      style={{ width: Math.round(fillRate * 100) + '%' }}
+                    />
+                  </span>
+                  <span className="text-xs tabular-nums text-gray-500">
+                    填充 {Math.round(fillRate * 100)}%
+                  </span>
+                </span>
+              )}
             </div>
             <div className="flex gap-1">
               <Button variant="ghost" size="icon" onClick={() => openEdit(f)}>
@@ -147,7 +176,8 @@ export default function FieldManager({ tableId, fields, onChanged }: Props) {
               </Button>
             </div>
           </div>
-        ))}
+          )
+        })}
         {fields.length === 0 && <p className="text-sm text-gray-500">暂无字段。</p>}
       </div>
 

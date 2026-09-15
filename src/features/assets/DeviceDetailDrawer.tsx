@@ -1,16 +1,21 @@
 import * as React from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
+  Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useToast } from '@/hooks/use-toast'
-import { searchDevice, getRelations, getBaProblems } from './api'
-import type { SearchResult, RelationEdge, BaProblem } from './types'
+import {
+  Cpu, Hand, Database, ChevronRight, ExternalLink, Link2,
+  MapPin, Image as ImageIcon, Layers, AlertTriangle, Wrench, Tag,
+} from 'lucide-react'
+import { searchDevice, getBaProblems, getDeviceLink } from './api'
+import type {
+  SearchResult, BaProblem, DeviceLinkResponse, DeviceLinkEdge,
+} from './types'
 import { FieldList, formatValue } from './FieldList'
 import { RelationGraph } from './RelationGraph'
 
@@ -24,15 +29,23 @@ interface DeviceDetailDrawerProps {
 }
 
 /**
- * 设备详情抽屉（被区域树 / 子系统树 / 检索页复用）。
- * 聚合 /search + /relations(双向) + /ba/problems?device_code= 的全部信息。
+ * 设备详情抽屉（区域树 / 子系统树 / 设备层级 / BA / 检索 共用）。
+ *
+ * 2026-09-15 重做：改造前只读 `/search` 的 `device` 字段（后端根本没这个字段），
+ * 于是「基础信息 / 关联设备」整块永远空白 —— 这是"像死数据"的直接原因。
+ * 现在一次并取三个真实数据源，全部落到位：
+ *   /search          画像 profile / 固定资产 / 档案 / 配件 / 别名 / BA 问题 / 机房
+ *   /link/device/*   资料记录（按资料表分组）+ 关联边（**自动/人工分列**）+ 分组统计
+ *   /ba/problems     该设备的 BA 问题清单
  */
 export function DeviceDetailDrawer({ deviceCode, open, onOpenChange, onNavigate }: DeviceDetailDrawerProps) {
   const { toast } = useToast()
+  const navigate = useNavigate()
   const [loading, setLoading] = React.useState(false)
   const [search, setSearch] = React.useState<SearchResult | null>(null)
-  const [relations, setRelations] = React.useState<RelationEdge[]>([])
+  const [link, setLink] = React.useState<DeviceLinkResponse | null>(null)
   const [baProblems, setBaProblems] = React.useState<BaProblem[]>([])
+  const [expanded, setExpanded] = React.useState<Record<number, boolean>>({})
 
   React.useEffect(() => {
     if (!open || !deviceCode) return
@@ -40,26 +53,19 @@ export function DeviceDetailDrawer({ deviceCode, open, onOpenChange, onNavigate 
     let cancelled = false
     async function load() {
       setLoading(true)
+      setSearch(null)
+      setLink(null)
       try {
-        const [s, relFrom, relTo, ba] = await Promise.all([
-          searchDevice(code),
-          getRelations({ from_code: code }),
-          getRelations({ to_code: code }),
-          getBaProblems({ device_code: code, page_size: 100 }),
+        // 三个源相互独立：link 是新增能力，旧后端没有时不能拖垮整屏
+        const [s, ba, lk] = await Promise.all([
+          searchDevice(code).catch(() => null),
+          getBaProblems({ device_code: code, page_size: 100 }).catch(() => ({ items: [] as BaProblem[], total: 0 })),
+          getDeviceLink(code).catch(() => null),
         ])
         if (cancelled) return
-        // 合并双方向边并去重（按 id）
-        const merged: RelationEdge[] = [...relFrom, ...relTo]
-        const seen = new Set<number>()
-        const uniq = merged.filter((e) => {
-          if (e.id == null) return true
-          if (seen.has(e.id)) return false
-          seen.add(e.id)
-          return true
-        })
         setSearch(s)
-        setRelations(uniq)
-        setBaProblems(ba.items)
+        setBaProblems(ba.items || [])
+        setLink(lk)
       } catch (e) {
         if (!cancelled) {
           toast({
@@ -72,31 +78,63 @@ export function DeviceDetailDrawer({ deviceCode, open, onOpenChange, onNavigate 
         if (!cancelled) setLoading(false)
       }
     }
-    load()
-    return () => {
-      cancelled = true
-    }
+    void load()
+    return () => { cancelled = true }
   }, [open, deviceCode, toast])
 
   const code = deviceCode ?? ''
-  const device = search?.device
-  const name =
-    (device?.name as string) ||
-    (device?.device_name as string) ||
-    (device?.device_code as string) ||
-    code
+  const prof = search?.profile
+  const name = link?.name || prof?.name || search?.target?.name || code
+  const edgeSummary = link?.edge_summary
+  const groups = link?.groups || []
+  const totalRecords = link?.record_count ?? search?.total_records ?? 0
+
+  // 图谱用 /search 的完整 edges（含 type），叠加 link 的来源标注
+  const originByKey = React.useMemo(() => {
+    const m: Record<string, string> = {}
+    for (const e of link?.edges || []) {
+      m[`${e.from_code}->${e.to_code}`] = e.source
+    }
+    return m
+  }, [link])
+  const graphEdges = React.useMemo(() => {
+    const raw = (search?.edges || []) as unknown as Record<string, unknown>[]
+    return raw.map((e) => {
+      const f = String(e.from ?? e.from_code ?? '')
+      const t = String(e.to ?? e.to_code ?? '')
+      return {
+        ...e,
+        from_code: f,
+        to_code: t,
+        relation_type: String(e.relation_type ?? e.type ?? '关联'),
+        source: originByKey[`${f}->${t}`] || originByKey[`${t}->${f}`] || 'manual',
+      }
+    })
+  }, [search, originByKey])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+      <DialogContent className="max-w-4xl max-h-[88vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 flex-wrap">
             <span>设备详情</span>
-            <Badge variant="secondary" className="font-mono">
-              {code}
-            </Badge>
+            <Badge variant="secondary" className="font-mono">{code}</Badge>
             {name && name !== code && (
               <span className="text-base font-normal text-gray-600">{name}</span>
+            )}
+            {edgeSummary && edgeSummary.total > 0 && (
+              <span className="flex items-center gap-1.5 ml-auto">
+                {edgeSummary.auto > 0 && (
+                  <Badge className="bg-cyan-100 text-cyan-800 hover:bg-cyan-100 border-cyan-200 gap-1">
+                    <Cpu className="w-3 h-3" />自动 {edgeSummary.auto}
+                  </Badge>
+                )}
+                {edgeSummary.manual > 0 && (
+                  <Badge variant="secondary" className="gap-1">
+                    <Hand className="w-3 h-3" />人工 {edgeSummary.manual}
+                  </Badge>
+                )}
+              </span>
             )}
           </DialogTitle>
         </DialogHeader>
@@ -105,59 +143,215 @@ export function DeviceDetailDrawer({ deviceCode, open, onOpenChange, onNavigate 
           <div className="space-y-3">
             <Skeleton className="h-24 w-full" />
             <Skeleton className="h-40 w-full" />
+            <Skeleton className="h-32 w-full" />
           </div>
         )}
 
-        {!loading && search && (
+        {!loading && !search && !link && (
+          <p className="text-sm text-gray-500 py-8 text-center">未检索到该设备的信息。</p>
+        )}
+
+        {!loading && (search || link) && (
           <div className="space-y-4">
+            {/* ============ 画像 ============ */}
             <Card>
               <CardHeader className="py-3">
-                <CardTitle className="text-sm">设备基础信息</CardTitle>
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Layers className="w-4 h-4 text-gray-500" />设备画像
+                  {prof ? (
+                    prof.in_ledger
+                      ? <Badge variant="outline" className="text-green-700 border-green-300 bg-green-50">已登记台账</Badge>
+                      : <Badge variant="outline" className="text-amber-700 border-amber-300 bg-amber-50">未登记（仅资料）</Badge>
+                  ) : null}
+                </CardTitle>
               </CardHeader>
-              <CardContent>
-                <FieldList data={device ?? null} emptyText="未检索到设备基础信息" />
+              <CardContent className="space-y-3">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <MiniStat icon={<Database className="w-3.5 h-3.5" />} label="资料记录" value={totalRecords} />
+                  <MiniStat icon={<Layers className="w-3.5 h-3.5" />} label="涉及资料表" value={link?.table_count ?? prof?.source_tables?.length ?? 0} />
+                  <MiniStat icon={<Link2 className="w-3.5 h-3.5" />} label="关联关系" value={edgeSummary?.total ?? 0} />
+                  <MiniStat icon={<ImageIcon className="w-3.5 h-3.5" />} label="现场照片" value={prof?.photo_count ?? 0} />
+                </div>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-600">
+                  {prof?.subsystem_name && (
+                    <span>子系统：<b className="text-gray-800">{prof.subsystem_name}</b></span>
+                  )}
+                  {(prof?.building || link?.building) && (
+                    <span className="flex items-center gap-1">
+                      <MapPin className="w-3 h-3" />
+                      {[prof?.building || link?.building, prof?.floor || link?.floor, prof?.location || '']
+                        .filter(Boolean).join(' / ')}
+                    </span>
+                  )}
+                  {(prof?.room || link?.groups) && (
+                    <span>
+                      机房：
+                      <b className="text-gray-800">
+                        {prof?.room?.room_name || prof?.room?.room_code || '—'}
+                      </b>
+                    </span>
+                  )}
+                  {prof?.tag_no && <span>标签：<b className="text-gray-800">{prof.tag_no}</b></span>}
+                </div>
+                {search?.aliases && search.aliases.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <Tag className="w-3 h-3 text-gray-400" />
+                    <span className="text-gray-500">编号别名：</span>
+                    {search.aliases.map((a, i) => (
+                      <Badge key={i} variant="outline" className="font-mono text-[10px]">
+                        {formatValue(a.alias_code ?? a.alias ?? a)}
+                      </Badge>
+                    ))}
+                  </div>
+                )}
               </CardContent>
             </Card>
 
+            {/* ============ 关联关系（自动 / 人工分列） ============ */}
             <Card>
               <CardHeader className="py-3">
-                <CardTitle className="text-sm">关联图谱（以当前设备为中心）</CardTitle>
+                <CardTitle className="text-sm flex items-center gap-2 flex-wrap">
+                  <Link2 className="w-4 h-4 text-gray-500" />关联关系
+                  <span className="text-xs font-normal text-gray-400">
+                    共 {edgeSummary?.total ?? 0} 条
+                  </span>
+                  {!!edgeSummary?.auto && (
+                    <Badge className="bg-cyan-100 text-cyan-800 hover:bg-cyan-100 border-cyan-200 gap-1">
+                      <Cpu className="w-3 h-3" />自动 {edgeSummary.auto}
+                    </Badge>
+                  )}
+                  {!!edgeSummary?.manual && (
+                    <Badge variant="secondary" className="gap-1">
+                      <Hand className="w-3 h-3" />人工 {edgeSummary.manual}
+                    </Badge>
+                  )}
+                  <Button
+                    variant="ghost" size="sm" className="ml-auto h-7 text-xs"
+                    onClick={() => { onOpenChange(false); navigate('/asset-viz?tab=link') }}
+                  >
+                    <ExternalLink className="w-3 h-3 mr-1" />联动中心
+                  </Button>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {(link?.edges || []).length === 0 ? (
+                  <p className="text-sm text-gray-500">该设备暂无关联关系。</p>
+                ) : (
+                  <>
+                    {link?.edges_auto && link.edges_auto.length > 0 && (
+                      <EdgeGroup title="自动关联" tone="cyan" icon={<Cpu className="w-3.5 h-3.5" />}
+                        edges={link.edges_auto} onNavigate={onNavigate} />
+                    )}
+                    {link?.edges_manual && link.edges_manual.length > 0 && (
+                      <EdgeGroup title="人工关联" tone="slate" icon={<Hand className="w-3.5 h-3.5" />}
+                        edges={link.edges_manual} onNavigate={onNavigate} />
+                    )}
+                  </>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* ============ 关联图谱 ============ */}
+            <Card>
+              <CardHeader className="py-3">
+                <CardTitle className="text-sm">关联图谱（以当前对象为中心）</CardTitle>
               </CardHeader>
               <CardContent>
                 <RelationGraph
                   centerCode={code}
-                  edges={relations}
+                  edges={graphEdges}
                   problems={baProblems}
                   onSelectNode={(c) => onNavigate?.(c)}
                 />
               </CardContent>
             </Card>
 
-            {search.fixed_asset && (
-              <Card>
-                <CardHeader className="py-3">
-                  <CardTitle className="text-sm">固定资产</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <FieldList data={search.fixed_asset} />
-                </CardContent>
-              </Card>
-            )}
-
-            {search.archive && (
-              <Card>
-                <CardHeader className="py-3">
-                  <CardTitle className="text-sm">设备档案</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <FieldList data={search.archive} />
-                </CardContent>
-              </Card>
-            )}
-
+            {/* ============ 资料记录（按子系统 → 资料表分组，与数据表管理同源） ============ */}
             <Card>
               <CardHeader className="py-3">
-                <CardTitle className="text-sm">BA 问题（{baProblems.length}）</CardTitle>
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Database className="w-4 h-4 text-gray-500" />
+                  资料记录（{totalRecords}）
+                  <span className="text-xs font-normal text-gray-400">
+                    {groups.length} 张表 · 与「数据表管理」同源
+                  </span>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {groups.length === 0 ? (
+                  <p className="text-sm text-gray-500">
+                    该编号在资料表中暂无记录（可能它是台账设备但没有对应资料行）。
+                  </p>
+                ) : groups.map((g) => {
+                  const isOpen = !!expanded[g.table_id]
+                  return (
+                    <div key={g.table_id} className="rounded-lg border">
+                      <button
+                        type="button"
+                        className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-gray-50"
+                        onClick={() => setExpanded((p) => ({ ...p, [g.table_id]: !isOpen }))}
+                      >
+                        <ChevronRight className={`w-4 h-4 text-gray-400 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                        <span className="text-sm font-medium">{g.table_name}</span>
+                        {g.subsystem && (
+                          <Badge variant="outline" className="text-[10px]">{g.subsystem.name}</Badge>
+                        )}
+                        <Badge variant="secondary" className="text-[10px] ml-auto">{g.records.length} 条</Badge>
+                        <span
+                          role="link"
+                          tabIndex={0}
+                          className="text-xs text-blue-600 hover:underline flex items-center gap-0.5"
+                          onClick={(ev) => {
+                            ev.stopPropagation()
+                            onOpenChange(false)
+                            navigate(`/asset/ledger/${g.table_id}`)
+                          }}
+                          onKeyDown={(ev) => {
+                            if (ev.key === 'Enter') {
+                              ev.stopPropagation()
+                              onOpenChange(false)
+                              navigate(`/asset/ledger/${g.table_id}`)
+                            }
+                          }}
+                        >
+                          打开表<ExternalLink className="w-3 h-3" />
+                        </span>
+                      </button>
+                      {isOpen && (
+                        <div className="border-t divide-y">
+                          {g.records.map((r) => (
+                            <div key={r.id} className="p-3">
+                              <FieldList data={r.data as Record<string, unknown>} columns={3} emptyText="（空记录）" />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </CardContent>
+            </Card>
+
+            {/* ============ 固定资产 / 设备档案 ============ */}
+            {search?.fixed_asset && (
+              <Card>
+                <CardHeader className="py-3"><CardTitle className="text-sm">固定资产</CardTitle></CardHeader>
+                <CardContent><FieldList data={search.fixed_asset as Record<string, unknown>} /></CardContent>
+              </Card>
+            )}
+            {search?.archive && (
+              <Card>
+                <CardHeader className="py-3"><CardTitle className="text-sm">设备档案</CardTitle></CardHeader>
+                <CardContent><FieldList data={search.archive as Record<string, unknown>} /></CardContent>
+              </Card>
+            )}
+
+            {/* ============ BA 问题 ============ */}
+            <Card>
+              <CardHeader className="py-3">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-500" />BA 问题（{baProblems.length}）
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 {baProblems.length === 0 ? (
@@ -165,25 +359,12 @@ export function DeviceDetailDrawer({ deviceCode, open, onOpenChange, onNavigate 
                 ) : (
                   <ul className="space-y-1 text-sm">
                     {baProblems.map((p, i) => (
-                      <li
-                        key={p.id ?? i}
-                        className="border-b border-dashed border-gray-100 py-1 flex flex-wrap gap-2 items-center"
-                      >
-                        <Badge
-                          variant={
-                            p.status === 'closed'
-                              ? 'success'
-                              : p.status === 'processing'
-                                ? 'warning'
-                                : 'destructive'
-                          }
-                        >
+                      <li key={p.id ?? i} className="border-b border-dashed border-gray-100 py-1 flex flex-wrap gap-2 items-center">
+                        <Badge variant={p.status === 'closed' ? 'success' : p.status === 'processing' ? 'warning' : 'destructive'}>
                           {formatValue(p.status ?? '未知')}
                         </Badge>
                         <span className="text-gray-700">{formatValue(p.problem_type ?? '')}</span>
-                        <span className="text-gray-400">
-                          · {formatValue(p.location ?? p.group_area ?? '')}
-                        </span>
+                        <span className="text-gray-400">· {formatValue(p.location ?? p.group_area ?? '')}</span>
                       </li>
                     ))}
                   </ul>
@@ -191,76 +372,84 @@ export function DeviceDetailDrawer({ deviceCode, open, onOpenChange, onNavigate 
               </CardContent>
             </Card>
 
-            <Card>
-              <CardHeader className="py-3">
-                <CardTitle className="text-sm">配件（{search.accessories?.length ?? 0}）</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {!search.accessories || search.accessories.length === 0 ? (
-                  <p className="text-sm text-gray-500">无</p>
-                ) : (
-                  <div className="space-y-2">
-                    {search.accessories.map((a, i) => (
-                      <div key={i} className="border-b border-dashed border-gray-100 py-1">
-                        <FieldList data={a} emptyText="—" />
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="py-3">
-                <CardTitle className="text-sm">别名（{search.aliases?.length ?? 0}）</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {!search.aliases || search.aliases.length === 0 ? (
-                  <p className="text-sm text-gray-500">无</p>
-                ) : (
-                  <div className="flex flex-wrap gap-2">
-                    {search.aliases.map((a, i) => {
-                      const aliasVal = (a as Record<string, unknown>)?.alias
-                      return (
-                        <Badge key={i} variant="outline">
-                          {formatValue(aliasVal ?? a)}
-                        </Badge>
-                      )
-                    })}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="py-3">
-                <CardTitle className="text-sm">关联设备（{relations.length}）</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {relations.length === 0 ? (
-                  <p className="text-sm text-gray-500">无</p>
-                ) : (
-                  <ul className="space-y-1 text-sm">
-                    {relations.map((e, i) => {
-                      const other = e.from_code === code ? e.to_code : e.from_code
-                      return (
-                        <li key={e.id ?? i} className="border-b border-dashed border-gray-100 py-1 flex gap-2 items-center">
-                          <Badge variant="outline">{formatValue(e.relation_type ?? '关联')}</Badge>
-                          <span className="font-mono text-gray-700">{String(other ?? '')}</span>
-                        </li>
-                      )
-                    })}
-                  </ul>
-                )}
-              </CardContent>
-            </Card>
+            {/* ============ 配件 ============ */}
+            {!!search?.accessories?.length && (
+              <Card>
+                <CardHeader className="py-3">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <Wrench className="w-4 h-4 text-gray-500" />配件（{search.accessories.length}）
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {search.accessories.map((a, i) => (
+                    <div key={i} className="border-b border-dashed border-gray-100 py-1">
+                      <FieldList data={a as Record<string, unknown>} emptyText="—" />
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
           </div>
-        )}
-
-        {!loading && !search && (
-          <p className="text-sm text-gray-500 py-8 text-center">未检索到该设备的信息。</p>
         )}
       </DialogContent>
     </Dialog>
+  )
+}
+
+// ==================== 子组件 ====================
+
+function MiniStat({ icon, label, value }: { icon: React.ReactNode; label: string; value: number }) {
+  return (
+    <div className="rounded-lg bg-gray-50 px-3 py-2">
+      <div className="text-xs text-gray-500 flex items-center gap-1">{icon}{label}</div>
+      <div className="text-lg font-semibold text-gray-900 tabular-nums">{value}</div>
+    </div>
+  )
+}
+
+/** 关联边分组：自动（青）/ 人工（灰），每条带证据与跳转 */
+function EdgeGroup({
+  title, tone, icon, edges, onNavigate,
+}: {
+  title: string
+  tone: 'cyan' | 'slate'
+  icon: React.ReactNode
+  edges: DeviceLinkEdge[]
+  onNavigate?: (code: string) => void
+}) {
+  const tones = {
+    cyan: { bar: 'border-l-cyan-400', badge: 'bg-cyan-100 text-cyan-800 border-cyan-200', text: 'text-cyan-700' },
+    slate: { bar: 'border-l-gray-300', badge: 'bg-gray-100 text-gray-700 border-gray-200', text: 'text-gray-600' },
+  } as const
+  const t = tones[tone]
+  return (
+    <div className="space-y-1.5">
+      <div className={`text-xs font-medium flex items-center gap-1.5 ${t.text}`}>
+        {icon}{title}（{edges.length}）
+      </div>
+      {edges.map((e) => (
+        <div key={e.id} className={`border-l-2 ${t.bar} pl-3 py-1 space-y-0.5`}>
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <Badge variant="outline" className={`text-[10px] ${t.badge}`}>{e.relation_type}</Badge>
+            <Badge variant="outline" className="text-[10px]">
+              {e.other_kind === 'device' ? '设备' : e.other_kind === 'room' ? '机房' : e.other_kind === 'record' ? '资料编号' : '未知'}
+            </Badge>
+            <span className="text-gray-500 text-xs">{e.direction === 'out' ? '→' : '←'}</span>
+            <button
+              type="button"
+              className="font-mono text-gray-800 hover:text-blue-600 hover:underline"
+              onClick={() => onNavigate?.(e.other_code)}
+            >
+              {e.other_code}
+            </button>
+            {e.other_name && <span className="text-gray-500 text-xs">{e.other_name}</span>}
+            {e.rule && <span className="text-[10px] text-gray-400">规则 {e.rule}</span>}
+          </div>
+          {e.evidence && (
+            <div className="text-[11px] text-gray-400 leading-relaxed">{e.evidence}</div>
+          )}
+        </div>
+      ))}
+    </div>
   )
 }
