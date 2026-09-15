@@ -2386,6 +2386,8 @@ def _tree_power_layers(rest: str, db: Session) -> List[Dict[str, Any]]:
         return _pwr_box_detail(":".join(parts[1:]), idx)
     if head == "F":
         return _pwr_floor_detail(":".join(parts[1:]), idx)
+    if head == "NB":
+        return _pwr_unboxed_detail(":".join(parts[1:]), idx)
     return []
 
 
@@ -2605,6 +2607,32 @@ def _pwr_floor_detail(floor: str, idx: Dict[str, Any]) -> List[Dict[str, Any]]:
                   floor=floor, box_code=bc, upstream=floor)
         for bc, cnt in sorted(by_box.items(), key=lambda x: -x[1])
     ][: _PWR_DETAIL_CAP]
+
+
+def _pwr_unboxed_detail(floor: str, idx: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """「未标注配电箱」分组：列出该楼层下没有箱编码的图纸图元。
+
+    线上 5036 条楼层设备里有 1201 条没有 box_code（画在图上是点位，但没标箱号），
+    它们无法归到任何配电箱下，只能在楼层里单列，避免被静默吞掉。
+    """
+    out: List[Dict[str, Any]] = []
+    for bc, rows in idx["dev_by_box"].items():
+        if _pwr_is_box(bc):
+            continue
+        for i, d in enumerate(rows):
+            if (_pwr_s(d.get("floor")) or u"未标注楼层") != floor:
+                continue
+            dt = _pwr_s(d.get("device_type")) or u"配电设备"
+            room = _pwr_s(d.get("nearby_room"))
+            out.append(_pwr_node("pwr:D:%s:%d" % (_pwr_safe(bc), i), "power_item",
+                                 u"%s%s" % (dt, u"（%s）" % room if room else u""), 0, False,
+                                 floor=floor, building=_pwr_s(d.get("building")),
+                                 box_code="", upstream=floor,
+                                 device_code=_pwr_s(d.get("device_code")),
+                                 in_ledger=_pwr_s(d.get("in_ledger"))))
+            if len(out) >= _PWR_DETAIL_CAP:
+                return out
+    return out
 
 
 def _pwr_table_nodes(db: Session, subsystem_code: str) -> List[Dict[str, Any]]:
