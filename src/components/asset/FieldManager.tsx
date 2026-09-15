@@ -44,12 +44,21 @@ export default function FieldManager({ tableId, fields, fillRates, onChanged }: 
     options: '',
     is_required: false,
     is_relation_key: false,
+    is_search_key: false,
   })
   const [saving, setSaving] = useState(false)
 
   const openAdd = () => {
     setEditing(null)
-    setForm({ key: '', label: '', type: 'text', options: '', is_required: false, is_relation_key: false })
+    setForm({
+      key: '',
+      label: '',
+      type: 'text',
+      options: '',
+      is_required: false,
+      is_relation_key: false,
+      is_search_key: false,
+    })
     setOpen(true)
   }
   const openEdit = (f: FieldDef) => {
@@ -61,6 +70,7 @@ export default function FieldManager({ tableId, fields, fillRates, onChanged }: 
       options: (f.options || []).join(','),
       is_required: f.is_required,
       is_relation_key: f.is_relation_key,
+      is_search_key: !!f.is_search_key,
     })
     setOpen(true)
   }
@@ -83,6 +93,7 @@ export default function FieldManager({ tableId, fields, fillRates, onChanged }: 
             : [],
         is_required: form.is_required,
         is_relation_key: form.is_relation_key,
+        is_search_key: form.is_search_key,
       }
       if (editing) await assetApi.updateField(tableId, editing.id, payload)
       else await assetApi.createField(tableId, payload)
@@ -256,6 +267,19 @@ export default function FieldManager({ tableId, fields, fillRates, onChanged }: 
                   }
                 />
                 作为关联键（设备编号）
+              </label>
+              <label
+                className="flex items-center gap-2 text-sm"
+                title="标记后，该字段取值会作为钥匙到其他表检索（一对多/多对多均可），不影响记录挂载与台账统计"
+              >
+                <input
+                  type="checkbox"
+                  checked={form.is_search_key}
+                  onChange={(e) =>
+                    setForm((s) => ({ ...s, is_search_key: e.target.checked }))
+                  }
+                />
+                作为跨表检索钥匙
               </label>
             </div>
           </div>

@@ -119,6 +119,11 @@ class FieldDef(Base):
     options = Column(JSON, default=list)      # select 的可选项列表
     is_required = Column(Boolean, default=False)
     is_relation_key = Column(Boolean, default=False)  # 关联键：值为 device_code，记录据此挂载到设备
+    # 跨表检索钥匙（2026-09-15 新增）：该字段取值可到其他表做关联检索。
+    # 与 is_relation_key 刻意解耦 —— 后者决定「记录属于哪台设备」（一张表只能一个，
+    # 且导入时其值会写成 records.device_code）；前者只影响 /link/crossrefs 的检索范围，
+    # 一张表可有多个，不参与 device_code 写入，也不影响台账 total。
+    is_search_key = Column(Boolean, default=False)
     sort_order = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))

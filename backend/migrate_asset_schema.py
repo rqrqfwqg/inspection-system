@@ -38,6 +38,14 @@ IMPORT_BATCH_NEW_COLUMNS = {
     "file_count": "INTEGER",
 }
 
+# field_defs 需补齐的列（2026-09-15 跨表检索钥匙）：
+# `is_search_key` 与 `is_relation_key` 刻意区分 —— 后者决定记录归属哪台设备
+# （一张表一个，导入时其值写成 records.device_code）；前者只扩大 /link/crossrefs
+# 的检索范围，一张表可有多个，绝不参与 device_code 写入。
+FIELD_DEFS_NEW_COLUMNS = {
+    "is_search_key": "BOOLEAN DEFAULT 0",
+}
+
 # 新增表（由模型元数据批量创建）
 NEW_TABLES = [
     "ba_system_map",
@@ -100,6 +108,32 @@ def migrate_import_batches():
         print("[迁移] import_batches 列已齐备，无需 ALTER。")
 
 
+def migrate_field_defs():
+    """为 field_defs 补 is_search_key 列（幂等）。
+
+    SQLite ALTER ADD COLUMN 对已有行填 DEFAULT 值；为防万一（旧版 SQLite /
+    手工建列留下的 NULL），再补一次 UPDATE 置 0。
+    """
+    inspector = inspect(engine)
+    if not inspector.has_table("field_defs"):
+        print("[迁移] field_defs 表不存在，跳过。")
+        return
+    existing = {c["name"] for c in inspector.get_columns("field_defs")}
+    added = []
+    with engine.begin() as conn:
+        for col, col_type in FIELD_DEFS_NEW_COLUMNS.items():
+            if col in existing:
+                continue
+            conn.execute(text(f"ALTER TABLE field_defs ADD COLUMN {col} {col_type}"))
+            added.append(col)
+        if not existing or added:
+            conn.execute(text("UPDATE field_defs SET is_search_key = 0 WHERE is_search_key IS NULL"))
+    if added:
+        print(f"[迁移] field_defs 已新增列：{', '.join(added)}")
+    else:
+        print("[迁移] field_defs 的 is_search_key 列已存在，无需 ALTER。")
+
+
 def create_new_tables():
     """通过元数据创建新增表（幂等；已存在的表会被跳过）。"""
     Base.metadata.create_all(bind=engine)
@@ -156,6 +190,7 @@ def main():
     backup_db()
     migrate_devices()
     migrate_import_batches()
+    migrate_field_defs()
     create_new_tables()
     migrate_device_serial_observations()
     print("=" * 60)

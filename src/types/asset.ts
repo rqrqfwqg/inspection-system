@@ -89,6 +89,8 @@ export interface FieldDef {
   options: string[]
   is_required: boolean
   is_relation_key: boolean
+  /** 跨表检索钥匙：该字段取值可到其他表做关联检索（与 is_relation_key 解耦） */
+  is_search_key?: boolean
   sort_order: number
 }
 
@@ -100,6 +102,8 @@ export interface FieldPayload {
   options?: string[]
   is_required?: boolean
   is_relation_key?: boolean
+  /** 跨表检索钥匙：该字段取值可到其他表做关联检索 */
+  is_search_key?: boolean
   sort_order?: number
 }
 export type FieldUpdatePayload = Partial<FieldPayload>

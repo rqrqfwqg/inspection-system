@@ -108,6 +108,8 @@ class FieldDefBase(BaseModel):
     options: List[str] = []
     is_required: bool = False
     is_relation_key: bool = False
+    # 跨表检索钥匙：取值可到其他启用表做关联检索（与 is_relation_key 解耦，见 database.FieldDef）
+    is_search_key: bool = False
     sort_order: int = 0
 
 class FieldDefCreate(FieldDefBase):
@@ -121,6 +123,7 @@ class FieldDefUpdate(BaseModel):
     options: Optional[List[str]] = None
     is_required: Optional[bool] = None
     is_relation_key: Optional[bool] = None
+    is_search_key: Optional[bool] = None
     sort_order: Optional[int] = None
 
 class FieldDefResponse(FieldDefBase):

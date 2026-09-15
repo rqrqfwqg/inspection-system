@@ -1042,6 +1042,7 @@ def link_table(tid: int, db: Session = Depends(get_db), _: User = Depends(_get_c
                 "type": f.type,
                 "is_required": bool(f.is_required),
                 "is_relation_key": bool(f.is_relation_key),
+                "is_search_key": bool(getattr(f, "is_search_key", False)),
                 "filled": filled.get(f.key, 0),
                 "fill_rate": _pct(filled.get(f.key, 0), total),
             }
@@ -1056,22 +1057,36 @@ def link_table(tid: int, db: Session = Depends(get_db), _: User = Depends(_get_c
 # 跨表字段关联（cross-table drill-through，2026-09-15 用户提出）
 # =====================================================================
 # 场景：在一张资料表选中某条记录，拿它的编号字段值（device_code + 各 *_code /
-# is_relation_key 字段）到其他启用资料表里搜索：哪张表命中、命中哪个字段、
-# 具体是哪个编号值命中几条 —— 前端「关联」弹窗据此一键跳转。
+# is_relation_key / is_search_key 字段）到其他启用资料表里搜索：哪张表命中、
+# 命中哪个字段、具体是哪个编号值命中几条 —— 前端「关联」弹窗据此一键跳转。
 # 纯只读，不写库；VALUES 经 json_each 展开做等值匹配（兼容目标字段为数组的情况）。
 
 _CROSSREF_MIN_LEN = 2          # 钥匙值最短长度（过滤空串/单字符脏值）
 _CROSSREF_VALUE_LIMIT = 5      # 每个命中字段回显的编号样例上限
 
 
+def _is_crossref_key(f) -> bool:
+    """字段是否可作跨表钥匙。
+
+    三选一即可：显式声明的 is_search_key（推荐，受控可审计）/
+    is_relation_key（该表主编号）/ key 以 _code 结尾。
+    注意：**不**反过来把 is_search_key 当成 is_relation_key —— 后者会被导入逻辑
+    写成 records.device_code，一张表只能有一个。
+    """
+    return bool(getattr(f, "is_search_key", False)) or bool(f.is_relation_key) \
+        or f.key == "device_code" or f.key.endswith("_code")
+
+
 def _codeish_keys(fields) -> List[Tuple[str, str]]:
-    """可作跨表钥匙的字段 (key, label)：is_relation_key 或 key 以 _code 结尾。"""
+    """可作跨表钥匙的字段 (key, label)：is_search_key / is_relation_key / *_code。"""
     out, seen = [], set()
-    ordered = sorted(fields, key=lambda x: (0 if x.is_relation_key else 1, x.sort_order or 0))
+    ordered = sorted(fields, key=lambda x: (
+        0 if getattr(x, "is_search_key", False) else (1 if x.is_relation_key else 2),
+        x.sort_order or 0))
     for f in ordered:
         if f.key in seen:
             continue
-        if f.is_relation_key or f.key == "device_code" or f.key.endswith("_code"):
+        if _is_crossref_key(f):
             seen.add(f.key)
             out.append((f.key, f.label))
     return out

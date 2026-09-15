@@ -139,6 +139,7 @@ export interface LinkFieldStat {
   type: string
   is_required: boolean
   is_relation_key: boolean
+  is_search_key?: boolean
   filled: number
   fill_rate: number
 }
