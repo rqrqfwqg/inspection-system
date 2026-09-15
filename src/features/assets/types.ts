@@ -10,8 +10,10 @@ export interface Subsystem {
   [key: string]: unknown
 }
 
-/** 区域树节点（GET /trees/area） */
-export type AreaNodeType = 'building' | 'floor' | 'room' | 'device'
+/** 区域树节点（GET /trees/area）
+ * 层级：building → floor → room_type（同类型房间分组）→ room → device；
+ * group_by_type=false 时不返回 room_type 层。 */
+export type AreaNodeType = 'building' | 'floor' | 'room_type' | 'room' | 'device'
 export interface AreaNode {
   key: string
   type: AreaNodeType
@@ -25,6 +27,7 @@ export interface AreaNode {
     room_count?: number
     room_code?: string
     room_name?: string
+    /** 房间类型（room_type 组节点的分组键；room 节点亦带） */
     room_type?: string
     /** 该机房的「本体台账」记录编号（机房信息汇总表，device_code 即房间号） */
     self_record?: string | null

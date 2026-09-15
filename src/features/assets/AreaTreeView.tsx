@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Building2, ChevronDown, ChevronRight, Cpu, DoorOpen, Layers } from 'lucide-react'
+import { Building2, ChevronDown, ChevronRight, Cpu, DoorOpen, FolderTree, Layers } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 import { getAreaTree } from './api'
@@ -8,10 +8,12 @@ import type { AreaNode } from './types'
 interface Props {
   keyword?: string
   onlyWithDevices?: boolean
+  /** 楼层下是否插入「同类型房间分组」一层（默认开启） */
+  groupByType?: boolean
   building?: string
   selectedKey: string | null
   refreshToken?: number
-  /** 选中房间/楼层：回调该范围内设备 */
+  /** 选中楼层 / 类型组 / 机房：回调该范围内设备 */
   onSelectRange: (node: AreaNode, devices: AreaNode[]) => void
   onSelectOther: (node: AreaNode) => void
   onOpenDevice: (code: string) => void
@@ -21,6 +23,7 @@ interface Props {
 function NodeIcon({ type }: { type: AreaNode['type'] }) {
   if (type === 'device') return <Cpu className="w-4 h-4 text-blue-500 shrink-0" />
   if (type === 'room') return <DoorOpen className="w-4 h-4 text-amber-500 shrink-0" />
+  if (type === 'room_type') return <FolderTree className="w-4 h-4 text-emerald-600 shrink-0" />
   if (type === 'building') return <Building2 className="w-4 h-4 text-indigo-500 shrink-0" />
   return <Layers className="w-4 h-4 text-gray-500 shrink-0" />
 }
@@ -44,6 +47,7 @@ function NodeLabel({ node }: { node: AreaNode }) {
 export default function AreaTreeView({
   keyword,
   onlyWithDevices,
+  groupByType,
   building,
   selectedKey,
   refreshToken,
@@ -63,7 +67,7 @@ export default function AreaTreeView({
     setRootLoading(true)
     setChildrenMap({})
     setExpanded(new Set())
-    getAreaTree(undefined, { keyword, onlyWithDevices, building })
+    getAreaTree(undefined, { keyword, onlyWithDevices, building, groupByType })
       .then((data) => {
         if (!cancelled) setRoots(data)
       })
@@ -76,15 +80,15 @@ export default function AreaTreeView({
     return () => {
       cancelled = true
     }
-  }, [keyword, onlyWithDevices, building, refreshToken, onError])
+  }, [keyword, onlyWithDevices, groupByType, building, refreshToken, onError])
 
   const loadChildren = React.useCallback(
     async (node: AreaNode): Promise<AreaNode[]> => {
-      const kids = await getAreaTree(node.key, { keyword, onlyWithDevices })
+      const kids = await getAreaTree(node.key, { keyword, onlyWithDevices, groupByType })
       setChildrenMap((prev) => ({ ...prev, [node.key]: kids }))
       return kids
     },
-    [keyword, onlyWithDevices]
+    [keyword, onlyWithDevices, groupByType]
   )
 
   const toggle = React.useCallback(
@@ -114,18 +118,23 @@ export default function AreaTreeView({
     [expanded, childrenMap, loadingKeys, loadChildren, onError]
   )
 
-  /** 楼层范围：并行下钻其所有房间，聚合设备（单间失败不影响其余） */
-  const collectFloorDevices = React.useCallback(
-    async (floorNode: AreaNode): Promise<AreaNode[]> => {
-      const rooms = childrenMap[floorNode.key] ?? (await loadChildren(floorNode))
-      const results = await Promise.allSettled(
-        rooms.filter((r) => r.type === 'room').map((r) => loadChildren(r))
-      )
-      const out: AreaNode[] = []
-      results.forEach((res) => {
-        if (res.status === 'fulfilled') out.push(...res.value.filter((k) => k.type === 'device'))
-      })
-      return out
+  /** 范围聚合：自该节点向下逐级展开（楼层 → 类型组 → 机房），收集其下全部设备。
+   *  分支并行、单支失败不影响其余（allSettled），避免一间机房异常拖垮整层。 */
+  const collectRangeDevices = React.useCallback(
+    async (node: AreaNode): Promise<AreaNode[]> => {
+      const walk = async (n: AreaNode): Promise<AreaNode[]> => {
+        const kids = childrenMap[n.key] ?? (await loadChildren(n))
+        const direct = kids.filter((k) => k.type === 'device')
+        const branches = kids.filter((k) => k.type !== 'device' && k.has_children)
+        if (branches.length === 0) return direct
+        const settled = await Promise.allSettled(branches.map((b) => walk(b)))
+        const out: AreaNode[] = [...direct]
+        settled.forEach((res) => {
+          if (res.status === 'fulfilled') out.push(...res.value)
+        })
+        return out
+      }
+      return walk(node)
     },
     [childrenMap, loadChildren]
   )
@@ -145,15 +154,15 @@ export default function AreaTreeView({
         } catch (e) {
           onError?.(e instanceof Error ? e.message : '加载机房设备失败')
         }
-      } else if (node.type === 'floor') {
+      } else if (node.type === 'floor' || node.type === 'room_type') {
         try {
-          onSelectRange(node, await collectFloorDevices(node))
+          onSelectRange(node, await collectRangeDevices(node))
         } catch (e) {
-          onError?.(e instanceof Error ? e.message : '加载楼层设备失败')
+          onError?.(e instanceof Error ? e.message : '加载范围内设备失败')
         }
       }
     },
-    [childrenMap, loadChildren, collectFloorDevices, onOpenDevice, onSelectOther, onSelectRange, toggle, onError]
+    [childrenMap, loadChildren, collectRangeDevices, onOpenDevice, onSelectOther, onSelectRange, toggle, onError]
   )
 
   const renderNode = (node: AreaNode, depth: number): React.ReactNode => {
@@ -197,7 +206,9 @@ export default function AreaTreeView({
           ) : null}
           {node.count != null && node.type !== 'device' && (
             <Badge variant="outline" className="text-xs shrink-0">
-              {node.count}
+              {node.type === 'room_type'
+                ? `${Number(node.meta?.room_count ?? 0)} 间 · ${node.count} 台`
+                : node.count}
             </Badge>
           )}
         </div>

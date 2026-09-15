@@ -1797,12 +1797,13 @@ def tree_area(
     keyword: Optional[str] = None,
     only_problems: bool = False,
     only_with_devices: bool = False,
+    group_by_type: bool = True,
     db: Session = Depends(get_db),
     _: User = Depends(_get_current_user),
 ):
-    """区域树（楼栋 → 楼层 → 房间 → 设备）懒加载。
+    """区域树（楼栋 → 楼层 → 房间类型组 → 机房 → 设备）懒加载。
 
-    节点 {key,type:building|floor|room|device,label,count,has_children,meta}。
+    节点 {key,type:building|floor|room_type|room|device,label,count,has_children,meta}；group_by_type=False 时退回四级（楼栋 → 楼层 → 机房 → 设备）。
     房间节点 label 为「空调机房（GE1F-KTJF-101）」格式；count 为**真实归属**设备数
     （device_relations「所在机房」边 + 台账房间字段 + 非 fuzzy 的 room_id 外键）。
     固定资产 fuzzy 归属不计入房间数，仅以 meta.asset_pending 提示待核实。
@@ -1914,24 +1915,57 @@ def tree_area(
             })
         return nodes
 
-    if parent.startswith("f:"):
-        _, b, f = parent.split(":", 2)
-        for r in sorted([x for x in room_rows
-                         if x.building == b and (x.floor or "未标注楼层") == f],
-                        key=lambda x: x.code):
+    def room_nodes(rows: List[Room]) -> List[Dict[str, Any]]:
+        """机房节点列表（楼层与类型组共用）；关键字命中机房名时保留其全部设备。"""
+        out: List[Dict[str, Any]] = []
+        for r in sorted(rows, key=lambda x: x.code):
             codes = room_devs(r)
             if kw and not room_matches(r) and not codes:
                 continue
             if only_with_devices and not codes:
                 continue
-            nodes.append({
+            out.append({
                 "key": f"r:{r.code}", "type": "room", "label": _room_label(r), "count": len(codes),
                 "has_children": len(codes) > 0,
                 "meta": {"room_code": r.code, "room_name": r.name, "building": r.building,
                          "floor": r.floor, "room_type": r.room_type,
                          "self_record": idx["self_records"].get(r.code)},
             })
+        return out
+
+    if parent.startswith("f:"):
+        _, b, f = parent.split(":", 2)
+        floor_rooms = [x for x in room_rows
+                       if x.building == b and (x.floor or "未标注楼层") == f]
+        if not group_by_type:
+            return room_nodes(floor_rooms)
+        # 楼层 → 房间类型组（设备机房 / 办公及储藏 / 弱电机房 / 卫生间 …）→ 机房 → 设备
+        agg_t: Dict[str, Dict[str, Any]] = {}
+        for r in floor_rooms:
+            codes = room_devs(r)
+            if kw and not room_matches(r) and not codes:
+                continue
+            t = (r.room_type or "").strip() or "未标注类型"
+            a = agg_t.setdefault(t, {"count": 0, "rooms": 0})
+            a["count"] += len(codes)
+            a["rooms"] += 1
+        # 组间排序：设备多的在前，同数按名称（让最常下钻的类型浮到顶部）
+        for t, a in sorted(agg_t.items(), key=lambda kv: (-kv[1]["count"], kv[0])):
+            if only_with_devices and a["count"] == 0:
+                continue
+            nodes.append({
+                "key": f"g:{b}:{f}:{t}", "type": "room_type", "label": t,
+                "count": a["count"], "has_children": True,
+                "meta": {"building": b, "floor": f, "room_type": t, "room_count": a["rooms"]},
+            })
         return nodes
+
+    if parent.startswith("g:"):
+        _, b, f, t = parent.split(":", 3)
+        return room_nodes([x for x in room_rows
+                           if x.building == b and (x.floor or "未标注楼层") == f
+                           and ((x.room_type or "").strip() or "未标注类型") == t])
+
 
     if parent.startswith("r:"):
         rc = parent[2:]

@@ -14,14 +14,15 @@ interface AreaTreePageProps {
 }
 
 /**
- * 区域总览：楼栋 → 楼层 → 机房（名称（房间号））→ 设备 四级下钻，
- * 右侧为所选范围内设备清单。
+ * 区域总览：楼栋 → 楼层 → 房间类型组 → 机房（名称（房间号））→ 设备 逐级下钻，
+ * 右侧为所选范围内设备清单。类型组可用「按房间类型分组」开关退回四级。
  */
 export function AreaTreePage({ onOpenDevice }: AreaTreePageProps) {
   const { toast } = useToast()
   const [input, setInput] = React.useState('')
   const [keyword, setKeyword] = React.useState('')
   const [onlyWithDevices, setOnlyWithDevices] = React.useState(false)
+  const [groupByType, setGroupByType] = React.useState(true)
   const [refreshToken, setRefreshToken] = React.useState(0)
 
   const [selectedKey, setSelectedKey] = React.useState<string | null>(null)
@@ -42,11 +43,17 @@ export function AreaTreePage({ onOpenDevice }: AreaTreePageProps) {
 
   const handleSelectRange = React.useCallback((node: AreaNode, devices: AreaNode[]) => {
     setSelectedKey(node.key)
-    setRangeTitle(node.label)
+    setRangeTitle(
+      node.type === 'room_type'
+        ? `${String(node.meta?.building ?? '')} ${String(node.meta?.floor ?? '')} · ${node.label}`.trim()
+        : node.label
+    )
     setRangeDevices(devices)
     if (node.type === 'room') {
       const self = node.meta?.self_record
       setRangeNote(self ? `机房本体档案：${self}` : '')
+    } else if (node.type === 'room_type') {
+      setRangeNote(`${Number(node.meta?.room_count ?? 0)} 间 ${node.label}`)
     } else {
       const rooms = new Set(devices.map((d) => String(d.meta?.room_code ?? '')))
       setRangeNote(`覆盖 ${rooms.size} 间机房`)
@@ -70,6 +77,7 @@ export function AreaTreePage({ onOpenDevice }: AreaTreePageProps) {
     setInput('')
     setKeyword('')
     setOnlyWithDevices(false)
+    setGroupByType(true)
     setSelectedKey(null)
     setRangeTitle('')
     setRangeDevices([])
@@ -89,6 +97,14 @@ export function AreaTreePage({ onOpenDevice }: AreaTreePageProps) {
               className="pl-9"
             />
           </div>
+          <Button
+            variant={groupByType ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => setGroupByType((v) => !v)}
+            title="同类型房间合成一组（楼栋 → 楼层 → 类型 → 机房 → 设备）"
+          >
+            按房间类型分组
+          </Button>
           <Button
             variant={onlyWithDevices ? 'default' : 'outline'}
             size="sm"
@@ -111,13 +127,14 @@ export function AreaTreePage({ onOpenDevice }: AreaTreePageProps) {
           <CardHeader className="py-3">
             <CardTitle className="text-base flex items-center gap-2">
               <MapPin className="w-4 h-4" />
-              区域树（楼栋 → 楼层 → 机房 → 设备）
+              区域树（楼栋 → 楼层 → {groupByType ? '类型 → ' : ''}机房 → 设备）
             </CardTitle>
           </CardHeader>
           <CardContent>
             <AreaTreeView
               keyword={keyword}
               onlyWithDevices={onlyWithDevices}
+              groupByType={groupByType}
               selectedKey={selectedKey}
               refreshToken={refreshToken}
               onSelectRange={handleSelectRange}
@@ -138,7 +155,7 @@ export function AreaTreePage({ onOpenDevice }: AreaTreePageProps) {
           <CardContent>
             {!rangeTitle ? (
               <p className="text-sm text-gray-400 py-8 text-center">
-                点选左侧楼栋 / 楼层 / 机房以查看其范围内设备
+                点选左侧楼栋 / 楼层 / 类型组 / 机房以查看其范围内设备
               </p>
             ) : (
               <div className="space-y-2">

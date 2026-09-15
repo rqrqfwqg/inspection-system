@@ -26,20 +26,27 @@ export async function getSubsystems(): Promise<Subsystem[]> {
   return api.get<Subsystem[]>(`${BASE}/subsystems`)
 }
 
-/** GET /trees/area?parent= —— 区域树逐级下钻（楼栋→楼层→房间→设备）
+/** GET /trees/area?parent= —— 区域树逐级下钻（楼栋→楼层→房间类型组→机房→设备）
  *
  * 房间节点 label 为「空调机房（GE1F-KTJF-101）」格式；count 为真实归属设备数
  * （relations 所在机房边 + 台账房间字段 + 非 fuzzy 的 room_id）。
  */
 export async function getAreaTree(
   parent?: string,
-  opts: { keyword?: string; onlyWithDevices?: boolean; building?: string } = {}
+  opts: {
+    keyword?: string
+    onlyWithDevices?: boolean
+    building?: string
+    /** 楼层下是否插入「同类型房间分组」一层（后端默认 true，仅在关闭时下发） */
+    groupByType?: boolean
+  } = {}
 ): Promise<AreaNode[]> {
   const p = new URLSearchParams()
   if (parent) p.set('parent', parent)
   if (opts.keyword) p.set('keyword', opts.keyword)
   if (opts.onlyWithDevices) p.set('only_with_devices', 'true')
   if (opts.building) p.set('building', opts.building)
+  if (opts.groupByType === false) p.set('group_by_type', 'false')
   const q = p.toString()
   return api.get<AreaNode[]>(`${BASE}/trees/area${q ? `?${q}` : ''}`)
 }
