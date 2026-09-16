@@ -697,7 +697,7 @@ def import_rooms_wb(db: Session, wb: "openpyxl.Workbook", imported_by: str,
         room = db.query(Room).filter(Room.code == code).first()
         if not room:
             room = Room(code=code, building=building, floor=floor, name=name,
-                        room_type="高频", is_active=True, shift="morning")
+                        room_type="设备机房", is_active=True, shift="morning")
             db.add(room)
         cnt += 1
     batch.row_count = cnt

@@ -52,7 +52,7 @@ class RoomBase(BaseModel):
     floor: str
     name: str
     code: str               # 唯一编号
-    room_type: str          # 高频 / 低频
+    room_type: str          # 设备机房 / 办公及储藏 / 弱电机房 / 卫生间
     shift: str = "morning"  # morning / evening / both
     is_active: bool = True
 

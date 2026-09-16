@@ -48,7 +48,7 @@ class Room(Base):
     floor = Column(String, nullable=False)       # 楼层：负二楼 / 1F 等
     name = Column(String, nullable=False)        # 机房名称
     code = Column(String, unique=True, nullable=False, index=True)  # 机房编号（唯一）
-    room_type = Column(String, nullable=False)   # 类型：高频 / 低频
+    room_type = Column(String, nullable=False)   # 类型：设备机房 / 办公及储藏 / 弱电机房 / 卫生间
     shift = Column(String, default="morning")    # 默认班次：morning / evening / both
     is_active = Column(Boolean, default=True)    # 是否启用
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
