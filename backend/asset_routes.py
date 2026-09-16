@@ -438,6 +438,41 @@ def delete_table(tid: int, db: Session = Depends(get_db), _: User = Depends(_req
 def list_fields(tid: int, db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
     return db.query(FieldDef).filter(FieldDef.table_id == tid).order_by(FieldDef.sort_order, FieldDef.id).all()
 
+# ---- 关联键「真正生效」：改键即重算 device_code + 一表一关联键 ----
+def _recompute_device_codes(db: Session, tid: int) -> int:
+    """按该表当前的「关联键字段」重算所有记录的 device_code（改关联键后调用）。
+
+    规则：取 `records.data[关联键字段.key]` 的非空值作为 device_code；
+    空值/缺失**保持原值不动**（宁可留旧值，也不把记录归属抹掉）。返回实际改动条数。
+    """
+    rel = (db.query(FieldDef)
+             .filter(FieldDef.table_id == tid, FieldDef.is_relation_key == True)
+             .order_by(FieldDef.id).first())
+    if not rel:
+        return 0
+    changed = 0
+    for rec in db.query(Record).filter(Record.table_id == tid).all():
+        d = rec.data if isinstance(rec.data, dict) else {}
+        v = d.get(rel.key)
+        if v in (None, ""):
+            v = d.get(rel.label)          # 兼容早期按 label 存键的数据
+        if v is None:
+            continue
+        code = str(v).strip()
+        if not code or code == rec.device_code:
+            continue
+        rec.device_code = code
+        changed += 1
+    return changed
+
+
+def _enforce_single_relation_key(db: Session, tid: int, keep_fid: int) -> None:
+    """一表一个关联键：清掉同表其它字段的 is_relation_key。"""
+    (db.query(FieldDef)
+       .filter(FieldDef.table_id == tid, FieldDef.id != keep_fid, FieldDef.is_relation_key == True)
+       .update({FieldDef.is_relation_key: False}, synchronize_session=False))
+
+
 @router.post("/tables/{tid}/fields", response_model=FieldDefResponse)
 def create_field(tid: int, data: FieldDefCreate, db: Session = Depends(get_db), _: User = Depends(_require_admin)):
     if not db.query(DataTable).filter(DataTable.id == tid).first():
@@ -445,7 +480,11 @@ def create_field(tid: int, data: FieldDefCreate, db: Session = Depends(get_db), 
     if db.query(FieldDef).filter(FieldDef.table_id == tid, FieldDef.key == data.key).first():
         raise HTTPException(status_code=400, detail=f"字段 {data.key} 已存在")
     obj = FieldDef(**data.model_dump())
-    db.add(obj); db.commit(); db.refresh(obj)
+    db.add(obj); db.flush()
+    if obj.is_relation_key:
+        _enforce_single_relation_key(db, tid, obj.id)
+        _recompute_device_codes(db, tid)
+    db.commit(); db.refresh(obj)
     return obj
 
 @router.put("/tables/{tid}/fields/{fid}", response_model=FieldDefResponse)
@@ -453,9 +492,15 @@ def update_field(tid: int, fid: int, data: FieldDefUpdate, db: Session = Depends
     obj = db.query(FieldDef).filter(FieldDef.id == fid, FieldDef.table_id == tid).first()
     if not obj:
         raise HTTPException(status_code=404, detail="字段不存在")
-    for k, v in data.model_dump(exclude_unset=True).items():
+    payload = data.model_dump(exclude_unset=True)
+    for k, v in payload.items():
         setattr(obj, k, v)
     obj.updated_at = datetime.now(timezone.utc)
+    # 关联键真正生效：设为关联键 → 清同表其它关联键 + 按新键重算已有记录 device_code
+    if payload.get("is_relation_key") is True:
+        _enforce_single_relation_key(db, tid, obj.id)
+        db.flush()
+        _recompute_device_codes(db, tid)
     db.commit(); db.refresh(obj)
     return obj
 

@@ -7,6 +7,7 @@ import RecordEditDialog from '@/components/asset/RecordEditDialog'
 import RecordTransferDialog from '@/components/asset/RecordTransferDialog'
 import CrossRefDialog from '@/components/asset/CrossRefDialog'
 import GlobalSearchDialog from '@/components/asset/GlobalSearchDialog'
+import TableKeyDialog from '@/components/asset/TableKeyDialog'
 import type { TransferResult } from '@/types/asset'
 import { getLinkOverview, getLinkTable } from '@/features/assets/api'
 import type { LinkOverview, LinkTableDetail } from '@/features/assets/types'
@@ -39,6 +40,7 @@ import {
   CheckCircle2,
   ExternalLink,
   Globe2,
+  KeyRound,
 } from 'lucide-react'
 
 /**
@@ -84,6 +86,10 @@ export default function AssetLedgerPage() {
   const pendingRowQRef = useRef<string | null>(null)
   // 全局资料表搜索弹窗（对每一张启用表都搜一遍）
   const [gSearchOpen, setGSearchOpen] = useState(false)
+  // 关键键编辑弹窗（数据表卡片 / 单表页头均可直接打开）
+  const [keyDialogTable, setKeyDialogTable] = useState<DataTable | null>(null)
+  // 目录刷新触发器：改完关键键后刷新卡片上的「关联键：XXX」与覆盖率
+  const [catalogTick, setCatalogTick] = useState(0)
 
   // 联动画像（与「资产可视化」同源）：卡片列表看覆盖率，单表看未解析 TOP
   const [linkOverview, setLinkOverview] = useState<LinkOverview | null>(null)
@@ -126,7 +132,7 @@ export default function AssetLedgerPage() {
     return () => {
       cancelled = true
     }
-  }, [toast])
+  }, [toast, catalogTick])
 
   const filteredTables = useMemo(() => {
     let list = tables
@@ -177,6 +183,20 @@ export default function AssetLedgerPage() {
   }
 
   const backToCatalog = () => navigate('/asset/ledger')
+
+  /** 关键键保存成功：刷新表目录（卡片标签）+ 当前表的字段/记录 + 联动画像 */
+  const handleKeySaved = () => {
+    setCatalogTick((t) => t + 1)
+    getLinkOverview().then(setLinkOverview).catch(() => {})
+    if (tableId) {
+      void loadRecords(tableId)
+      getLinkTable(tableId).then(setLinkDetail).catch(() => {})
+    }
+    toast({
+      title: '关键键已更新',
+      description: '关联键改动已按新字段重算相关记录的 device_code',
+    })
+  }
 
   /* 路由参数变化 → 加载/清空单表数据：后退自然回概览、刷新与分享可复现同一张表 */
   useEffect(() => {
@@ -348,7 +368,20 @@ export default function AssetLedgerPage() {
                       <Table2 className="w-4 h-4 text-blue-600 shrink-0" />
                       <span className="truncate">{t.name}</span>
                     </CardTitle>
-                    {t.subsystem_name && <Badge variant="secondary">{t.subsystem_name}</Badge>}
+                    <div className="flex items-center gap-1 shrink-0">
+                      {t.subsystem_name && <Badge variant="secondary">{t.subsystem_name}</Badge>}
+                      <button
+                        type="button"
+                        title="设置关键键（关联键 / 跨表检索键）"
+                        className="p-1 rounded text-gray-400 hover:text-blue-600 hover:bg-blue-50 transition"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setKeyDialogTable(t)
+                        }}
+                      >
+                        <KeyRound className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
                   <p className="text-[11px] text-gray-400 font-mono truncate">{t.code}</p>
                 </CardHeader>
@@ -370,11 +403,21 @@ export default function AssetLedgerPage() {
                   {(() => {
                     const lk = linkOverview?.tables.find((x) => x.table_id === t.id)
                     if (!lk) {
-                      return t.relation_key_label ? (
+                      return (
                         <p className="text-[11px] text-gray-400 mt-2 truncate">
-                          关联键：{t.relation_key_label}
+                          关联键：
+                          <button
+                            type="button"
+                            className="text-blue-600 hover:underline"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setKeyDialogTable(t)
+                            }}
+                          >
+                            {t.relation_key_label || '未设置（点击设置）'}
+                          </button>
                         </p>
-                      ) : null
+                      )
                     }
                     const p = Math.round((lk.coverage || 0) * 100)
                     const tone = p >= 95 ? 'bg-green-500' : p >= 60 ? 'bg-cyan-500' : p > 0 ? 'bg-amber-500' : 'bg-gray-300'
@@ -392,9 +435,17 @@ export default function AssetLedgerPage() {
                           {lk.unresolved > 0 && (
                             <span className="text-amber-700">未命中 {lk.unresolved}</span>
                           )}
-                          <span className="text-gray-400 ml-auto">
+                          <button
+                            type="button"
+                            className="text-gray-400 ml-auto hover:text-blue-600 hover:underline"
+                            title="点击修改关键键"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setKeyDialogTable(t)
+                            }}
+                          >
                             {t.relation_key_label ? `关联键：${t.relation_key_label}` : '无关联键'}
-                          </span>
+                          </button>
                         </div>
                       </div>
                     )
@@ -404,6 +455,14 @@ export default function AssetLedgerPage() {
             ))}
           </div>
         )}
+
+      <TableKeyDialog
+        open={!!keyDialogTable}
+        onOpenChange={(o) => { if (!o) setKeyDialogTable(null) }}
+        tableId={keyDialogTable?.id ?? 0}
+        tableName={keyDialogTable?.name}
+        onSaved={handleKeySaved}
+      />
       </div>
     )
   }
@@ -434,7 +493,16 @@ export default function AssetLedgerPage() {
               {activeTable?.subsystem_name && <Badge variant="secondary">{activeTable.subsystem_name}</Badge>}
             </h1>
             <p className="text-xs text-gray-400 mt-0.5">
-              关联键：{relationField?.label || '—'} · 字段 {fields.length} 个
+              关联键：
+              <button
+                type="button"
+                className="text-blue-600 hover:underline"
+                title="点击修改关键键"
+                onClick={() => activeTable && setKeyDialogTable(activeTable)}
+              >
+                {relationField?.label || '未设置'}
+              </button>
+              {' · '}字段 {fields.length} 个
               {activeTable?.code ? ` · ${activeTable.code}` : ''}
             </p>
           </div>
@@ -569,6 +637,14 @@ export default function AssetLedgerPage() {
         tableId={Number(tableId)}
         record={crossRecord}
         onJump={handleCrossJump}
+      />
+
+      <TableKeyDialog
+        open={!!keyDialogTable}
+        onOpenChange={(o) => { if (!o) setKeyDialogTable(null) }}
+        tableId={keyDialogTable?.id ?? 0}
+        tableName={keyDialogTable?.name}
+        onSaved={handleKeySaved}
       />
     </div>
   )
