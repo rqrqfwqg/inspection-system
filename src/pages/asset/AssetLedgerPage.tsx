@@ -6,6 +6,7 @@ import DynamicRecordTable from '@/components/asset/DynamicRecordTable'
 import RecordEditDialog from '@/components/asset/RecordEditDialog'
 import RecordTransferDialog from '@/components/asset/RecordTransferDialog'
 import CrossRefDialog from '@/components/asset/CrossRefDialog'
+import GlobalSearchDialog from '@/components/asset/GlobalSearchDialog'
 import type { TransferResult } from '@/types/asset'
 import { getLinkOverview, getLinkTable } from '@/features/assets/api'
 import type { LinkOverview, LinkTableDetail } from '@/features/assets/types'
@@ -37,6 +38,7 @@ import {
   Hand,
   CheckCircle2,
   ExternalLink,
+  Globe2,
 } from 'lucide-react'
 
 /**
@@ -80,6 +82,8 @@ export default function AssetLedgerPage() {
   // 跨表关联弹窗 + 跳转待应用的过滤值（跳到目标表后自动填进行级搜索框）
   const [crossRecord, setCrossRecord] = useState<RecordItem | null>(null)
   const pendingRowQRef = useRef<string | null>(null)
+  // 全局资料表搜索弹窗（对每一张启用表都搜一遍）
+  const [gSearchOpen, setGSearchOpen] = useState(false)
 
   // 联动画像（与「资产可视化」同源）：卡片列表看覆盖率，单表看未解析 TOP
   const [linkOverview, setLinkOverview] = useState<LinkOverview | null>(null)
@@ -311,7 +315,12 @@ export default function AssetLedgerPage() {
               ))}
             </SelectContent>
           </Select>
+          <Button variant="outline" size="sm" className="gap-1" onClick={() => setGSearchOpen(true)}>
+            <Globe2 className="w-4 h-4" />
+            全表搜索
+          </Button>
           <span className="text-xs text-gray-400">命中 {filteredTables.length} 张表</span>
+          <GlobalSearchDialog open={gSearchOpen} onOpenChange={setGSearchOpen} onJump={handleCrossJump} />
         </div>
 
         {catalogLoading ? (

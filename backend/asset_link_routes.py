@@ -1235,3 +1235,86 @@ def link_crossrefs(
     payload["targets"] = targets
     payload["scanned"] = scanned
     return payload
+
+
+@router.get("/global-search")
+def link_global_search(
+    q: str,
+    limit: int = 5,
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """全局资料表内容搜索：对任意关键词，遍历所有启用资料表的记录做模糊匹配。
+
+    返回每表命中数 + 命中记录样例（id / device_code / 命中字段值）。纯只读。
+    用于「数据表管理」概览页的「对每一张子表都搜一遍」入口：输入任意编号/关键词，
+    立刻知道它散落在哪些资料表、各命中几条，点表即可跳进该表并预填行内搜索框。
+    """
+    q = (q or "").strip()
+    if not q:
+        return {"query": "", "tables_hit": 0, "total_hits": 0, "results": []}
+    pat = f"%{q}%"
+    ql = q.lower()
+    subs = {s.id: s.name for s in db.query(Subsystem).all()}
+    tables = (
+        db.query(DataTable)
+        .filter(DataTable.is_active == True)
+        .order_by(DataTable.id)
+        .all()
+    )
+    results: List[Dict[str, Any]] = []
+    total_hits = 0
+    for t in tables:
+        label_map = {
+            f.key: f.label
+            for f in db.query(FieldDef).filter(FieldDef.table_id == t.id).all()
+        }
+        cnt = db.execute(
+            sa_text(
+                "SELECT COUNT(*) FROM records r "
+                "WHERE r.table_id = :tid AND (r.device_code LIKE :pat OR CAST(r.data AS TEXT) LIKE :pat)"
+            ),
+            {"tid": t.id, "pat": pat},
+        ).fetchone()[0]
+        cnt = int(cnt or 0)
+        if cnt <= 0:
+            continue
+        total_hits += cnt
+        rows = db.execute(
+            sa_text(
+                "SELECT r.id, r.device_code, r.data FROM records r "
+                "WHERE r.table_id = :tid AND (r.device_code LIKE :pat OR CAST(r.data AS TEXT) LIKE :pat) "
+                "LIMIT :lim"
+            ),
+            {"tid": t.id, "pat": pat, "lim": int(limit)},
+        ).fetchall()
+        samples = []
+        for rid, dcode, data in rows:
+            data = data if isinstance(data, dict) else {}
+            hit_fields = []
+            for k, v in (data or {}).items():
+                sv = "" if v is None else str(v)
+                if ql in sv.lower():
+                    hit_fields.append({
+                        "label": label_map.get(k, k),
+                        "value": (sv[:60] + "…") if len(sv) > 60 else sv,
+                    })
+            if not hit_fields and dcode and ql in str(dcode).lower():
+                hit_fields.append({"label": "device_code", "value": str(dcode)})
+            samples.append({"id": rid, "device_code": dcode, "fields": hit_fields})
+        results.append({
+            "table_id": t.id,
+            "code": t.code,
+            "name": t.name,
+            "subsystem_id": t.subsystem_id,
+            "subsystem_name": subs.get(t.subsystem_id) or "",
+            "hit_count": cnt,
+            "samples": samples,
+        })
+    results.sort(key=lambda x: -x["hit_count"])
+    return {
+        "query": q,
+        "tables_hit": len(results),
+        "total_hits": total_hits,
+        "results": results,
+    }

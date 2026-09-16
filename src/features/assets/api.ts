@@ -26,6 +26,7 @@ import type {
   ManualAssociateResult,
   DeviceLinkResponse,
   CrossRefResponse,
+  GlobalSearchResponse,
 } from './types'
 
 const BASE = '/assets'
@@ -49,6 +50,13 @@ export async function getLinkTable(tableId: number): Promise<LinkTableDetail> {
 export async function getCrossRefs(tableId: number, recordId: number): Promise<CrossRefResponse> {
   return api.get<CrossRefResponse>(
     `${BASE}/link/crossrefs?table_id=${tableId}&record_id=${recordId}`,
+  )
+}
+
+/** GET /link/global-search —— 全局资料表内容搜索：对任意关键词遍历所有启用资料表做模糊匹配 */
+export async function getGlobalSearch(q: string, limit = 5): Promise<GlobalSearchResponse> {
+  return api.get<GlobalSearchResponse>(
+    `${BASE}/link/global-search?q=${encodeURIComponent(q)}&limit=${limit}`,
   )
 }
 

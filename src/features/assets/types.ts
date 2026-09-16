@@ -182,6 +182,31 @@ export interface CrossRefResponse {
   scanned: number
 }
 
+/** GET /assets/link/global-search —— 全局资料表内容搜索（对每一张启用表都搜一遍任意关键词） */
+export interface GlobalSearchHit {
+  id: number
+  device_code?: string | null
+  /** 命中关键词的字段（最多前几个）：字段标签 + 截断后的值 */
+  fields: { label: string; value: string }[]
+}
+
+export interface GlobalSearchTable {
+  table_id: number
+  code: string
+  name: string
+  subsystem_id?: number | null
+  subsystem_name?: string
+  hit_count: number
+  samples: GlobalSearchHit[]
+}
+
+export interface GlobalSearchResponse {
+  query: string
+  tables_hit: number
+  total_hits: number
+  results: GlobalSearchTable[]
+}
+
 export interface LinkTableDetail {
   table: {
     table_id: number
