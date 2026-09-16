@@ -1092,8 +1092,31 @@ def _codeish_keys(fields) -> List[Tuple[str, str]]:
     return out
 
 
+def _cr_norm_sql(col_expr: str) -> str:
+    """跨表钥匙归一（SQL 侧，与 Python `_norm_key` 同口径）。
+
+    去空白 + 转大写 + 去 `[-_./]` 分隔符。把「空格 / 大小写 / 分隔符」差异视为同一编号，
+    即用户要求的「跨表关联对特殊符号做模糊处理」：
+    使 `G-1D1AL` 与 `g 1d1al`、`5SN4-1` 与 `5sn4 1`、`GE1F` 与 `ge 1f` 互相命中。
+    注意：全角→半角（NFKC）需 Python 侧完成（SQLite 无此函数），本表达式对 ASCII 范围内的
+    空格/大小写/分隔符已足够——设备/回路编号均为 ASCII 形态。
+    """
+    e = "CAST({c} AS TEXT)".format(c=col_expr)
+    e = "REPLACE({e}, ' ', '')".format(e=e)
+    for ch in "-_./":
+        e = "REPLACE({e}, '{ch}', '')".format(e=e, ch=ch)
+    e = "UPPER({e})".format(e=e)
+    return e
+
+
 def _cr_match(col_expr: str) -> str:
-    """col_expr（标量或 JSON 数组）与 :vals 数组存在等值成员的 SQLite 表达式。"""
+    """col_expr（标量或 JSON 数组）与 :vals 数组存在归一等值成员的 SQLite 表达式。
+
+    2026-09-16：两侧均过 `_cr_norm_sql` 归一（去空白 / 大写 / 去分隔符），
+    使因空格 / 大小写 / 分隔符造成的写法差异也能跨表命中（用户要求空格\\大小写模糊处理）。
+    """
+    norm_de = _cr_norm_sql("CAST(de.value AS TEXT)")
+    norm_je = _cr_norm_sql("CAST(je.value AS TEXT)")
     return (
         # 服务器 SQLite 无 json_typeof（3.45.1 Ubuntu 构建缺失，2026-09-15 实测）：
         # 数组判定改用 json_valid + 首字符是否 '['；json_valid 兜底防
@@ -1102,8 +1125,8 @@ def _cr_match(col_expr: str) -> str:
         "json_each(CASE WHEN json_valid({c}) = 1 "
         "AND substr(CAST({c} AS TEXT), 1, 1) = '[' THEN {c} "
         "ELSE json_array({c}) END) de "
-        "WHERE CAST(de.value AS TEXT) = CAST(je.value AS TEXT))"
-    ).format(c=col_expr)
+        "WHERE {norm_de} = {norm_je})"
+    ).format(c=col_expr, norm_de=norm_de, norm_je=norm_je)
 
 
 @router.get("/crossrefs")
@@ -1213,11 +1236,20 @@ def link_crossrefs(
             if n <= 0:
                 continue
             # 回显该字段命中的具体编号（本记录钥匙值的交集样例）
+            # 回显该字段命中的具体编号：返回**目标表真实存储值**（去重），
+            # 而非源钥匙——可直接看到「G-1D1AL」与「g 1d1al」这类写法差异被归一命中。
             vsql = sa_text(
-                "SELECT je.value FROM json_each(:vals) je "
-                "WHERE EXISTS (SELECT 1 FROM records r JOIN data_tables t ON t.id = r.table_id "
-                "WHERE t.id = :tid AND t.is_active = 1 AND (%(m)s)) LIMIT %(lim)d"
-                % {"m": _cr_match(c), "lim": _CROSSREF_VALUE_LIMIT})
+                "SELECT DISTINCT CAST(de.value AS TEXT) FROM records r "
+                "JOIN data_tables t ON t.id = r.table_id, "
+                "json_each(CASE WHEN json_valid({c}) = 1 "
+                "AND substr(CAST({c} AS TEXT), 1, 1) = '[' THEN {c} "
+                "ELSE json_array({c}) END) de "
+                "WHERE t.id = :tid AND t.is_active = 1 "
+                "AND {norm_de} IN (SELECT DISTINCT {norm_je} FROM json_each(:vals) je) "
+                "LIMIT {lim}".format(
+                    c=c, norm_de=_cr_norm_sql("CAST(de.value AS TEXT)"),
+                    norm_je=_cr_norm_sql("CAST(je.value AS TEXT)"),
+                    lim=_CROSSREF_VALUE_LIMIT))
             try:
                 hit_vals = [str(x[0]) for x in db.execute(
                     vsql, {"vals": vals_json, "tid": t.id}).fetchall()]
