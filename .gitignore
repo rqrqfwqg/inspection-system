@@ -78,3 +78,6 @@ scripts/_*.py
 *.bak_*
 backend/app.db*
 backend/*.err
+
+# 导出的台账缺口清单含真实资产编号，不进版本库
+scripts/*.xlsx
