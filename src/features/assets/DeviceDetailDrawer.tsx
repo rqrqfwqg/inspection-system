@@ -259,7 +259,7 @@ export function DeviceDetailDrawer({ deviceCode, open, onOpenChange, onNavigate 
               <CardContent>
                 <RelationGraph
                   centerCode={code}
-                  edges={graphEdges}
+                  edges={link?.edges && link.edges.length ? link.edges : graphEdges}
                   problems={baProblems}
                   onSelectNode={(c) => onNavigate?.(c)}
                 />

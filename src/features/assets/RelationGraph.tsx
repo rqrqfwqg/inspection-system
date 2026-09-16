@@ -1,383 +1,223 @@
 import * as React from 'react'
 
-/** 设备关联边（来自 /relations，双方向合并后的边）。 */
+/**
+ * 关联边（来自 /link/device 的 DeviceLinkEdge 或 /search 的 edges）。
+ * 只需 from_code / to_code / relation_type / source 四字段即可重建树。
+ */
 interface RawEdge {
   id?: number
   from_code?: string
   to_code?: string
+  /** DeviceLinkEdge 另有 other_code，优先用它定位对端 */
+  other_code?: string
   relation_type?: string
+  source?: 'auto' | 'manual' | string
   [key: string]: unknown
 }
 
 type RawProblem = Record<string, unknown>
 
-interface SimNode {
-  id: string
+interface TreeNode {
+  key: string
+  /** 显示编号（设备码 / 问题标识） */
+  code: string
+  /** 分支标签（关系类型 / 问题类型） */
   label: string
-  kind: 'center' | 'device' | 'problem'
-  code?: string
-  x: number
-  y: number
-  vx: number
-  vy: number
-}
-
-interface SimLink {
-  source: string
-  target: string
-  /** 关系类型（供电/所在机房/冷源…），用于标签与配色 */
-  type?: string
-  /** 边来源：auto=系统自动关联（虚线） / manual=人工建立（实线） */
-  origin?: string
-}
-
-/** 边来源 → 线型：自动关联用虚线，人工关联用实线（一眼可辨）。 */
-export function originDash(origin: string | undefined): string | undefined {
-  return origin === 'auto' ? '5 3' : undefined
-}
-
-/** 关系类型 → 配色（与后端 relation_types.kind 语义对齐：power/cooling/locate/other） */
-function kindStyle(type: string | undefined): { stroke: string; label: string } {
-  const t = type || ''
-  if (/供|配电|取电/.test(t)) return { stroke: '#f59e0b', label: '#b45309' } // 供配电 · 琥珀
-  if (/冷/.test(t)) return { stroke: '#06b6d4', label: '#0e7490' } // 冷源 · 青
-  if (/机房|所在|位置/.test(t)) return { stroke: '#94a3b8', label: '#475569' } // 位置归属 · 石板灰
-  if (/控制/.test(t)) return { stroke: '#8b5cf6', label: '#6d28d9' }
-  if (/信号/.test(t)) return { stroke: '#10b981', label: '#047857' }
-  return { stroke: '#cbd5e1', label: '#64748b' }
+  kind: 'device' | 'problem'
+  source: 'auto' | 'manual'
 }
 
 interface RelationGraphProps {
-  /** 中心设备编号 */
+  /** 中心设备编号（树根） */
   centerCode: string
-  /** 关联边（来自 /relations，双方向合并） */
+  /** 关联边（自动/人工已标注；双方向均可，组件自动定位对端） */
   edges: RawEdge[]
-  /** 该设备的 BA 问题（来自 /ba/problems?device_code=） */
+  /** 该设备的 BA 问题（来自 /ba/problems） */
   problems: RawProblem[]
-  /** 点击节点（设备 / 问题关联设备）时回调，用于在该节点上打开详情 */
+  /** 点击设备节点时回调，用于在当前抽屉内跳转到该设备 */
   onSelectNode?: (code: string) => void
 }
 
-const VIEW_W = 640
-const VIEW_H = 360
-const PAD = 36
-const REPULSION = 5200
-const SPRING = 0.025
-const SPRING_LEN = 110
-const CENTER_PULL = 0.012
-const DAMP = 0.86
+/** 边来源 → 线型与配色：自动关联=青色虚线，人工关联=石板灰实线（一眼可辨）。 */
+const AUTO_COLOR = '#06b6d4'
+const MANUAL_COLOR = '#64748b'
+function sourceStyle(source: string | undefined): { stroke: string; dash: string | undefined } {
+  return source === 'auto'
+    ? { stroke: AUTO_COLOR, dash: '6 4' }
+    : { stroke: MANUAL_COLOR, dash: undefined }
+}
+
+const ROOT_X = 168
+const LEAF_X = 548
+const VIEW_W = 724
+const PAD_TOP = 40
+const PAD_BOT = 24
+const ROW_H = 46
+const NODE_R = 13
 
 /**
- * 可交互的力导向关联图（P1 升级版）。
+ * 自左向右的树状关联图（替代原力导向星型图）。
  *
- * - 以当前设备为中心节点，关联设备（来自 /relations 双向边）与 BA 问题（来自 /ba/problems）
- *   作为环绕节点，使用轻量自实现力模拟（斥力 + 弹簧 + 向心）布局，无需引入重型 canvas 依赖，
- *   保证 vite build 稳定通过。
- * - 节点可点击：设备 / 问题关联设备点击后回调 onSelectNode，在当前抽屉内跳转到该设备。
- * - 节点可拖拽：拖拽时重新触发布局，邻居随之响应。
- * - 降级：若没有任何关联与问题，仅展示提示文案（列表视图的关联设备列表仍可用）。
+ * - 树根 = 当前设备；每个关联对象（设备 / 问题）是一片叶子，纵向均匀分布。
+ * - 分支用 S 形贝塞尔曲线，标签带白色底衬（paint-order），各分支走向独立、互不叠压 ——
+ *   彻底消除原星型图「所有边标签堆在中心」导致的重影。
+ * - 分支颜色即来源：自动=青色虚线 / 人工=石板灰实线；节点可点击跳转到对端设备。
+ * - 当关联对象很多时，SVG 按内容定高、外层容器可纵向滚动（不缩放文字，避免模糊）。
  */
 export function RelationGraph({ centerCode, edges, problems, onSelectNode }: RelationGraphProps) {
-  const svgRef = React.useRef<SVGSVGElement | null>(null)
-  const nodesRef = React.useRef<SimNode[]>([])
-  const linksRef = React.useRef<SimLink[]>([])
-  const byIdRef = React.useRef<Map<string, SimNode>>(new Map())
-  const rafRef = React.useRef<number | null>(null)
-  const runningRef = React.useRef(false)
-  const tickRef = React.useRef(0)
-  const energyRef = React.useRef(0)
-  const dragRef = React.useRef<{ id: string; moved: boolean; sx: number; sy: number } | null>(null)
-  const justDraggedRef = React.useRef(false)
   const onSelectRef = React.useRef<((code: string) => void) | undefined>(onSelectNode)
   onSelectRef.current = onSelectNode
 
-  const [, forceRender] = React.useReducer((x: number) => (x + 1) % 1_000_000, 0)
-  const [hasContent, setHasContent] = React.useState(false)
-
-  const buildGraph = React.useCallback((): { nodes: SimNode[]; links: SimLink[] } => {
-    const cx = VIEW_W / 2
-    const cy = VIEW_H / 2
-    const nodes: SimNode[] = []
-    const links: SimLink[] = []
-    const byId = new Map<string, SimNode>()
-
-    const center: SimNode = { id: '__center__', label: '中心', kind: 'center', code: centerCode, x: cx, y: cy, vx: 0, vy: 0 }
-    nodes.push(center)
-    byId.set(center.id, center)
-
-    const addDevice = (code: string) => {
-      const key = `d:${code}`
-      if (byId.has(key)) return
-      const ang = Math.random() * Math.PI * 2
-      const r = 90 + Math.random() * 70
-      const n: SimNode = {
-        id: key, label: code, kind: 'device', code,
-        x: cx + r * Math.cos(ang), y: cy + r * Math.sin(ang), vx: 0, vy: 0,
-      }
-      nodes.push(n)
-      byId.set(key, n)
-    }
-
+  const tree = React.useMemo<TreeNode[]>(() => {
+    const deviceMap = new Map<string, TreeNode>()
     for (const e of edges) {
       const f = String(e.from_code ?? '')
       const t = String(e.to_code ?? '')
       if (!f || !t) continue
-      let other: string | null = null
-      if (f === centerCode && t !== centerCode) other = t
-      else if (t === centerCode && f !== centerCode) other = f
-      else if (f !== centerCode && t !== centerCode) other = f
-      if (!other) continue
-      addDevice(other)
-      links.push({ source: center.id, target: `d:${other}`, type: e.relation_type })
-    }
-
-    problems.forEach((p, idx) => {
-      const dc = p.device_code != null ? String(p.device_code) : ''
-      const label = (p.problem_type as string) || (p.status as string) || '问题'
-      const id = `p:${idx}`
-      const targetCode = dc && dc !== centerCode ? dc : null
-      const targetId = targetCode && byId.has(`d:${targetCode}`) ? `d:${targetCode}` : center.id
-      const ang = Math.random() * Math.PI * 2
-      const r = 70 + Math.random() * 50
-      const n: SimNode = {
-        id, label, kind: 'problem', code: targetCode || undefined,
-        x: cx + r * Math.cos(ang), y: cy + r * Math.sin(ang), vx: 0, vy: 0,
+      const other = e.other_code != null ? String(e.other_code) : (f === centerCode ? t : f === t ? '' : f)
+      if (!other || other === centerCode) continue
+      const prev = deviceMap.get(other)
+      if (prev) {
+        // 同一对端有多条边：优先保留「自动」来源，关系类型合并展示
+        if ((e.source ?? 'manual') === 'auto' && prev.source !== 'auto') prev.source = 'auto'
+        if (prev.label !== (e.relation_type ?? '') && (e.relation_type ?? '')) {
+          prev.label = `${prev.label}・${e.relation_type}`
+        }
+        continue
       }
-      nodes.push(n)
-      links.push({ source: targetId, target: id })
-    })
+      deviceMap.set(other, {
+        key: `d:${other}`,
+        code: other,
+        label: String(e.relation_type ?? '关联'),
+        kind: 'device',
+        source: (e.source ?? 'manual') === 'auto' ? 'auto' : 'manual',
+      })
+    }
+    const devices = [...deviceMap.values()].sort((a, b) => a.code.localeCompare(b.code))
 
-    return { nodes, links }
+    const probs: TreeNode[] = problems.map((p, i) => ({
+      key: `p:${i}`,
+      code: p.device_code != null ? String(p.device_code) : `问题${i + 1}`,
+      label: String((p.problem_type as string) || (p.status as string) || 'BA 问题'),
+      kind: 'problem',
+      source: 'manual',
+    }))
+
+    return [...devices, ...probs]
   }, [centerCode, edges, problems])
 
-  const step = React.useCallback(() => {
-    const nodes = nodesRef.current
-    const links = linksRef.current
-    const cx = VIEW_W / 2
-    const cy = VIEW_H / 2
-    const byId = new Map<string, SimNode>()
-    for (const n of nodes) byId.set(n.id, n)
-    byIdRef.current = byId
-
-    for (const n of nodes) {
-      if (n.kind === 'center') { n.vx = 0; n.vy = 0; continue }
-      n.vx = 0; n.vy = 0
-    }
-    // 斥力
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const a = nodes[i]; const b = nodes[j]
-        let dx = a.x - b.x; let dy = a.y - b.y
-        let d2 = dx * dx + dy * dy
-        if (d2 < 1) d2 = 1
-        const dist = Math.sqrt(d2)
-        const f = REPULSION / d2
-        const ux = dx / dist; const uy = dy / dist
-        if (a.kind !== 'center') { a.vx += ux * f; a.vy += uy * f }
-        if (b.kind !== 'center') { b.vx -= ux * f; b.vy -= uy * f }
-      }
-    }
-    // 弹簧
-    for (const l of links) {
-      const a = byId.get(l.source); const b = byId.get(l.target)
-      if (!a || !b) continue
-      let dx = b.x - a.x; let dy = b.y - a.y
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1
-      const f = SPRING * (dist - SPRING_LEN)
-      const ux = dx / dist; const uy = dy / dist
-      a.vx += ux * f; a.vy += uy * f
-      b.vx -= ux * f; b.vy -= uy * f
-    }
-    // 积分
-    let energy = 0
-    for (const n of nodes) {
-      if (n.kind === 'center') { n.x = cx; n.y = cy; continue }
-      if (dragRef.current && dragRef.current.id === n.id) { n.vx = 0; n.vy = 0; continue }
-      n.vx += (cx - n.x) * CENTER_PULL
-      n.vy += (cy - n.y) * CENTER_PULL
-      n.vx *= DAMP; n.vy *= DAMP
-      n.x += n.vx; n.y += n.vy
-      n.x = Math.max(PAD, Math.min(VIEW_W - PAD, n.x))
-      n.y = Math.max(PAD, Math.min(VIEW_H - PAD, n.y))
-      energy += n.vx * n.vx + n.vy * n.vy
-    }
-    energyRef.current = energy
-  }, [])
-
-  const loop = React.useCallback(() => {
-    if (!runningRef.current) return
-    step()
-    forceRender()
-    tickRef.current += 1
-    if (tickRef.current > 600 || (tickRef.current > 40 && energyRef.current < 0.6)) {
-      runningRef.current = false
-      rafRef.current = null
-      return
-    }
-    rafRef.current = requestAnimationFrame(loop)
-  }, [step])
-
-  const startSim = React.useCallback(() => {
-    tickRef.current = 0
-    runningRef.current = true
-    if (rafRef.current == null) rafRef.current = requestAnimationFrame(loop)
-  }, [loop])
-
-  const stopSim = React.useCallback(() => {
-    runningRef.current = false
-    if (rafRef.current != null) { cancelAnimationFrame(rafRef.current); rafRef.current = null }
-  }, [])
-
-  React.useEffect(() => {
-    const { nodes, links } = buildGraph()
-    nodesRef.current = nodes
-    linksRef.current = links
-    setHasContent(nodes.length > 1 || problems.length > 0)
-    startSim()
-    return () => stopSim()
-  }, [buildGraph, problems.length, startSim, stopSim])
-
-  const toSvg = (clientX: number, clientY: number) => {
-    const rect = svgRef.current?.getBoundingClientRect()
-    if (!rect || rect.width === 0) return { x: 0, y: 0 }
-    return {
-      x: (clientX - rect.left) * (VIEW_W / rect.width),
-      y: (clientY - rect.top) * (VIEW_H / rect.height),
-    }
-  }
-
-  const onPointerDown = (e: React.PointerEvent, id: string) => {
-    e.stopPropagation()
-    dragRef.current = { id, moved: false, sx: e.clientX, sy: e.clientY }
-    ;(e.target as Element).setPointerCapture?.(e.pointerId)
-  }
-  const onPointerMove = (e: React.PointerEvent) => {
-    const d = dragRef.current
-    if (!d) return
-    if (Math.abs(e.clientX - d.sx) > 3 || Math.abs(e.clientY - d.sy) > 3) d.moved = true
-    const p = toSvg(e.clientX, e.clientY)
-    const n = byIdRef.current.get(d.id)
-    if (n) { n.x = p.x; n.y = p.y; n.vx = 0; n.vy = 0 }
-    if (!runningRef.current) startSim()
-  }
-  const onPointerUp = () => {
-    if (dragRef.current?.moved) justDraggedRef.current = true
-    dragRef.current = null
-  }
-  const onClickNode = (n: SimNode) => {
-    if (justDraggedRef.current) { justDraggedRef.current = false; return }
-    if (n.code && n.code !== centerCode && onSelectRef.current) onSelectRef.current(n.code)
-  }
-
-  const byId = byIdRef.current
-
-  // 图上出现过的关系类型 → 计数与配色（只展示真实存在的图例，不留空图例）
-  const typeCount: Record<string, number> = {}
-  for (const l of linksRef.current) {
-    const t = l.type || '关联'
-    typeCount[t] = (typeCount[t] || 0) + 1
-  }
-  const typeLegend: [string, { stroke: string; label: string }][] = Object.keys(typeCount)
-    .sort((a, b) => typeCount[b] - typeCount[a])
-    .slice(0, 6)
-    .map((t) => [t, kindStyle(t)])
+  const hasContent = tree.length > 0
 
   if (!hasContent) {
     return <p className="text-sm text-gray-500 py-8 text-center">该设备暂无可展示的关联与问题。</p>
   }
 
+  const n = tree.length
+  const VIEW_H = Math.max(260, PAD_TOP + n * ROW_H + PAD_BOT)
+  const rootY = VIEW_H / 2
+  const yOf = (i: number) => PAD_TOP + ROW_H * (i + 0.5)
+
   return (
     <div className="space-y-3">
-      <svg
-        ref={svgRef}
-        viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
-        className="w-full h-auto bg-gray-50 rounded-lg border touch-none select-none"
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerLeave={onPointerUp}
-      >
-        {linksRef.current.map((l, i) => {
-          const a = byId.get(l.source); const b = byId.get(l.target)
-          if (!a || !b) return null
-          const st = kindStyle(l.type)
-          return (
-            <g key={`e-${i}`}>
-              <line
-                x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                stroke={st.stroke}
-                strokeWidth={1.8}
-                strokeDasharray={originDash(l.origin)}
-              />
-              {l.type ? (
-                <text
-                  x={(a.x + b.x) / 2}
-                  y={(a.y + b.y) / 2 - 3}
-                  textAnchor="middle"
-                  fill={st.label}
-                  className="text-[9px] pointer-events-none"
-                >
-                  {l.type}
+      <div className="overflow-auto max-h-[440px] rounded-lg border bg-gray-50">
+        <svg
+          viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
+          width={VIEW_W}
+          height={VIEW_H}
+          className="block"
+          style={{ maxWidth: '100%' }}
+        >
+          {/* 分支（S 形曲线 + 标签带白底衬） */}
+          {tree.map((node, i) => {
+            const y = yOf(i)
+            const st = sourceStyle(node.source)
+            const isProb = node.kind === 'problem'
+            const stroke = isProb ? '#fca5a5' : st.stroke
+            const dash = isProb ? undefined : st.dash
+            const midX = (ROOT_X + LEAF_X) / 2
+            const d = `M ${ROOT_X} ${rootY} C ${midX} ${rootY}, ${midX} ${y}, ${LEAF_X} ${y}`
+            // 标签放在曲线 1/4 处（靠近根部左侧），错开各行，带白底衬避免重影
+            const lx = ROOT_X + 88
+            return (
+              <g key={`b-${node.key}`}>
+                <path d={d} fill="none" stroke={stroke} strokeWidth={1.8} strokeDasharray={dash} />
+                <g transform={`translate(${lx}, ${y - 9})`}>
+                  <rect x={-4} y={-11} width={Math.min(150, node.label.length * 12 + 10)} height={18} rx={5} fill="#f9fafb" stroke="#e5e7eb" strokeWidth={0.8} />
+                  <text x={1} y={3} textAnchor="start" fontSize={11} fill={isProb ? '#b91c1c' : (node.source === 'auto' ? '#0e7490' : '#475569')} className="pointer-events-none select-none">
+                    {node.label.length > 12 ? node.label.slice(0, 12) + '…' : node.label}
+                  </text>
+                </g>
+              </g>
+            )
+          })}
+
+          {/* 树根（当前设备） */}
+          <g>
+            <circle cx={ROOT_X} cy={rootY} r={NODE_R + 4} fill="#2563eb" stroke="#1d4ed8" strokeWidth={1.5} />
+            <text x={ROOT_X} y={rootY + 4} textAnchor="middle" fontSize={12} fill="#fff" className="pointer-events-none select-none">本</text>
+            <text x={ROOT_X - 14} y={rootY - NODE_R - 8} textAnchor="end" fontSize={12} fontWeight={600} fill="#1e3a8a" className="pointer-events-none select-none">
+              {centerCode.length > 22 ? centerCode.slice(0, 22) + '…' : centerCode}
+            </text>
+            <text x={ROOT_X - 14} y={rootY - NODE_R + 6} textAnchor="end" fontSize={10} fill="#64748b" className="pointer-events-none select-none">当前设备</text>
+          </g>
+
+          {/* 叶子节点（关联设备 / BA 问题） */}
+          {tree.map((node, i) => {
+            const y = yOf(i)
+            const isProb = node.kind === 'problem'
+            const fill = isProb ? '#fee2e2' : '#e2e8f0'
+            const stroke = isProb ? '#ef4444' : node.source === 'auto' ? '#06b6d4' : '#64748b'
+            const codeLabel = node.code.length > 22 ? node.code.slice(0, 22) + '…' : node.code
+            return (
+              <g
+                key={node.key}
+                className={isProb ? '' : 'cursor-pointer'}
+                onClick={() => { if (!isProb && onSelectRef.current) onSelectRef.current(node.code) }}
+              >
+                <circle cx={LEAF_X} cy={y} r={NODE_R} fill={fill} stroke={stroke} strokeWidth={1.6} />
+                <text x={LEAF_X} y={y + 4} textAnchor="middle" fontSize={11} fontWeight={600} fill={isProb ? '#b91c1c' : '#334155'} className="pointer-events-none select-none">
+                  {isProb ? '!' : (node.source === 'auto' ? 'A' : 'M')}
                 </text>
-              ) : null}
-            </g>
-          )
-        })}
-        {nodesRef.current.map((n) => {
-          const isCenter = n.kind === 'center'
-          const fill = isCenter ? '#2563eb' : n.kind === 'problem' ? '#ef4444' : '#e2e8f0'
-          const stroke = isCenter ? '#1d4ed8' : n.kind === 'problem' ? '#b91c1c' : '#64748b'
-          const r = isCenter ? 26 : n.kind === 'problem' ? 12 : 14
-          const label = n.label.length > 14 ? n.label.slice(0, 14) + '…' : n.label
-          return (
-            <g
-              key={n.id}
-              className="cursor-pointer"
-              onPointerDown={(e) => onPointerDown(e, n.id)}
-              onClick={() => onClickNode(n)}
-            >
-              <circle cx={n.x} cy={n.y} r={r} fill={fill} stroke={stroke} strokeWidth={1.5} />
-              <text x={n.x} y={n.y + 4} textAnchor="middle" className="fill-white text-[11px] font-medium pointer-events-none">
-                {isCenter ? '中心' : n.kind === 'problem' ? '!' : ''}
-              </text>
-              <text x={n.x} y={n.y - r - 4} textAnchor="middle" className="fill-gray-700 text-[10px] pointer-events-none">
-                {label}
-              </text>
-            </g>
-          )
-        })}
-      </svg>
+                <text x={LEAF_X + NODE_R + 6} y={y + 4} textAnchor="start" fontSize={11} fill="#334155" className="pointer-events-none select-none">
+                  {codeLabel}
+                </text>
+                {!isProb && (
+                  <text x={LEAF_X + NODE_R + 6} y={y + 18} textAnchor="start" fontSize={9.5} fill={node.source === 'auto' ? '#0e7490' : '#94a3b8'} className="pointer-events-none select-none">
+                    {node.source === 'auto' ? '自动关联' : '人工关联'}
+                  </text>
+                )}
+              </g>
+            )
+          })}
+        </svg>
+      </div>
+
+      {/* 图例：节点类型 + 来源（自动/人工） */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-500">
         <span className="flex items-center gap-1">
           <span className="inline-block w-3 h-3 rounded-full bg-blue-600" /> 当前设备
         </span>
         <span className="flex items-center gap-1">
-          <span className="inline-block w-3 h-3 rounded-full bg-slate-300 border border-slate-500" /> 关联设备（{Math.max(0, nodesRef.current.length - 1 - problems.length)}）
+          <span className="inline-block w-3 h-3 rounded-full bg-slate-300 border border-slate-500" /> 关联设备（{tree.filter((t) => t.kind === 'device').length}）
         </span>
         <span className="flex items-center gap-1">
-          <span className="inline-block w-3 h-3 rounded-full bg-red-500" /> BA 问题（{problems.length}）
+          <span className="inline-block w-3 h-3 rounded-full bg-red-200 border border-red-500" /> BA 问题（{tree.filter((t) => t.kind === 'problem').length}）
         </span>
-        <span className="text-gray-400">可拖拽节点 / 点击节点跳转</span>
       </div>
-      {/* 关系类型 + 来源图例：让「自动关联 / 人工关联」在图上可辨 */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
-        {typeLegend.map(([t, st]) => (
-          <span key={t} className="flex items-center gap-1 text-gray-600">
-            <span className="inline-block w-5 h-0 border-t-2" style={{ borderColor: st.stroke }} />
-            {t}（{typeCount[t] || 0}）
-          </span>
-        ))}
-        <span className="flex items-center gap-1 text-gray-600">
-          <svg width="22" height="8" className="inline-block">
-            <line x1="0" y1="4" x2="22" y2="4" stroke="#475569" strokeWidth="1.8" strokeDasharray="5 3" />
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-gray-600">
+        <span className="flex items-center gap-1">
+          <svg width="26" height="8" className="inline-block">
+            <line x1="0" y1="4" x2="26" y2="4" stroke={AUTO_COLOR} strokeWidth="1.8" strokeDasharray="6 4" />
           </svg>
-          自动关联
+          自动关联（青・虚线）
         </span>
-        <span className="flex items-center gap-1 text-gray-600">
-          <svg width="22" height="8" className="inline-block">
-            <line x1="0" y1="4" x2="22" y2="4" stroke="#475569" strokeWidth="1.8" />
+        <span className="flex items-center gap-1">
+          <svg width="26" height="8" className="inline-block">
+            <line x1="0" y1="4" x2="26" y2="4" stroke={MANUAL_COLOR} strokeWidth="1.8" />
           </svg>
-          人工关联
+          人工关联（灰・实线）
         </span>
+        <span className="text-gray-400">点击叶子节点可跳转至该设备</span>
       </div>
     </div>
   )
