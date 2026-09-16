@@ -478,6 +478,46 @@ def list_records(tid: int, device_code: Optional[str] = None, db: Session = Depe
     recs = q.order_by(Record.id.desc()).all()
     return [_serialize_record(db, r) for r in recs]
 
+# ---- 「机房信息汇总」(room_master) → 核心 rooms 单向同步 ----
+# 背景（2026-09-16）：房间存在两套存储——数据表 room_master（records JSON，房间的
+# 「录入入口」）与核心 rooms 表（扫码主线的骨架：devices/fixed_assets/device_archives
+# 的 room_id 外键、device_relations「所在机房」边、room_inventory_records 都绑它，
+# 小程序房间列表也只读它）。二者原先互不同步，导致「在数据表新增房间 → 小程序扫不到」。
+# 故此处只做 **数据表 → 核心 rooms** 的单向 upsert（绝不反向），让房间「加一次、到处都有」。
+_ROOM_SYNC_TABLE_CODE = "room_master"
+_ROOM_SYNC_DEFAULT_TYPE = "设备机房"
+
+
+def _sync_room_master_to_rooms(db: Session, tbl: Optional[DataTable], rec: Record) -> None:
+    """把 room_master 的一条记录 upsert 进核心 rooms（幂等；只增改，不删）。"""
+    if tbl is None or (tbl.code or "") != _ROOM_SYNC_TABLE_CODE:
+        return
+    d = rec.data if isinstance(rec.data, dict) else {}
+    code = str(d.get("room_code") or rec.device_code or "").strip()
+    # 编号含空白/换行等脏值直接跳过（脏数据的清理不由同步负责）
+    if not code or any(ch.isspace() for ch in code):
+        return
+    name = str(d.get("room_name") or "").strip()
+    building = str(d.get("building") or "").strip()
+    floor = str(d.get("floor") or "").strip()
+    now = datetime.now(timezone.utc)
+    room = db.query(Room).filter(Room.code == code).first()
+    if room:
+        # 已存在：只覆盖有值的字段，避免空值抹掉已有信息
+        if name:
+            room.name = name
+        if building:
+            room.building = building
+        if floor:
+            room.floor = floor
+        room.updated_at = now
+    else:
+        # rooms 的 name/building/floor/room_type 均 NOT NULL，缺值给兜底
+        db.add(Room(code=code, name=name or code, building=building or "未标注",
+                    floor=floor or "未标注", room_type=_ROOM_SYNC_DEFAULT_TYPE,
+                    is_active=True, created_at=now, updated_at=now))
+
+
 @router.post("/tables/{tid}/records", response_model=RecordResponse)
 def create_record(tid: int, data: RecordCreate, db: Session = Depends(get_db), current_user: User = Depends(_get_current_user)):
     tbl = db.query(DataTable).filter(DataTable.id == tid).first()
@@ -492,7 +532,9 @@ def create_record(tid: int, data: RecordCreate, db: Session = Depends(get_db), c
     if not device_code:
         raise HTTPException(status_code=400, detail="缺少设备编号：请填写关联键字段或显式传入 device_code")
     rec = Record(table_id=tid, device_code=device_code, data=data.data, created_by=current_user.name)
-    db.add(rec); db.commit(); db.refresh(rec)
+    db.add(rec); db.flush()
+    _sync_room_master_to_rooms(db, tbl, rec)  # 房间「加一次、到处都有」
+    db.commit(); db.refresh(rec)
     return _serialize_record(db, rec)
 
 @router.put("/tables/{tid}/records/{rid}", response_model=RecordResponse)
@@ -500,11 +542,13 @@ def update_record(tid: int, rid: int, data: RecordUpdate, db: Session = Depends(
     rec = db.query(Record).filter(Record.id == rid, Record.table_id == tid).first()
     if not rec:
         raise HTTPException(status_code=404, detail="记录不存在")
+    tbl = db.query(DataTable).filter(DataTable.id == tid).first()
     if data.device_code is not None:
         rec.device_code = data.device_code
     if data.data is not None:
         rec.data = data.data
     rec.updated_at = datetime.now(timezone.utc)
+    _sync_room_master_to_rooms(db, tbl, rec)  # 房间编辑同步到核心 rooms
     db.commit(); db.refresh(rec)
     return _serialize_record(db, rec)
 
@@ -1011,6 +1055,8 @@ def bulk_create_records(tid: int, payload: BulkRecordCreate,
             continue
         rec = Record(table_id=tid, device_code=device_code, data=item.data, created_by=current_user.name)
         db.add(rec)
+        db.flush()
+        _sync_room_master_to_rooms(db, tbl, rec)  # 批量导入房间同样同步
         created += 1
     db.commit()
     return {"success": True, "created": created, "skipped": skipped}
