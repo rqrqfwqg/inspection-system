@@ -46,6 +46,10 @@ export default function RecordEditDialog({
   const relField =
     fields.find((f) => f.is_relation_key) || fields.find((f) => f.type === 'device_ref')
 
+  // 「序号(seq)」不手填：新增时隐藏该输入框（非关联键，留空不影响跨表联动）。
+  // 编辑时仍展示，便于查看/修正导入数据里已有的序号值。
+  const visibleFields = initial ? fields : fields.filter((f) => f.key !== 'seq')
+
   useEffect(() => {
     if (!open) return
     const init: Record<string, any> = {}
@@ -98,7 +102,7 @@ export default function RecordEditDialog({
               />
             </div>
           )}
-          {fields.map((f) => (
+          {visibleFields.map((f) => (
             <div key={f.id} className="space-y-1">
               <Label>
                 {f.label}
