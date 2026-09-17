@@ -690,6 +690,13 @@ def manual_associate(
 # 单设备联动总览（抽屉 / 小程序共用）
 # =====================================================================
 
+# 资料域记录挑「显示名」的字段优先级（电柜 / 配电箱 / 图纸回路各表命名列不同）
+_REC_NAME_KEYS = (
+    "device_name", "equip_name", "box_name", "circuit_name", "cabinet_name",
+    "name", "cabinet_code", "box_code", "circuit_code", "room_name",
+)
+
+
 @router.get("/device/{code}")
 def device_link(
     code: str,
@@ -700,19 +707,26 @@ def device_link(
 
     这是「可视化不再像死数据」的直接来源：一次请求把资料表管理里的真实记录、
     关联中心里的真实边、供电上下游全部串起来，且每条边都标注自动/人工。
+
+    【重要】2026-09-17：受理范围从 `devices ∪ rooms` **扩展到 `records.device_code`**。
+    自动关联（798 条）两端 100% 落在资料域（电柜 `G-*` / 配电箱 / 图纸回路），
+    它们都不在 devices 表里 —— 原来一律 404，于是设备详情永远看不到自动关联，
+    表现为「自动关联的末端没有具体设备」。放开后整条链可逐跳点开：
+    台账设备 →（供配电 533 条桥）→ 电柜 →（上级配电 auto）→ 配电箱 → 图纸回路。
     """
     dev = db.query(Device).filter(Device.device_code == code).first()
     room = db.query(Room).filter(Room.code == code).first()
+    # 资料域记录：只存在于 records.device_code（电柜 / 配电箱 / 图纸回路 …）
+    recs = db.query(Record).filter(Record.device_code == code).all()
+    if not dev and not room and not recs:
+        raise HTTPException(status_code=404, detail=f"设备/机房/资料对象不存在：{code}")
     target = dev or room
-    if not target:
-        raise HTTPException(status_code=404, detail=f"设备/机房不存在：{code}")
 
     t_ids = dict(db.query(DataTable.id, DataTable.code).all())
     t_names = dict(db.query(DataTable.id, DataTable.name).all())
     subs = {s.id: {"id": s.id, "code": s.code, "name": s.name, "icon": s.icon} for s in db.query(Subsystem).all()}
 
-    # ---- 资料记录（records.device_code == code）----
-    recs = db.query(Record).filter(Record.device_code == code).all()
+    # ---- 资料记录（records.device_code == code，上面已取）----
     by_table: Dict[int, List[Dict[str, Any]]] = {}
     for r in recs:
         by_table.setdefault(r.table_id, []).append({
@@ -750,13 +764,44 @@ def device_link(
     auto_edges = [x for x in edge_rows if x["source"] == "auto"]
     manual_edges = [x for x in edge_rows if x["source"] == "manual"]
 
+    # ---- 资料域对象的自述（kind=record 时用）----
+    owner_tables = [
+        {"table_id": g["table_id"], "table_code": g["table_code"],
+         "table_name": g["table_name"], "subsystem": g["subsystem"],
+         "record_count": len(g["records"])}
+        for g in groups
+    ]
+    primary = groups[0] if groups else None
+    head_data = primary["records"][0]["data"] if primary else {}
+
+    def _pick(k: str):
+        v = head_data.get(k) if isinstance(head_data, dict) else None
+        t = str(v or "").strip()
+        return t or None
+
+    if dev:
+        kind, name, subsystem = "device", dev.name, subs.get(dev.subsystem_id)
+    elif room:
+        kind, name, subsystem = "room", room.name, None
+    else:
+        kind = "record"
+        name = None
+        for k in _REC_NAME_KEYS:
+            name = _pick(k)
+            if name:
+                break
+        name = name or (primary["table_name"] if primary else None)
+        subsystem = primary["subsystem"] if primary else None
+
     return {
         "code": code,
-        "kind": "device" if dev else "room",
-        "name": (dev.name if dev else room.name),
-        "subsystem": subs.get(dev.subsystem_id) if dev else None,
-        "building": getattr(target, "building", None),
-        "floor": getattr(target, "floor", None),
+        "kind": kind,
+        "name": name,
+        "subsystem": subsystem,
+        "building": getattr(target, "building", None) or _pick("building"),
+        "floor": getattr(target, "floor", None) or _pick("floor"),
+        "in_ledger": dev is not None,
+        "owner_tables": owner_tables,
         "record_count": len(recs),
         "table_count": len(groups),
         "groups": groups,

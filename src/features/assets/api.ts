@@ -27,6 +27,8 @@ import type {
   DeviceLinkResponse,
   CrossRefResponse,
   GlobalSearchResponse,
+  GeoObservation,
+  LedgerResolveResponse,
 } from './types'
 
 const BASE = '/assets'
@@ -166,6 +168,49 @@ export async function getSubsystemTree(parent?: string): Promise<SubsystemNode[]
 /** GET /search?code= —— 设备多维信息聚合检索 */
 export async function searchDevice(code: string): Promise<SearchResult> {
   return api.get<SearchResult>(`${BASE}/search?code=${encodeURIComponent(code)}`)
+}
+
+/**
+ * GET /asset-ledger/resolve?q= —— 台账反查检索（走后端的权威匹配内核 asset_code_match）。
+ *
+ * 「设备属性」页的搜索框用它：一次查询同时能命中
+ *   ① 已登记设备（105000… 资产号）
+ *   ② 资料域编号（电柜 G-1D2ATwb / 配电箱 / 图纸回路）
+ * 因为匹配内核会从品牌型号里反解机身号（brand_extract_exact），
+ * 所以设备与它上级电柜这两侧都能被同一个关键词找到 —— 这也是整条供电链的入口。
+ */
+export async function resolveLedger(q: string): Promise<LedgerResolveResponse> {
+  return api.get<LedgerResolveResponse>(
+    `${BASE}/asset-ledger/resolve?q=${encodeURIComponent(q)}`
+  )
+}
+
+/**
+ * GET /asset-ledger/geo-observations?device_code=&limit= —— 该设备的扫码现场定位（最新在前）。
+ *
+ * 后端按 `created_at DESC, id DESC` 返回；`created_at` 可能是进程启动时刻的冻结值，
+ * 因此**前端再按 `observed_at` 倒序**（空值恒排最后，符合项目排序铁律）。
+ * 接口不可用时静默返回空数组 —— 定位区块缺数据不该拖垮整个设备详情。
+ */
+export async function getGeoObservations(deviceCode: string, limit = 20): Promise<GeoObservation[]> {
+  if (!deviceCode) return []
+  const n = Math.max(1, Math.min(Number(limit) || 20, 200))
+  try {
+    const rows = await api.get<GeoObservation[]>(
+      `${BASE}/asset-ledger/geo-observations?device_code=${encodeURIComponent(deviceCode)}&limit=${n}`,
+    )
+    if (!Array.isArray(rows)) return []
+    return [...rows].sort((a, b) => {
+      const ta = Date.parse(String(a.observed_at ?? '')) || 0
+      const tb = Date.parse(String(b.observed_at ?? '')) || 0
+      if (!ta && !tb) return (b.id ?? 0) - (a.id ?? 0)
+      if (!ta) return 1
+      if (!tb) return -1
+      return tb - ta
+    })
+  } catch {
+    return []
+  }
 }
 
 /** GET /ba/problems —— BA 问题列表（支持按 ba_system / status / device_code 过滤） */

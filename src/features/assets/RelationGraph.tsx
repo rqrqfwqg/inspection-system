@@ -25,6 +25,8 @@ interface TreeNode {
   label: string
   kind: 'device' | 'problem'
   source: 'auto' | 'manual'
+  /** 对端类别（/link/device 提供）：device / room / record / unknown */
+  otherKind: string
 }
 
 interface RelationGraphProps {
@@ -39,6 +41,13 @@ interface RelationGraphProps {
 }
 
 /** 边来源 → 线型与配色：自动关联=青色虚线，人工关联=石板灰实线（一眼可辨）。 */
+/** 对端类别 → 中文短标（让「自动关联出来的到底是什么」一眼可见：设备 / 机房 / 资料域） */
+const KIND_LABEL: Record<string, string> = {
+  device: '设备',
+  room: '机房',
+  record: '资料域',
+}
+
 const AUTO_COLOR = '#06b6d4'
 const MANUAL_COLOR = '#64748b'
 function sourceStyle(source: string | undefined): { stroke: string; dash: string | undefined } {
@@ -91,6 +100,7 @@ export function RelationGraph({ centerCode, edges, problems, onSelectNode }: Rel
         label: String(e.relation_type ?? '关联'),
         kind: 'device',
         source: (e.source ?? 'manual') === 'auto' ? 'auto' : 'manual',
+        otherKind: String(e.other_kind ?? 'unknown'),
       })
     }
     const devices = [...deviceMap.values()].sort((a, b) => a.code.localeCompare(b.code))
@@ -101,6 +111,7 @@ export function RelationGraph({ centerCode, edges, problems, onSelectNode }: Rel
       label: String((p.problem_type as string) || (p.status as string) || 'BA 问题'),
       kind: 'problem',
       source: 'manual',
+      otherKind: 'unknown',
     }))
 
     return [...devices, ...probs]
@@ -184,6 +195,7 @@ export function RelationGraph({ centerCode, edges, problems, onSelectNode }: Rel
                 {!isProb && (
                   <text x={LEAF_X + NODE_R + 6} y={y + 18} textAnchor="start" fontSize={9.5} fill={node.source === 'auto' ? '#0e7490' : '#94a3b8'} className="pointer-events-none select-none">
                     {node.source === 'auto' ? '自动关联' : '人工关联'}
+                    {KIND_LABEL[node.otherKind] ? ` · ${KIND_LABEL[node.otherKind]}` : ''}
                   </text>
                 )}
               </g>
@@ -217,7 +229,9 @@ export function RelationGraph({ centerCode, edges, problems, onSelectNode }: Rel
           </svg>
           人工关联（灰・实线）
         </span>
-        <span className="text-gray-400">点击叶子节点可跳转至该设备</span>
+        <span className="text-gray-400">
+          叶子节点标注对端类别（设备 / 机房 / 资料域），点击即切换查看该对象
+        </span>
       </div>
     </div>
   )

@@ -1,6 +1,6 @@
 // T3GTC 资产可视化系统 —— 类型定义
 //
-// ⚠️ 契约纪律（2026-09-15 修正）
+// 【注意】 契约纪律（2026-09-15 修正）
 // ------------------------------------------------------------------
 // 本文件曾自带一份 `/search` 的 SearchResult 复制品，且停留在**旧版契约**
 // （`device` / `relations`），而后端早已换成
@@ -376,11 +376,22 @@ export interface DeviceLinkEdge {
 /** 单设备（或机房）的联动总览 */
 export interface DeviceLinkResponse {
   code: string
-  kind: 'device' | 'room'
+  /** record = 只存在于 records.device_code 的资料域对象（电柜 / 配电箱 / 图纸回路） */
+  kind: 'device' | 'room' | 'record'
   name: string | null
   subsystem: { id: number; code: string; name: string; icon?: string } | null
   building: string | null
   floor: string | null
+  /** 是否已登记台账（devices 表命中）。kind=record 时恒为 false */
+  in_ledger: boolean
+  /** 该编号占用的资料表（按记录数降序）；kind=record 时用于说明"它是什么" */
+  owner_tables: {
+    table_id: number
+    table_code: string | null
+    table_name: string
+    subsystem: { id: number; code: string; name: string; icon?: string } | null
+    record_count: number
+  }[]
   record_count: number
   table_count: number
   /** 资料记录，按资料表分组（与「数据表管理」同源） */
@@ -653,6 +664,38 @@ export interface ImportTemplate {
   desc: string
 }
 
+// ==================== 设备现场定位观测（GET /asset-ledger/geo-observations） ====================
+
+/**
+ * 一条「扫码现场定位」观测（批次⑤）。
+ *
+ * 纪律：**只写观测表，绝不改 devices / fixed_assets 的位置字段**；每次扫码一条，不合并。
+ * 坐标系 `coord_type` 固定 `gcj02`（微信 `wx.getLocation({type:'gcj02'})`），可直接投高德/腾讯地图。
+ * 【注意】 时间字段（`observed_at` / `created_at`）后端落库的是 **UTC**，展示必须 +8 转北京时间。
+ * 【注意】 `accuracy` 是「是否精确定位」的硬判据：`wx.getLocation` 必返回它，模糊定位不返回；
+ *    缺失**不能补 0**（±0m 会被误读成「极其精准」）。
+ */
+export interface GeoObservation {
+  id?: number
+  device_code?: string
+  latitude?: number | string | null
+  longitude?: number | string | null
+  /** 定位精度（米）；为空表示该条不是精确定位，不可当成 0 */
+  accuracy?: number | string | null
+  altitude?: number | string | null
+  coord_type?: string | null
+  room_code?: string | null
+  scan_source?: string | null
+  operator?: string | null
+  source?: string | null
+  client?: string | null
+  /** UTC */
+  observed_at?: string | null
+  /** UTC（且可能是进程启动时刻的冻结值，排序别依赖它） */
+  created_at?: string | null
+  [key: string]: unknown
+}
+
 /** 单次上传导入结果（POST /import） */
 export interface ImportResult {
   filename?: string
@@ -663,4 +706,35 @@ export interface ImportResult {
   batches?: Array<{ segment: string; rows: number; accessories?: number }>
   warnings?: string[]
   errors?: string[]
+}
+
+// ==================== 台账反查检索（GET /assets/asset-ledger/resolve） ====================
+
+/** 一个检索候选（可能是已登记设备，也可能只是台账/资料域编号） */
+export interface LedgerResolveCandidate {
+  device_code: string
+  name: string
+  asset_name: string
+  location: string
+  area: string
+  /** devices=已登记台账 / ledger_only=仅在台账（含资料域编号） */
+  source: string
+  /** 命中方式，如 brand_extract_exact（从品牌型号里反解出的机身号） */
+  match_type: string
+  match_field: string
+  matched_value: string
+  confidence: number
+  has_serial: boolean
+  in_devices: boolean
+  source_demoted: boolean
+}
+
+/** GET /assets/asset-ledger/resolve?q= —— 手动输入编号 → 反查台账（权威匹配内核） */
+export interface LedgerResolveResponse {
+  query: string
+  normalized: { raw: string; upper: string; loose: string }
+  kind: string
+  exact: boolean
+  count: number
+  candidates: LedgerResolveCandidate[]
 }

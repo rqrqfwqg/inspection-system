@@ -1,11 +1,12 @@
 import * as React from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { LayoutDashboard, Map, Boxes, Search, Upload, Share2, Network, Link2 } from 'lucide-react'
+import { LayoutDashboard, Map, Boxes, Search, Upload, Share2, Network, Link2, FileSearch } from 'lucide-react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { DashboardPage } from './DashboardPage'
 import { AreaTreePage } from './AreaTreePage'
 import { SubsystemTreePage } from './SubsystemTreePage'
 import { DeviceHierarchyTreePage } from './DeviceHierarchyTreePage'
+import DeviceAttrPage from './DeviceAttrPage'
 import { BaSystemTreePage } from './BaSystemTreePage'
 import { SearchPage } from './SearchPage'
 import { ImportCenterPage } from './ImportCenterPage'
@@ -17,6 +18,7 @@ const TABS = [
   { key: 'area', label: '区域树', icon: Map },
   { key: 'subsystem', label: '子系统树', icon: Boxes },
   { key: 'device', label: '设备层级', icon: Share2 },
+  { key: 'attr', label: '设备属性', icon: FileSearch },
   { key: 'ba', label: 'BA系统', icon: Network },
   { key: 'link', label: '联动中心', icon: Link2 },
   { key: 'search', label: '检索', icon: Search },
@@ -111,6 +113,9 @@ export default function AssetsLayout() {
         </TabsContent>
         <TabsContent value="device">
           <DeviceHierarchyTreePage onOpenDevice={openDevice} />
+        </TabsContent>
+        <TabsContent value="attr">
+          <DeviceAttrPage />
         </TabsContent>
         <TabsContent value="ba">
           <BaSystemTreePage onOpenDevice={openDevice} />
