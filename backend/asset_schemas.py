@@ -1,5 +1,5 @@
 """分系统资料管理 · Pydantic Schemas"""
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from typing import Optional, List, Any, Dict
 
 
@@ -43,6 +43,12 @@ class DeviceBase(BaseModel):
     location_desc: str = ""
     parent_device_id: Optional[int] = None
     is_active: bool = True
+
+    @field_validator("building", "floor", "location_desc", mode="before")
+    @classmethod
+    def _coerce_none_to_empty(cls, v):
+        # 线上存量数据存在 NULL（如 building 378 条），NULL 直接校验会 500
+        return "" if v is None else v
 
 class DeviceCreate(DeviceBase):
     pass
