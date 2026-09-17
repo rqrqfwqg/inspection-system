@@ -81,6 +81,15 @@ export function DeviceAttrPanel({ code, onNavigate }: DeviceAttrPanelProps) {
     }
   }, [code])
 
+  // 图谱优先用 /link 的边（带来源标注），退回 /search 的拓扑边。
+  // 【必须放在所有 early-return 之前】hooks 数量不能随渲染分支变化，
+  // 否则 null -> loading -> loaded 切换会抛 React error #310
+  // （Rendered more hooks than during the previous render）。
+  const graphEdges = React.useMemo(() => {
+    if (link?.edges?.length) return link.edges as unknown as Record<string, unknown>[]
+    return ((search?.edges || []) as unknown as Record<string, unknown>[])
+  }, [link, search])
+
   if (!code) {
     return (
       <Card className="h-full">
@@ -107,12 +116,6 @@ export function DeviceAttrPanel({ code, onNavigate }: DeviceAttrPanelProps) {
   const attrs = (primary?.records?.[0]?.data || {}) as Record<string, unknown>
   const autoEdges = link?.edges_auto || []
   const manualEdges = link?.edges_manual || []
-
-  // 图谱优先用 /link 的边（带来源标注），退回 /search 的拓扑边
-  const graphEdges = React.useMemo(() => {
-    if (link?.edges?.length) return link.edges as unknown as Record<string, unknown>[]
-    return ((search?.edges || []) as unknown as Record<string, unknown>[])
-  }, [link, search])
 
   return (
     <div className="space-y-3">
