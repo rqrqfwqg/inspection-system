@@ -1,0 +1,58 @@
+/* 基础样式：只做全局重置与外壳级约定，不含组件样式、不含业务色值 */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-body);
+  color: var(--fg);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  /* 全站只允许一个页面级滚动条：外壳固定 100vh，滚动交给内容区 */
+  overflow: hidden;
+}
+
+/* 台账/表格类数字对齐（设备编号、金额必须可逐位比对） */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 长编号策略：强制断行而非省略（见 UIUX §6.5） */
+.break-code {
+  word-break: break-all;
+}
+
+/* 单行省略 */
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 卡片基线 */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+}
+
+/* 防止 flex 子项被内容撑破（AC-15） */
+.min-w-0 {
+  min-width: 0;
+}

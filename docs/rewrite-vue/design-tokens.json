@@ -1,0 +1,209 @@
+{
+  "$meta": {
+    "name": "inspection-system design tokens",
+    "project": "广州白云机场 T3 GTC 运维资产管理系统 · 前端整站重写",
+    "designer": "颜好看 (UI/UX)",
+    "date": "2026-09-17",
+    "stack": "Vue 3.5 + Element Plus 2.9",
+    "register": "product",
+    "benchmark": ["Linear", "Ant Design Pro / 阿里云 Xconsole", "IBM Maximo Manage"],
+    "axes": { "designVariance": 3, "motionIntensity": 3, "visualDensity": 8 },
+    "source": "references/design-systems/color-palettes.md #1 SaaS 信任蓝（中性色改为对齐 Element Plus 默认以压缩覆盖面）",
+    "companionFiles": ["UIUX.md", "design-tokens.css"]
+  },
+
+  "color": {
+    "surface": {
+      "bg":      { "value": "#F5F7FA", "type": "color", "role": "A1-identity 页面背景" },
+      "surface": { "value": "#FFFFFF", "type": "color", "role": "A1-identity 卡片/容器" },
+      "surface2":{ "value": "#FAFAFA", "type": "color", "role": "B-slot 二级表面" },
+      "surface3":{ "value": "#F0F2F5", "type": "color", "role": "B-slot 三级表面/悬浮底" }
+    },
+    "foreground": {
+      "fg":    { "value": "#303133", "type": "color", "role": "A1-identity 主文本" },
+      "fg2":   { "value": "#606266", "type": "color", "role": "B-slot 次级文本" },
+      "muted": { "value": "#909399", "type": "color", "role": "A1-identity 副文本" },
+      "meta":  { "value": "#A8ABB2", "type": "color", "role": "B-slot 三级/占位" }
+    },
+    "border": {
+      "border":     { "value": "#DCDFE6", "type": "color", "role": "A1-identity 默认边框" },
+      "borderSoft": { "value": "#EBEEF5", "type": "color", "role": "B-slot 内部分隔" }
+    },
+    "brand": {
+      "accent":       { "value": "#2563EB", "type": "color", "role": "A1-identity 品牌主色（每屏 ≤2 处可见）" },
+      "accentOn":     { "value": "#FFFFFF", "type": "color" },
+      "accentHover":  { "value": "#6692F1", "type": "color" },
+      "accentActive": { "value": "#1E4FBC", "type": "color" },
+      "accentSoft":   { "value": "#E9EFFD", "type": "color", "role": "选中行/淡底" }
+    },
+    "semantic": {
+      "success":   { "value": "#16A34A", "type": "color" },
+      "successBg": { "value": "#E8F6ED", "type": "color" },
+      "successFg": { "value": "#15803D", "type": "color", "contrastOnWhite": "4.6:1" },
+      "warn":      { "value": "#D97706", "type": "color" },
+      "warnBg":    { "value": "#FBF1E6", "type": "color" },
+      "warnFg":    { "value": "#B45309", "type": "color", "contrastOnWhite": "4.9:1" },
+      "danger":    { "value": "#DC2626", "type": "color" },
+      "dangerBg":  { "value": "#FCE9E9", "type": "color" },
+      "dangerFg":  { "value": "#B91C1C", "type": "color", "contrastOnWhite": "5.9:1" },
+      "info":      { "value": "#0EA5E9", "type": "color" },
+      "infoBg":    { "value": "#E7F6FD", "type": "color" },
+      "infoFg":    { "value": "#0369A1", "type": "color", "contrastOnWhite": "5.5:1" }
+    },
+    "subsystem": {
+      "_note": "C-extension 分类色，仅作辅助标识；图谱节点必须同时带 2 字简称，禁止以颜色为唯一区分（WCAG 1.4.1）",
+      "power":    { "value": "#2563EB", "label": "电力",   "short": "电" },
+      "fire":     { "value": "#DC2626", "label": "消防",   "short": "消" },
+      "weak":     { "value": "#0D9488", "label": "弱电",   "short": "弱" },
+      "refrig":   { "value": "#0891B2", "label": "制冷",   "short": "冷" },
+      "lighting": { "value": "#CA8A04", "label": "照明",   "short": "照" },
+      "water":    { "value": "#0369A1", "label": "给排水", "short": "水" },
+      "hvac":     { "value": "#EA580C", "label": "暖通",   "short": "暖" }
+    },
+    "graph": {
+      "graphBg":       { "value": "#FAFBFC", "type": "color" },
+      "graphLine":     { "value": "#C0C4CC", "type": "color" },
+      "graphLineDash": { "value": "#DCDFE6", "type": "color" }
+    }
+  },
+
+  "font": {
+    "family": {
+      "display": { "value": "Inter, Noto Sans SC, PingFang SC, Microsoft YaHei, system-ui, sans-serif", "type": "fontFamily" },
+      "body":    { "value": "Inter, Noto Sans SC, PingFang SC, Microsoft YaHei, system-ui, sans-serif", "type": "fontFamily" },
+      "mono":    { "value": "Spline Sans Mono, JetBrains Mono, ui-monospace, Cascadia Mono, Consolas, monospace", "type": "fontFamily" }
+    },
+    "loading": {
+      "_note": "机场内网可能无法访问 Google Fonts。英文/数字必须自托管 npm 包（@fontsource/inter、@fontsource/spline-sans-mono），中文走系统字体栈；禁止依赖 CDN。",
+      "packages": ["@fontsource/inter", "@fontsource/spline-sans-mono"],
+      "cjkStrategy": "system-fallback"
+    },
+    "size": {
+      "xs":   { "value": "12px", "type": "dimension", "lineHeight": 1.5, "usage": "元数据/Tag（全站下限）" },
+      "sm":   { "value": "13px", "type": "dimension", "lineHeight": 1.35, "usage": "表格单元/表单 label" },
+      "base": { "value": "14px", "type": "dimension", "lineHeight": 1.5, "usage": "正文基准" },
+      "lg":   { "value": "16px", "type": "dimension", "lineHeight": 1.35, "usage": "卡片标题" },
+      "xl":   { "value": "18px", "type": "dimension", "lineHeight": 1.3, "usage": "区块标题" },
+      "2xl":  { "value": "20px", "type": "dimension", "lineHeight": 1.25, "usage": "页面标题" },
+      "3xl":  { "value": "24px", "type": "dimension", "lineHeight": 1.2, "usage": "指标数字（等宽数字）" },
+      "4xl":  { "value": "30px", "type": "dimension", "lineHeight": 1.2, "usage": "Dashboard 首要指标，一屏 ≤1 处" }
+    },
+    "weight": {
+      "read":     { "value": 400, "type": "fontWeight", "usage": "正文/表格内容" },
+      "emphasize":{ "value": 510, "type": "fontWeight", "usage": "表头/小标题/按钮" },
+      "announce": { "value": 590, "type": "fontWeight", "usage": "页面标题/关键数字" }
+    },
+    "leading":  { "tight": { "value": 1.25 }, "snug": { "value": 1.35 }, "body": { "value": 1.5 } },
+    "tracking": {
+      "display": { "value": "-0.01em", "usage": "标题" },
+      "body":    { "value": "0em", "usage": "正文" },
+      "caps":    { "value": "0.06em", "usage": "全大写（ALL CAPS 必须 ≥0.06em）" }
+    }
+  },
+
+  "space": {
+    "_grid": "4px，只允许下列值",
+    "1": {"value": "4px"}, "2": {"value": "8px"}, "3": {"value": "12px"}, "4": {"value": "16px"},
+    "5": {"value": "20px"}, "6": {"value": "24px"}, "8": {"value": "32px"}, "10": {"value": "40px"},
+    "12": {"value": "48px"}, "16": {"value": "64px"}
+  },
+
+  "radius": {
+    "sm":   { "value": "4px", "usage": "Tag/Input/小控件" },
+    "md":   { "value": "6px", "usage": "Button/Select（= --el-border-radius-base）" },
+    "lg":   { "value": "8px", "usage": "Card/Panel/Dialog（上限，禁止 ≥16px）" },
+    "pill": { "value": "9999px", "usage": "Switch/圆形按钮" }
+  },
+
+  "shadow": {
+    "flat":    { "value": "none" },
+    "ring":    { "value": "0 0 0 1px #DCDFE6", "usage": "卡片默认（1px 环，不用模糊）" },
+    "raised":  { "value": "0 1px 2px rgba(15,23,42,.04), 0 4px 12px rgba(15,23,42,.06)", "usage": "悬浮/下拉" },
+    "overlay": { "value": "0 12px 32px rgba(15,23,42,.14), 0 4px 8px rgba(15,23,42,.06)", "usage": "Dialog/Drawer" }
+  },
+
+  "motion": {
+    "fast": { "value": "120ms" }, "base": { "value": "160ms" }, "slow": { "value": "240ms" },
+    "ease": { "value": "cubic-bezier(.2, 0, 0, 1)" },
+    "_rules": ["150ms 为收敛基准", "禁止弹跳缓动", "必须支持 prefers-reduced-motion", "禁动画 width/height（用 flex-basis/transform/opacity）"]
+  },
+
+  "layout": {
+    "containerMax": { "value": "none", "note": "后台铺满；长表单页单独限宽 960px" },
+    "formMax": { "value": "960px" },
+    "siderWidth": { "value": "240px" },
+    "siderCollapsedWidth": { "value": "64px", "note": "= Element Plus --el-menu-collapse-width" },
+    "headerHeight": { "value": "56px", "compact": "48px" },
+    "toolbarHeight": { "value": "40px", "compact": "32px" },
+    "rowHeight": { "value": "36px", "compact": "32px", "tall": "40px" },
+    "zIndex": { "sticky": 100, "dropdown": 1000, "panel": 2000, "toast": 3000 }
+  },
+
+  "breakpoints": {
+    "_unit": "CSS 视口宽度（已计入系统缩放）",
+    "_axis": "width",
+    "xs": { "min": 0,    "max": 767,  "note": "现场手机：基本可用（非完美）。仅 /asset/inventory 与 /qr/:code 需跑通" },
+    "sm": { "min": 768,  "max": 1023, "note": "平板横屏：基本可用" },
+    "md": { "min": 1024, "max": 1279, "note": "小笔记本：可用" },
+    "lg": { "min": 1280, "max": 1535, "note": "必须完美支持：1920×1080 @150% → 1280×720" },
+    "xl": { "min": 1536, "max": 1919, "note": "必须完美支持：1920×1080 @125% → 1536×864；含 1366×768@100%" },
+    "2xl":{ "min": 1920, "max": null, "note": "必须完美支持：1920×1080 @100%" }
+  },
+
+  "heightTiers": {
+    "_unit": "CSS 视口高度",
+    "compact": { "min": 0,   "max": 760, "note": "含 1280×720；页头 48 / 工具条 32 / 行高 32" },
+    "normal":  { "min": 761, "max": 900, "note": "含 1536×864；页头 56 / 工具条 40 / 行高 36" },
+    "tall":    { "min": 901, "max": null, "note": "页头 56 / 工具条 40 / 行高 40" }
+  },
+
+  "icon": {
+    "library": { "value": "@element-plus/icons-vue@2.3.2", "type": "string", "note": "架构师锁定（ARCHITECTURE.md §5）：全项目唯一图标库。禁止 emoji 作功能图标；禁止 lucide 等第二套库混入；禁止内联零散 SVG 图标" },
+    "sizes": { "inline": "16px", "button": "20px", "standalone": "24px", "note": "只用 el-icon 的 size 三档；EP 图标为 1024 网格填充描边风格，无 stroke-width 可调，一致性靠 size + currentColor" },
+    "subsystemMap": {
+      "_note": "subsystems.icon 字段已存 lucide 名（禁止改后端/数据）。前端建 SUBSYSTEM_ICON_MAP 常量表映射到 EP 图标组件，未命中回落 Box 保证不白屏",
+      "power":    { "dbValue": "Zap",       "elIcon": "Lightning",    "fallback": "Odometer" },
+      "fire":     { "dbValue": "Flame",     "elIcon": "IconFlame",    "fallback": "Warning", "custom": "components/common/icons/IconFlame.vue（按 EP 同网格 1024 / currentColor 自补并登记）" },
+      "weak":     { "dbValue": "Cable",     "elIcon": "Connection",   "fallback": "Link" },
+      "refrig":   { "dbValue": "Snowflake", "elIcon": "Refrigerator", "fallback": "IceDrink" },
+      "lighting": { "dbValue": "Lightbulb", "elIcon": "Sunny",        "fallback": "ReadingLamp" },
+      "water":    { "dbValue": "Droplets",  "elIcon": "Pouring",      "fallback": "HotWater" },
+      "hvac":     { "dbValue": "Fan",       "elIcon": "WindPower",    "fallback": "Switch" }
+    },
+    "mustVerify": "Phase 2 用 import * as Icons from '@element-plus/icons-vue' 校验上表名称真实存在，缺失者走 fallback 列"
+  },
+
+  "antiSquash": {
+    "_note": "硬规则：违反即退回重做。详见 UIUX.md §6.4",
+    "rules": [
+      "SVG 必须有 viewBox、禁止写 width/height 属性，容器用 width:100% + height:auto（或 aspect-ratio）",
+      "禁止 preserveAspectRatio=\"none\"；显式写 xMidYMid meet",
+      "禁止 width={W} height={H} 与 max-width:100% 共存（压缩失真根因）",
+      "固定高度白名单：页头 48/56、工具条 32/40、表格行 32/36/40、侧栏 64/240、Tag、图标 16/20/24；其余禁止写死 height",
+      "图片/二维码/缩略图用 aspect-ratio + object-fit，禁止 width+height px 后加 max-width:100%",
+      "禁止在容器上写死表格最小宽（如 min-w-[1100px]）；用列级 min-width 之和 + 容器 overflow-x:auto",
+      "禁止 CSS transform: scale() 做响应式适配",
+      "el-dialog / 详情面板宽度用 % / clamp()，禁止 px",
+      "flex 混排中的图标、头像、Tag 必须 flex:0 0 auto，防止被压缩变形",
+      "禁止 white-space:nowrap 不配 overflow:hidden + text-overflow:ellipsis"
+    ]
+  },
+
+  "elementPlusMapping": {
+    "_importOrder": "禁止 import element-plus/dist/index.css；本文件最后加载",
+    "_criticalPitfall": "未使用 SCSS 主题生成时，仅覆盖 --el-color-primary 不够，light-3/5/7/8/9 与 dark-2 必须显式给出，否则 hover/plain/disabled 仍是 EP 默认蓝",
+    "colorPrimary": "--el-color-primary",
+    "colorPrimaryLight3": "--el-color-primary-light-3",
+    "colorPrimaryDark2": "--el-color-primary-dark-2",
+    "fontFamily": "--el-font-family",
+    "fontSizeBase": "--el-font-size-base",
+    "borderRadiusBase": "--el-border-radius-base",
+    "componentSize": "--el-component-size",
+    "componentSizeSmall": "--el-component-size-small",
+    "tableHeaderBg": "--el-table-header-bg-color",
+    "tableRowHoverBg": "--el-table-row-hover-bg-color",
+    "menuCollapseWidth": "--el-menu-collapse-width",
+    "overlayColor": "--el-overlay-color-lighter",
+    "_fullList": "见 design-tokens.css 的「Element Plus 变量映射」段落"
+  }
+}
