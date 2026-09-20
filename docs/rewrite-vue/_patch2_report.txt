@@ -1,0 +1,12 @@
+AC-03 菜单项数量                                    count=1
+一期骨架菜单项数量                                      count=1
+插入 7.1 菜单清单                                    count=1
+ARCHITECTURE 导入纪律纠偏                            count=1
+导入纪律: design-tokens.css                        count=1
+导入纪律: tokens.css                               count=1
+recheck SPEC.md                      9 个菜单项                             -> 2
+recheck SPEC.md                      7.1 一期菜单清单                         -> 1
+recheck ARCHITECTURE.md              已按实测纠偏                             -> 1
+recheck design-tokens.css            必须** import 'element-plus/dist/index.css' -> 1
+recheck tokens.css                   必须** import 'element-plus/dist/index.css' -> 1
+ALL_OK=True

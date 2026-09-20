@@ -1,4 +1,4 @@
-// 侧边栏菜单（9 项，与 React 版 src/components/layout/Sidebar.tsx:27-39 的 menuItems 完全对齐）
+// 侧边栏菜单（10 项 = 既有 9 项 + 一期 Phase 3 工单模块 1 项）
 // 显式导入 EP 图标（不走全局注册的名字解析，避免类型丢失与拼写静默失败）
 import {
   User,
@@ -10,6 +10,7 @@ import {
   Ticket,
   Aim,
   SetUp,
+  Tickets,
 } from '@element-plus/icons-vue'
 import type { Component } from 'vue'
 
@@ -33,5 +34,6 @@ export const MENU_ITEMS: MenuItem[] = [
   { label: '资产可视化', path: '/asset-viz', icon: DataAnalysis, adminOnly: false },
   { label: '二维码标签', path: '/asset/qr-labels', icon: Ticket, adminOnly: false },
   { label: '扫码盘点', path: '/asset/inventory', icon: Aim, adminOnly: false },
+  { label: '工单', path: '/workorder/list', icon: Tickets, adminOnly: false },
   { label: '资料配置', path: '/asset/settings', icon: SetUp, adminOnly: true },
 ]

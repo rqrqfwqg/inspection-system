@@ -81,3 +81,10 @@ backend/*.err
 
 # 导出的台账缺口清单含真实资产编号，不进版本库
 scripts/*.xlsx
+
+# Vue 重写验收产物：截图为真实系统画面、报告含生产地址，不进公开仓库（2026-09-20）
+vue-frontend/docs/rewrite-vue/shots/
+vue-frontend/docs/rewrite-vue/verify_report.json
+vue-frontend/docs/rewrite-vue/verify_summary.txt
+
+docs/rewrite-vue/shots/  # 根级验收截图同样为真实系统画面

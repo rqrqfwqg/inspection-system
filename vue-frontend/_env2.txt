@@ -1,0 +1,5 @@
+﻿port9527_listening: True
+react_venv_python: True
+uvicorn_in_venv: True
+local_appdb: True
+chromium: none

@@ -7,7 +7,7 @@
 """
 import io, json, ssl, time, urllib.request, urllib.error, sys
 
-BASE = "https://82.156.62.59/ops/api/assets"
+BASE = "https://OPS_HOST_PLACEHOLDER/ops/api/assets"
 CTX = ssl.create_default_context()
 CTX.check_hostname = False
 CTX.verify_mode = ssl.CERT_NONE

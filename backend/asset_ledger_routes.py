@@ -141,7 +141,10 @@ def _warranty_state(end_iso: Optional[str]) -> Optional[str]:
 # 图纸提取类子系统：其 records 保留 device_code（供 /search、/detail 按回路编号、
 # 配电箱编码直接关联检索），但**不并入资产总台账**，否则图纸设备会污染台账口径
 # （实测 elec_dwg 子系统 7937 条会让 total 从 8977 涨到 1.6 万）。
-_LEDGER_EXCLUDED_SUBSYSTEMS = ("elec_dwg", "room")
+# `work_order`：运维执行域（一期工单）预留的保留子系统码 —— 其数据是**独立物理表**
+# （不进 records，故本就不会进 total）；此处登记为排除项属**防御性**声明：
+# 万一将来有人把工单域数据塞进 records 并挂到该子系统码下，total 也不会被污染（AC-08）。
+_LEDGER_EXCLUDED_SUBSYSTEMS = ("elec_dwg", "room", "work_order")
 # room（房间）：房间是「场地」而非「资产」，其 device_code 实为房间编号，在 devices /
 # fixed_assets 中 0 命中 → 只涨 total 计数、**不贡献任何金额**。2026-09-16 起剔除
 # （total 8980 → 8455），避免「每在机房信息汇总加一间房 total +1」污染资产口径。

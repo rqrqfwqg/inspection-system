@@ -1,0 +1,3 @@
+﻿FOUND C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe
+ms-playwright: .links, chromium-1217, daemon
+.cache dirs: ezdxf, paddle

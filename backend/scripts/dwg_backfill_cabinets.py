@@ -9,7 +9,7 @@
 import io, json, ssl, time, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
-BASE = "https://82.156.62.59/ops/api/assets"
+BASE = "https://OPS_HOST_PLACEHOLDER/ops/api/assets"
 TID = 11
 CTX = ssl.create_default_context()
 CTX.check_hostname = False

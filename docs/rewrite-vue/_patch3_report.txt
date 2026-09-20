@@ -1,0 +1,7 @@
+recheck ## 14. 已登记偏差 -> 1
+recheck D-01 -> 1
+recheck D-02 -> 1
+recheck D-03 -> 3
+recheck D-04 -> 1
+recheck ALL_PASS=true -> 1
+FILE_LINES=264

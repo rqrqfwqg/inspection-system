@@ -188,7 +188,7 @@ dist -> releases/vue-<git-sha>   # 符号链接，后端读的就是 <项目>/di
 2. `npm run preview`，将浏览器切 **1280×720** 与 **1536×864** 两档：逐路由（13 条）走查，断言**无横向溢出、无元素压扁**；重点截图 `asset-viz` 关系图与 `asset/devices` 宽表。
 3. 关键成功流：`/ops` 概览加载 → `asset/devices` 列表/分页 → 打开设备详情（关系图随容器等比缩放）→ 导出 xlsx。
 4. 关键错误流：接口 422（制造校验失败）时前端展示**拼接后的可读消息**，不裸抛。
-5. 发布：`ln -sfn releases/vue-<sha> dist` 后访问 `https://82.156.62.59/ops/` 复验 2–4；随后演练 `ln -sfn releases/react-<sha> dist` 回滚一次。
+5. 发布：`ln -sfn releases/vue-<sha> dist` 后访问 `https://<OPS_HOST>/ops/` 复验 2–4；随后演练 `ln -sfn releases/react-<sha> dist` 回滚一次。
 6. 通过 = 上述全绿 + 无 300 行超限文件 + 图标/颜色 Token 无违规。
 
 ## 10. 明确不做（Out of Scope）

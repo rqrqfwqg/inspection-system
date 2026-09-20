@@ -2,9 +2,20 @@
 
 设计要点：
 - `DISABLE_AUTH` 为生产内网开放开关，`DEV_MODE` 为开发跳过开关；
-  二者任一为 true 即 `AUTH_DISABLED`（免鉴权 admin 模式）。
-- `get_current_user` / `require_admin`：`AUTH_DISABLED` 时直接返回 admin 用户，
+  二者任一为 true 即免鉴权（admin 模式）。
+- `get_current_user` / `require_admin`：免鉴权时直接返回 admin 用户，
   否则保持原 JWT 校验逻辑不变。
+
+Phase 0 变更（开关可配置化）
+---------------------------
+原实现把 `AUTH_DISABLED` 冻结在 import 期，进程内无法按配置关闭 → 无法满足
+「关闭 DISABLE_AUTH 后任何写操作强制登录」（Spec AC-09 / §11「生产零鉴权」）的
+可验证性。现改为：
+
+- `auth_disabled()`：**每次调用**读环境变量（`DEV_MODE` / `DISABLE_AUTH`），
+  与 P0 规则一致 —— 环境变量仍是唯一权威开关，线上取值不由本代码改动；
+- `set_auth_disabled(bool|None)`：仅供本地验证/测试注入，`None` = 恢复跟随环境变量；
+  生产不调用，故线上行为与改动前逐字一致。
 """
 import os
 from typing import Optional
@@ -24,8 +35,32 @@ from auth import get_password_hash, decode_token
 
 DEV_MODE = os.getenv("DEV_MODE", "false").lower() in ("true", "1")
 DISABLE_AUTH = os.getenv("DISABLE_AUTH", "false").lower() in ("true", "1")
-# 任一开关为真即进入免鉴权模式（内网开放、自动 admin）
+# 任一开关为真即进入免鉴权模式（内网开放、自动 admin）。
+# 保留为模块常量：既有代码 `from dependencies import AUTH_DISABLED` 仍可用；
+# 需要「运行期跟随配置」的判定请调用 auth_disabled()。
 AUTH_DISABLED = DEV_MODE or DISABLE_AUTH
+
+# 运行期覆盖：None = 跟随环境变量（生产恒为 None）；仅本地验证/测试注入。
+_auth_override: Optional[bool] = None
+
+
+def auth_disabled() -> bool:
+    """当前是否免鉴权。
+
+    优先取运行期覆盖（仅测试注入），否则**实时**读环境变量 —— 使「关闭
+    DISABLE_AUTH 后写操作强制登录」无需重启进程即可验证。
+    """
+    if _auth_override is not None:
+        return bool(_auth_override)
+    dev = os.getenv("DEV_MODE", "false").lower() in ("true", "1")
+    disable = os.getenv("DISABLE_AUTH", "false").lower() in ("true", "1")
+    return dev or disable
+
+
+def set_auth_disabled(value: Optional[bool]) -> None:
+    """注入鉴权开关（None = 恢复跟随环境变量）。仅供本地验证脚本 / 测试使用。"""
+    global _auth_override
+    _auth_override = value
 
 
 def _ensure_admin(db: Session) -> User:
@@ -52,10 +87,10 @@ def get_current_user(
 ) -> User:
     """获取当前登录用户。
 
-    - AUTH_DISABLED（免鉴权模式）：直接返回 admin，不校验 token。
-    - 否则：校验 Bearer token，失败抛出 401。
+    - 免鉴权模式（auth_disabled() 为真）：直接返回 admin，不校验 token。
+    - 否则：校验 Bearer token，失败抛出 401（写操作因此强制登录，AC-09）。
     """
-    if AUTH_DISABLED:
+    if auth_disabled():
         return _ensure_admin(db)
 
     if not authorization or not authorization.startswith("Bearer "):

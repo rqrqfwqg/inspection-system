@@ -96,7 +96,7 @@ const cards = computed<CardDef[]>(() => {
       key: 'no-location',
       label: '缺位置信息',
       value: fmtInt(s.no_location),
-      hint: '楼栋 / 房间 / 位置描述均为空，无法按区巡检',
+      hint: '楼栋 / 房间 / 位置描述均为空，暂不支持按区域筛选',
       icon: MapLocation,
       tone: 'default',
       state: 'no_location',

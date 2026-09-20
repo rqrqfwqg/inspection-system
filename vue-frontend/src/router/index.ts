@@ -2,8 +2,11 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { APP_BASE } from '@/config'
 import MainLayout from '@/layouts/MainLayout.vue'
 
-// 13 条路由，与 React 版 src/App.tsx 完全等价（决策 D1：全量等价迁移，不删任何一条）
+// 16 条路由，与 React 版 src/App.tsx 等价（决策 D1：全量等价迁移，不删任何一条）
 // 全量实现完成：一期（壳 + 资产总台账 + 检索）、二期（资产可视化 + 数据表管理 + 扫码盘点）、三期（6 页面）
+// + 工单执行流（一期 Phase 3 新增：3 条）
+// 【路由顺序硬约束】/workorder/new 必须声明在 /workorder/:id **之前**，
+//   否则会被动态段 :id 吃掉（/workorder/new → id='new'）。
 const router = createRouter({
   history: createWebHistory(APP_BASE),
   routes: [
@@ -86,6 +89,27 @@ const router = createRouter({
           name: 'qr-scan',
           component: () => import('@/views/scan/ScanDeviceView.vue'),
           meta: { title: '扫码设备详情' },
+        },
+        // ── 工单执行流（Phase 3）：静态段先于 /workorder/:id 声明 ──────────
+        {
+          path: 'workorder/list',
+          name: 'workorder-list',
+          component: () => import('@/views/workorder/WorkOrderListView.vue'),
+          meta: { title: '工单' },
+        },
+        {
+          path: 'workorder/new',
+          name: 'workorder-new',
+          component: () => import('@/views/workorder/WorkOrderCreateView.vue'),
+          meta: { title: '新建工单', menuPath: '/workorder/list' },
+        },
+        // 动态段放最后：/workorder/:id
+        {
+          path: 'workorder/:id',
+          name: 'workorder-detail',
+          component: () => import('@/views/workorder/WorkOrderDetailView.vue'),
+          // menuPath：详情页 / 新建页在侧栏统一高亮「工单」
+          meta: { title: '工单详情', menuPath: '/workorder/list' },
         },
       ],
     },

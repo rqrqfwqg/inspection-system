@@ -26,7 +26,12 @@ from asset_routes import router as asset_router, seed_assets
 # 资产总台账（设备台账升级）：独立模块，避免 asset_routes 继续膨胀
 from asset_ledger_routes import router as asset_ledger_router
 from asset_link_routes import router as asset_link_router
-from dependencies import get_current_user, require_admin, AUTH_DISABLED
+# 运维执行域（一期）：工单 + 备件联邦镜像（同库新表，隔离于资产台账）
+from work_order_routes import router as work_order_router
+from parts_routes import router as parts_router
+from ops_errors import register_error_handlers
+from ops_rbac import permissions_for
+from dependencies import get_current_user, require_admin, auth_disabled
 
 from contextlib import asynccontextmanager
 
@@ -76,6 +81,9 @@ async def lifespan(app_instance):
 
 app = FastAPI(title="项目管理部运维系统 API", version="2.0.0", lifespan=lifespan)
 
+# 统一错误契约：{"code": <int>, "detail": <str>}（409 额外带 serverVersion，OpenAPI §0.1）
+register_error_handlers(app)
+
 # CORS 配置
 app.add_middleware(
     CORSMiddleware,
@@ -107,6 +115,8 @@ api_router.include_router(cad_router)      # /ops/api/cad/...
 api_router.include_router(asset_router)    # /ops/api/assets/...
 api_router.include_router(asset_ledger_router)  # /ops/api/assets/asset-ledger...
 api_router.include_router(asset_link_router)    # /ops/api/assets/link...（可视化×数据表联动）
+api_router.include_router(work_order_router)    # /ops/api/work-orders...（工单 + 附件）
+api_router.include_router(parts_router)         # /ops/api/parts | /ops/api/inventory（命名空间别名）
 
 # ==================== 健康检查 ====================
 
@@ -148,13 +158,12 @@ login_limiter = LoginRateLimiter()
 @api_router.post("/auth/login", response_model=Token)
 def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
     # 免鉴权模式（内网开放）：忽略密码，直接返回 admin + 占位 token（兼容前端旧调用）
-    if AUTH_DISABLED:
+    # 关闭 DISABLE_AUTH / DEV_MODE 后走下方真实校验（Phase 0：写操作强制登录，AC-09）
+    if auth_disabled():
         admin = get_current_user(None, db)
-        return Token(
-            access_token="ops-bypass-token",
-            token_type="bearer",
-            user=UserResponse.model_validate(admin),
-        )
+        me = UserResponse.model_validate(admin)
+        me.permissions = sorted(permissions_for(admin.role))
+        return Token(access_token="ops-bypass-token", token_type="bearer", user=me)
 
     # 登录限流
     client_ip = request.client.host if request.client else "unknown"
@@ -169,7 +178,9 @@ def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db))
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账户已被禁用，请联系管理员")
     access_token = create_access_token(data={"sub": user.email, "user_id": user.id})
-    return Token(access_token=access_token, token_type="bearer", user=UserResponse.model_validate(user))
+    me = UserResponse.model_validate(user)
+    me.permissions = sorted(permissions_for(user.role))
+    return Token(access_token=access_token, token_type="bearer", user=me)
 
 @api_router.post("/auth/register", response_model=UserResponse)
 def register(user_data: UserCreate, db: Session = Depends(get_db)):
@@ -223,8 +234,10 @@ def get_users(
 
 @api_router.get("/users/me", response_model=UserResponse)
 def get_me(current_user: User = Depends(get_current_user)):
-    """获取当前登录用户信息"""
-    return UserResponse.model_validate(current_user)
+    """获取当前登录用户信息（含权限位，供前端精确禁用按钮）"""
+    me = UserResponse.model_validate(current_user)
+    me.permissions = sorted(permissions_for(current_user.role))
+    return me
 
 @api_router.get("/users/{user_id}", response_model=UserResponse)
 def get_user(user_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -377,6 +390,9 @@ def delete_room(room_id: int, db: Session = Depends(get_db), current_user: User 
 
 # 注册顶层 API 路由器（/ops/api 收口）
 app.include_router(api_router)
+
+# 备件联邦仅挂 /ops/api（项目硬约束：对外只走 /ops/api/*）。
+# 同名域 /api/* 由 nginx 反代到 tools-management，后端不得再挂 /api 前缀，避免契约污染。
 
 # ==================== 前端 SPA 静态服务（/ops 命名空间） ====================
 

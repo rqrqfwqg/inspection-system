@@ -1,0 +1,10 @@
+1280x720 (1920@150%) /asset/devices | A1无页面溢出=true A2无压扁=true A3无越界=true A4无body滚动=true | 侧栏=64px svg=67
+1280x720 (1920@150%) /asset/search | A1无页面溢出=true A2无压扁=true A3无越界=true A4无body滚动=true | 侧栏=64px svg=15
+1280x720 (1920@150%) /dashboard | A1无页面溢出=true A2无压扁=true A3无越界=true A4无body滚动=true | 侧栏=64px svg=13
+1536x864 (1920@125%) /asset/devices | A1无页面溢出=true A2无压扁=true A3无越界=true A4无body滚动=true | 侧栏=240px svg=67
+1536x864 (1920@125%) /asset/search | A1无页面溢出=true A2无压扁=true A3无越界=true A4无body滚动=true | 侧栏=240px svg=15
+1536x864 (1920@125%) /dashboard | A1无页面溢出=true A2无压扁=true A3无越界=true A4无body滚动=true | 侧栏=240px svg=13
+1920x1080 (100%) /asset/devices | A1无页面溢出=true A2无压扁=true A3无越界=true A4无body滚动=true | 侧栏=240px svg=67
+1920x1080 (100%) /asset/search | A1无页面溢出=true A2无压扁=true A3无越界=true A4无body滚动=true | 侧栏=240px svg=15
+1920x1080 (100%) /dashboard | A1无页面溢出=true A2无压扁=true A3无越界=true A4无body滚动=true | 侧栏=240px svg=13
+ALL_PASS=true

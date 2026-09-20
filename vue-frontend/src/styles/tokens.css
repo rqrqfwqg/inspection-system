@@ -364,3 +364,146 @@ html.is-dense .el-table .el-table__cell     { padding: 4px 0; }
   .app-sider, .app-header, .app-toolbar, .no-print { display: none !important; }
   .app-content { padding: 0 !important; }
 }
+
+/* ==========================================================================
+   C-extension : 工单 / 设备 状态色标（一期 Phase 3 追加）
+   来源：inspection-phase1-tokens.css（设计师 颜好看）
+   纪律：本块为**纯追加**——A1-identity / A1-structure / A2 / Element Plus 映射一行未改；
+       既有对比度偏差 E1–E3 登记为后续项，本期不处理。
+   对比度契约（WCAG 2.1 AA）：
+     *-fg   用于文字 / 图标 / 一切细线与小图形 -> 全部 >= 4.5:1
+     *-base 仅用于 >= 24px 的填充块 / 描边 -> 白底 >= 3:1
+     *-bg   仅用于状态块浅底
+   ========================================================================== */
+:root {
+  /* 工单状态 —— 中性族：未生效 / 已失效 */
+  --wo-draft-base: #909399;              --wo-draft-bg: #F0F2F5;              --wo-draft-fg: #606266;   /* 5.45:1 */
+  --wo-cancelled-base: #909399;          --wo-cancelled-bg: #F0F2F5;          --wo-cancelled-fg: #606266; /* 5.45:1 */
+
+  /* 工单状态 —— 琥珀族：等待他方动作（待派单 / 待验收）
+     fg 用 #A34A06（非既有 --warn-fg #B45309，后者在 #FBF1E6 上仅 4.499:1 压线不过） */
+  --wo-pending-dispatch-base: #D97706;   --wo-pending-dispatch-bg: #FBF1E6;   --wo-pending-dispatch-fg: #A34A06; /* 5.32:1 */
+  --wo-pending-review-base: #D97706;     --wo-pending-review-bg: #FDF6EC;     --wo-pending-review-fg: #A34A06;   /* 5.53:1 */
+
+  /* 工单状态 —— 青族：已受理未开工
+     base 用 #0284C7（非既有 --info #0EA5E9，后者作图形仅 2.77:1 连 3:1 都不过） */
+  --wo-assigned-base: #0284C7;           --wo-assigned-bg: #E7F6FD;           --wo-assigned-fg: #0369A1; /* 5.37:1 */
+
+  /* 工单状态 —— 品牌蓝族：进行中 */
+  --wo-in-progress-base: #2563EB;        --wo-in-progress-bg: #E9EFFD;        --wo-in-progress-fg: #1E4FBC; /* 6.29:1 */
+
+  /* 工单状态 —— 绿族：已完成（浅）/ 已关闭（实）
+     bg 用 #EDF7F1（非既有 --success-bg #E8F6ED，后者配 #15803D 仅 4.499:1 压线不过） */
+  --wo-completed-base: #16A34A;          --wo-completed-bg: #EDF7F1;          --wo-completed-fg: #15803D; /* 4.58:1 */
+  --wo-closed-base: #15803D;             --wo-closed-bg: #DCF0E4;             --wo-closed-fg: #115E33;   /* 6.60:1 */
+
+  /* 工单状态 —— 红族：打回后重新打开 */
+  --wo-reopened-base: #DC2626;           --wo-reopened-bg: #FCE9E9;           --wo-reopened-fg: #B91C1C; /* 5.54:1 */
+
+  /* 设备状态 —— 与工单绿/琥珀/红族同值（刻意复用，减少全站色相数） */
+  --dev-normal-base: #16A34A;            --dev-normal-bg: #EDF7F1;            --dev-normal-fg: #15803D; /* 4.58:1 */
+  --dev-warning-base: #D97706;           --dev-warning-bg: #FBF1E6;           --dev-warning-fg: #A34A06; /* 5.32:1 */
+  --dev-fault-base: #DC2626;             --dev-fault-bg: #FCE9E9;             --dev-fault-fg: #B91C1C;   /* 5.54:1 */
+}
+
+/* 深色主题 —— P2 预留，MVP 不启用（沿用「仅 class 触发，不跟随系统」的既有约定） */
+:root[data-theme="dark"] {
+  --wo-draft-base: #8A8F98;              --wo-draft-bg: #232833;              --wo-draft-fg: #B4B8C0;
+  --wo-cancelled-base: #8A8F98;          --wo-cancelled-bg: #232833;          --wo-cancelled-fg: #B4B8C0;
+  --wo-pending-dispatch-base: #E09B3D;   --wo-pending-dispatch-bg: #3A2A16;   --wo-pending-dispatch-fg: #F2B36A;
+  --wo-pending-review-base: #E09B3D;     --wo-pending-review-bg: #3A2A16;     --wo-pending-review-fg: #F2B36A;
+  --wo-assigned-base: #3BA7D8;           --wo-assigned-bg: #0E2A3A;           --wo-assigned-fg: #6DC7F0;
+  --wo-in-progress-base: #4C86F5;        --wo-in-progress-bg: #1B2536;        --wo-in-progress-fg: #8FB4F8;
+  --wo-completed-base: #3E9A66;          --wo-completed-bg: #1B2E22;          --wo-completed-fg: #7FD39B;
+  --wo-closed-base: #35A366;             --wo-closed-bg: #14301E;             --wo-closed-fg: #8FE0AC;
+  --wo-reopened-base: #E25C5C;           --wo-reopened-bg: #3A1A1A;           --wo-reopened-fg: #F09A9A;
+  --dev-normal-base: #3E9A66;            --dev-normal-bg: #1B2E22;            --dev-normal-fg: #7FD39B;
+  --dev-warning-base: #E09B3D;           --dev-warning-bg: #3A2A16;           --dev-warning-fg: #F2B36A;
+  --dev-fault-base: #E25C5C;             --dev-fault-bg: #3A1A1A;             --dev-fault-fg: #F09A9A;
+}
+
+/* ==========================================================================
+   状态色标组件骨架类（全局；组件内不得出现任何字面色值）
+   用法：<span class="wo-tag" :style="{'--tone-bg': var(--wo-x-bg), '--tone-fg': var(--wo-x-fg)}">
+   ========================================================================== */
+.wo-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--tone-bg, var(--surface-3));
+  color: var(--tone-fg, var(--fg-2));
+  font-size: var(--text-xs);
+  line-height: var(--leading-snug);
+  font-weight: var(--weight-emphasize);
+  white-space: nowrap;       /* 标签自身即最小单元；外层容器负责 min-width:0 */
+  max-width: 100%;
+}
+.wo-tag .el-icon { flex: 0 0 auto; }
+
+/* 描边形态（completed / pending_review）：同色系 outline，不加阴影 */
+.wo-tag.is-plain {
+  background: var(--surface);
+  border: 1px solid currentColor;
+}
+
+/* 实心点形态（closed / cancelled）：终态加一个 6px 圆点作为第四通道 */
+.wo-tag.is-final::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+  margin-left: 2px;
+}
+
+/* 优先级标记：不吃色相，仅紧急档用 danger 底 */
+.wo-prio {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--fg-2);
+}
+.wo-prio.is-high { color: var(--fg); font-weight: var(--weight-emphasize); }
+.wo-prio.is-urgent {
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  font-weight: var(--weight-emphasize);
+}
+
+/* 状态块左侧 2px 竖条（仅移动端卡片 / 看板用；细线一律取 --tone-fg，>=4.5:1） */
+.wo-rail-accent {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+  background: var(--tone-fg, var(--border));
+}
+
+/* 状态机进度条（6 段主链）—— 已完成 fg，当前 fg + 2px 环，未来 border；连线 1px、不用渐变 */
+.wo-rail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+.wo-rail__step { display: inline-flex; align-items: center; gap: var(--space-1); font-size: var(--text-xs); color: var(--muted); }
+.wo-rail__dot {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  background: var(--border);
+}
+.wo-rail__step.is-done { color: var(--fg-2); }
+.wo-rail__step.is-done .wo-rail__dot { background: var(--tone-fg, var(--accent-active)); }
+.wo-rail__step.is-current { color: var(--fg); font-weight: var(--weight-emphasize); }
+.wo-rail__step.is-current .wo-rail__dot { background: var(--tone-fg, var(--accent-active)); box-shadow: 0 0 0 2px var(--accent-soft); }
+.wo-rail__sep { flex: 0 0 16px; height: 1px; background: var(--border); }

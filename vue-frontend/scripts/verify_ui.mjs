@@ -47,7 +47,7 @@ const PAGES = [
   { name: 'asset-qr-labels', path: '/asset/qr-labels', selector: LENIENT },
   { name: 'asset-inventory', path: '/asset/inventory', selector: LENIENT },
   { name: 'asset-viz', path: '/asset-viz', selector: LENIENT },
-  { name: 'qr-scan', path: `/qr/${encodeURIComponent('1#BZ-DDC-PF-01')}`, selector: LENIENT },
+  { name: 'qr-scan', path: `/qr/${encodeURIComponent('1#DEMO-XX-XX-01')}`, selector: LENIENT },
 ]
 
 function pickBrowser() {
@@ -174,6 +174,7 @@ async function main() {
     const ctx = await browser.newContext({
       viewport: { width: vp.width, height: vp.height },
       deviceScaleFactor: 1,
+      ignoreHTTPSErrors: true,
     })
     const page = await ctx.newPage()
     const consoleErrors = []

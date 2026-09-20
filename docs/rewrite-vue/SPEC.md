@@ -228,7 +228,7 @@ npm run preview
 # 6) 发布与回滚演练
 #    ln -sfn releases/vue-<sha> dist      # 发布
 #    ln -sfn releases/react-<sha> dist    # 回滚（首次发布前必须先归档现网 React 产物）
-#    两者均访问 https://82.156.62.59/ops/ 复验第 4 步
+#    两者均访问 https://<OPS_HOST>/ops/ 复验第 4 步
 ```
 
 **通过判定**：`vue-tsc` 零错误 + 第 3 步两档视口全绿 + 第 4/5 步复现无误 + 无 >300 行文件 + emoji 扫描零命中 + 颜色全走 Token。
@@ -278,3 +278,12 @@ npm run preview
 | 目录依赖只向下 | `views → components\|api → api → types`；禁反向 import | **通过**：实测 `views → components/api/types`、`components → api/types`、`api → types`、`layouts → components`，无一处反向引用 |
 | 图标唯一 | 仅 `@element-plus/icons-vue`（2.3.2），禁 emoji、禁第二套库 | **通过**：组件内 100% 显式 `import { … } from '@element-plus/icons-vue'`；全量 emoji 正则扫描 **0 命中** |
 | 颜色 Token 化 | 组件内禁字面颜色（唯一例外 `#fff`/`#000`），一律 `var()` | **通过**：十六进制字面量**仅**存在于 `styles/tokens.css`（单一事实源），components / views / layouts **0 处硬编码** |
+
+## 15. 上线记录（2026-09-17）
+
+- **GitHub**：commit `aaf13881a4`（167 文件，React 源码保留作回滚锚点；截图/验收报告含真实台账画面，按公开仓库红线未入库）
+- **服务器**：`git reset --hard origin/main` → `vue-frontend` npm install + build（32s）→ 产物归档 `releases/vue-aaf1388`，React 旧产物归档 `releases/react-491fc74`，`dist` 为符号链接（后端 `DIST_DIR` 按请求解析，切换即热生效）→ `systemctl restart inspection.service`
+- **产物一致性**：线上 `dist/index.html` 主 chunk `index-5FTr1LKA.js` 与本地构建哈希完全一致
+- **线上几何验收**：13 路由 × 3 视口 = **39/39 全绿 ALL_PASS=true**（A1 无溢出 / A2 无压扁 / A3 无越界 / A4 无 body 滚动；侧栏 1280→64px、1536/1920→240px）
+- **回滚演练**：`ln -sfn releases/react-491fc74 dist` → 主 chunk 变回 `index-CWPC4Wtz.js`（React），再切回 `releases/vue-aaf1388`，全程零构建、秒级
+- **遗留**：D-05（主 chunk 1.21MB / gzip 389KB，全量引入 Element Plus）不影响功能，后续期次做按需引入

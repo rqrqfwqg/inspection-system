@@ -99,7 +99,7 @@
 
 - **拉丁与数字用 Inter**：需要 tabular numerals 对齐台账数字（电容量 KW、序号、线径、距离）。
 - **中文用系统字体**（PingFang / Microsoft YaHei）：机场内网可能访问不到 Google Fonts，且 Noto Sans SC 全量约 5-10MB，首屏代价不可接受。中文字体不做 webfont。
-- **等宽用 Spline Sans Mono**：设备编号含 `L-3F-A-001`、`G-P(Y)-RF-01-04`、`C-B1-S-1DDC-1_1#`，`1/l/I` 与 `0/O` 必须可辨。
+- **等宽用 Spline Sans Mono**：设备编号含 `L-3F-A-001`、`G-P(Y)-RF-01-04`、`C-B1-S-1DEMO-1_1#`，`1/l/I` 与 `0/O` 必须可辨。
 - **内网自托管**：`npm i @fontsource/inter @fontsource/spline-sans-mono`；**禁止 CDN**（代码里不得出现 `fonts.googleapis.com`）。
 
 **字号阶梯（8 级，`--text-xs` 12px 为全站下限，禁止低于 12px）**

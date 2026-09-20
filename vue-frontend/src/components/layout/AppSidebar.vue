@@ -11,9 +11,12 @@ const router = useRouter()
 // 生产 DISABLE_AUTH=true 恒为管理员，9 项全量可见（与 React 版 filter 结果一致）
 const visibleItems = computed(() => MENU_ITEMS)
 
-/** 当前激活项：精确匹配优先，其次前缀匹配（/asset/ledger/12 应高亮「数据表管理」） */
+/** 当前激活项：路由显式指定的 menuPath 优先，其次精确匹配，最后前缀匹配
+ *  （/workorder/12 详情、/workorder/new 均通过 meta.menuPath 归到「工单」） */
 const activePath = computed(() => {
   const p = route.path
+  const hinted = route.meta?.menuPath
+  if (typeof hinted === 'string' && visibleItems.value.some((m) => m.path === hinted)) return hinted
   const exact = visibleItems.value.find((m) => m.path === p)
   if (exact) return exact.path
   const prefix = visibleItems.value

@@ -24,6 +24,8 @@ class UserResponse(UserBase):
     role: str
     is_active: bool
     created_at: datetime
+    # 权限位数组（Phase 0 RBAC），供前端精确禁用按钮；由接口按当前用户 role 填充。
+    permissions: List[str] = []
     
     model_config = ConfigDict(from_attributes=True)
 

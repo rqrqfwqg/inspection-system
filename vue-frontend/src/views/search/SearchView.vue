@@ -44,7 +44,7 @@ const hasAny = computed(() => {
 const EXAMPLES: { code: string; label: string }[] = [
   { code: 'G-1D2ATwb', label: '电柜编号' },
   { code: 'G-P(Y)-RF-01-04', label: '含括号的图纸回路编号' },
-  { code: 'C-B1-S-1DDC-1_1#', label: '含 # 的编号（验证 URL 编码）' },
+  { code: 'C-B1-S-1DEMO-1_1#', label: '含 # 的编号（验证 URL 编码）' },
   { code: '105000', label: '资产号前缀（会返回多条候选）' },
 ]
 

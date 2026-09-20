@@ -1,0 +1,2 @@
+﻿pw_dir: True
+C:\Users\yan\AppData\Local\ms-playwright\chromium-1217\chrome-win64\chrome.exe

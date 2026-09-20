@@ -1,0 +1,15 @@
+﻿misc.ts : 85
+useCurrentUser.ts : 38
+QrLabelSheet.vue : 134
+AvatarUpload.vue : 108
+UserFormDialog.vue : 112
+AccountForm.vue : 81
+PasswordForm.vue : 63
+CadAnalysisPanel.vue : 101
+QrLabelView.vue : 183
+UsersView.vue : 205
+SettingsView.vue : 154
+CadView.vue : 186
+OverviewView.vue : 140
+EMOJI_HITS=0
+COLOR_HITS=0

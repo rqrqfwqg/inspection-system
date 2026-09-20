@@ -1,0 +1,5 @@
+﻿node: v22.14.0
+npm: 10.9.2
+react_node_modules: True
+vuefront_node_modules: True
+managed_node: v22.22.2

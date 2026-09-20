@@ -1,0 +1,14 @@
+count=1  版本行状态
+count=1  插入决策冻结块
+count=1  §7 MVP 说明
+count=1  §7 二期行
+count=1  §7 三期行（幂等占位）
+count=1  §8 第 4 行 CAD
+count=1  §8 第 5 行移动端
+ALL_ASSERTIONS_PASSED=True
+recheck 决策冻结块 -> 1
+recheck D1 -> 2
+recheck D3 -> 1
+recheck D2 暂缓 -> 1
+recheck 二期标记 -> 1
+FILE_LINES=238
