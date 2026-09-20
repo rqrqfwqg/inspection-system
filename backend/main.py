@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from database import get_db, init_db, User, Room
 from schemas import (
-    UserCreate, UserLogin, UserResponse, UserUpdate, UserPasswordUpdate,
+    UserCreate, UserLogin, FastLoginRequest, UserResponse, UserUpdate, UserPasswordUpdate,
     Token,
     RoomCreate, RoomUpdate, RoomResponse, RoomBatchImport,
 )
@@ -177,6 +177,26 @@ def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db))
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="手机号或密码错误")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="账户已被禁用，请联系管理员")
+    access_token = create_access_token(data={"sub": user.email, "user_id": user.id})
+    me = UserResponse.model_validate(user)
+    me.permissions = sorted(permissions_for(user.role))
+    return Token(access_token=access_token, token_type="bearer", user=me)
+
+@api_router.post("/auth/fast-login", response_model=Token)
+def fast_login(user_data: FastLoginRequest, request: Request, db: Session = Depends(get_db)):
+    """手机号免密直登（2026-09-20 用户决策：取消账号密码登录，工器通同款）。
+
+    仅当 FAST_LOGIN=true 时启用；与 /auth/login 共享登录限流。
+    安全边界：知道已注册手机号即可获得该账号身份——内网自用工具，用户知情选择。
+    """
+    if os.getenv("FAST_LOGIN", "false").strip().lower() != "true":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="免密登录未启用")
+    client_ip = request.client.host if request.client else "unknown"
+    if not login_limiter.is_allowed(client_ip):
+        raise HTTPException(status_code=429, detail="登录尝试过于频繁，请稍后再试")
+    user = db.query(User).filter(User.phone == user_data.phone).first()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="手机号未注册或已禁用，请联系管理员")
     access_token = create_access_token(data={"sub": user.email, "user_id": user.id})
     me = UserResponse.model_validate(user)
     me.permissions = sorted(permissions_for(user.role))

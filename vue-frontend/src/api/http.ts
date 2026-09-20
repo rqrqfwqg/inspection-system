@@ -49,9 +49,10 @@ instance.interceptors.request.use((config) => {
 /**
  * 防御后端的 SPA catch-all：不存在的 /ops/api/xxx 会返回 200 + index.html。
  * 若不拦截，页面会把 HTML 当数据用，报出莫名其妙的运行时错误。
- * 401 处理（2026-09-20 Phase 0）：非登录接口返回 401 → 清本地登录态并整页跳 /login。
+ * 401 处理（2026-09-20 Phase 0）：非认证接口返回 401 → 清本地登录态并整页跳 /login。
  *   用 location 而非 router：http.ts 不依赖 router（避免循环引用），整页跳转同时
- *   重置所有模块级状态；登录接口自身的 401（密码错误）不触发跳转，由登录页提示。
+ *   重置所有模块级状态；认证接口（/auth/*）自身的 401（密码错误/手机号未注册）
+ *   不触发跳转，由登录页提示。
  */
 instance.interceptors.response.use(
   (res) => {
@@ -66,7 +67,7 @@ instance.interceptors.response.use(
   (error) => {
     const status = error?.response?.status
     const url: string = error?.config?.url || ''
-    if (status === 401 && !url.includes('/auth/login')) {
+    if (status === 401 && !url.includes('/auth/')) {
       try {
         localStorage.removeItem('token')
         localStorage.removeItem('user')

@@ -18,6 +18,10 @@ class UserLogin(BaseModel):
     phone: str
     password: str
 
+class FastLoginRequest(BaseModel):
+    """手机号免密直登请求体（2026-09-20 用户决策：取消账号密码，工器通同款）"""
+    phone: str
+
 class UserResponse(UserBase):
     id: int
     avatar: Optional[str] = None

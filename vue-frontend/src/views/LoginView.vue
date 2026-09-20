@@ -2,32 +2,29 @@
 import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { User, Lock } from '@element-plus/icons-vue'
-import { login } from '@/api/users'
+import { User } from '@element-plus/icons-vue'
+import { fastLogin } from '@/api/users'
 import { formatApiError } from '@/api/http'
 import { APP_BASE } from '@/config'
 
 /**
- * 登录页（一期 Phase 0 补齐：2026-09-20 生产关闭 DISABLE_AUTH 后的前置入口）。
- * 契约：POST /auth/login {phone, password} → {access_token, token_type, user}（user 含 permissions）。
- * phone 字段后端同时接受手机号或邮箱（main.py:173-175 的 OR 过滤）。
+ * 登录页（2026-09-20 用户决策：取消账号密码，改手机号免密直登——工器通同款）。
+ * 契约：POST /auth/fast-login {phone} → {access_token, token_type, user}（user 含 permissions）。
+ * 后端仅在 FAST_LOGIN=true 时启用；手机号未注册/禁用 → 401，由本页提示。
  * 成功后整页跳转（location.href）：刷新 useCurrentUser 等模块级单例缓存，
  * 避免登录前触发的「未取到当前用户」状态残留。
  */
 const route = useRoute()
 const phone = ref('')
-const password = ref('')
 const loading = ref(false)
 
-const canSubmit = computed(
-  () => phone.value.trim().length > 0 && password.value.length > 0
-)
+const canSubmit = computed(() => phone.value.trim().length > 0)
 
 async function submit() {
   if (!canSubmit.value || loading.value) return
   loading.value = true
   try {
-    const res = await login(phone.value.trim(), password.value)
+    const res = await fastLogin(phone.value.trim())
     localStorage.setItem('token', res.access_token)
     localStorage.setItem('user', JSON.stringify(res.user))
     const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : ''
@@ -52,25 +49,14 @@ async function submit() {
       </div>
 
       <el-form label-position="top" @submit.prevent="submit">
-        <el-form-item label="手机号 / 邮箱">
+        <el-form-item label="手机号">
           <el-input
             v-model="phone"
-            placeholder="请输入手机号或邮箱"
+            placeholder="请输入手机号，免密直接登录"
             :prefix-icon="User"
             size="large"
+            inputmode="numeric"
             autocomplete="username"
-            @keyup.enter="submit"
-          />
-        </el-form-item>
-        <el-form-item label="密码">
-          <el-input
-            v-model="password"
-            type="password"
-            placeholder="请输入密码"
-            :prefix-icon="Lock"
-            size="large"
-            show-password
-            autocomplete="current-password"
             @keyup.enter="submit"
           />
         </el-form-item>
@@ -82,7 +68,7 @@ async function submit() {
           :disabled="!canSubmit"
           native-type="submit"
         >
-          登 录
+          直接登录
         </el-button>
       </el-form>
     </div>

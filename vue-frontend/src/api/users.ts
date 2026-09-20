@@ -21,6 +21,11 @@ export function login(phone: string, password: string) {
   return http.post<LoginResult>('/auth/login', { phone, password })
 }
 
+/** 手机号免密直登（2026-09-20 用户决策：取消账号密码，工器通同款；FAST_LOGIN=true 时后端启用） */
+export function fastLogin(phone: string) {
+  return http.post<LoginResult>('/auth/fast-login', { phone })
+}
+
 export function register(data: {
   email: string
   password: string
