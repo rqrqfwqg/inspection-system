@@ -194,9 +194,18 @@ def fast_login(user_data: FastLoginRequest, request: Request, db: Session = Depe
     client_ip = request.client.host if request.client else "unknown"
     if not login_limiter.is_allowed(client_ip):
         raise HTTPException(status_code=429, detail="登录尝试过于频繁，请稍后再试")
-    user = db.query(User).filter(User.phone == user_data.phone).first()
-    if not user or not user.is_active:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="手机号未注册或已禁用，请联系管理员")
+    identifier = (user_data.identifier or user_data.phone or user_data.username or "").strip()
+    if not identifier:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请填写手机号或用户名")
+    # 与工器通同语义：手机号或用户名（巡检侧额外兼容邮箱）匹配即签发，无密码
+    user = db.query(User).filter(
+        (User.phone == identifier) | (User.name == identifier) | (User.email == identifier)
+    ).first()
+    if not user:
+        # 文案与工器通 routes/auth.js 保持一致
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="账号不存在，请检查手机号或用户名")
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="用户已被禁用")
     access_token = create_access_token(data={"sub": user.email, "user_id": user.id})
     me = UserResponse.model_validate(user)
     me.permissions = sorted(permissions_for(user.role))

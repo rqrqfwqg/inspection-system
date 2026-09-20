@@ -19,8 +19,14 @@ class UserLogin(BaseModel):
     password: str
 
 class FastLoginRequest(BaseModel):
-    """手机号免密直登请求体（2026-09-20 用户决策：取消账号密码，工器通同款）"""
-    phone: str
+    """免密直登请求体（2026-09-20 与工器通 /auth/login 语义对齐：账号免密直登）。
+
+    兼容 identifier / phone / username 三种字段名（与工具库 routes/auth.js 同族），
+    取第一个非空值作为标识，按 手机号 → 用户名(name) → 邮箱 顺序匹配。
+    """
+    identifier: Optional[str] = None
+    phone: Optional[str] = None
+    username: Optional[str] = None
 
 class UserResponse(UserBase):
     id: int

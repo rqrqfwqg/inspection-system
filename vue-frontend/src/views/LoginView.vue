@@ -9,8 +9,8 @@ import { APP_BASE } from '@/config'
 
 /**
  * 登录页（2026-09-20 用户决策：取消账号密码，改手机号免密直登——工器通同款）。
- * 契约：POST /auth/fast-login {phone} → {access_token, token_type, user}（user 含 permissions）。
- * 后端仅在 FAST_LOGIN=true 时启用；手机号未注册/禁用 → 401，由本页提示。
+ * 契约：POST /auth/fast-login {identifier|phone|username} → {access_token, token_type, user}（user 含 permissions）；语义与工器通 /auth/login 对齐（手机号或用户名匹配即签发）。
+ * 后端仅在 FAST_LOGIN=true 时启用；账号不存在 → 401、禁用 → 403，均由本页提示。
  * 成功后整页跳转（location.href）：刷新 useCurrentUser 等模块级单例缓存，
  * 避免登录前触发的「未取到当前用户」状态残留。
  */
@@ -49,13 +49,13 @@ async function submit() {
       </div>
 
       <el-form label-position="top" @submit.prevent="submit">
-        <el-form-item label="手机号">
+        <el-form-item label="手机号 / 用户名">
           <el-input
             v-model="phone"
-            placeholder="请输入手机号，免密直接登录"
+            placeholder="请输入手机号或用户名，免密直接登录"
             :prefix-icon="User"
             size="large"
-            inputmode="numeric"
+            
             autocomplete="username"
             @keyup.enter="submit"
           />
