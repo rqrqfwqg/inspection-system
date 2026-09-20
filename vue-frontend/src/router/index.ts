@@ -113,9 +113,40 @@ const router = createRouter({
         },
       ],
     },
+    // 登录页：独立于 MainLayout（无侧栏/页头），一期 Phase 0 补齐（2026-09-20）
+    {
+      path: '/login',
+      name: 'login',
+      component: () => import('@/views/LoginView.vue'),
+      meta: { title: '登录' },
+    },
     // 404 兜底：与 React 版一致，重定向到首页（不得白屏，AC-04）
     { path: '/:pathMatch(.*)*', redirect: '/dashboard' },
   ],
+})
+
+/**
+ * 登录守卫：生产 DISABLE_AUTH=false 后，无 token 一律踢到 /login。
+ * - 未登录访问受保护页 → /login?redirect=<原目标>（登录成功后原样跳回）
+ * - 已登录访问 /login → 直接进 /dashboard
+ * - token 过期由 http.ts 的 401 拦截兜底（清 token + 整页跳 /login）
+ * 免鉴权开发模式（DISABLE_AUTH=true）下，登录页输任意账号即可拿到 bypass token，不阻塞联调。
+ */
+const PUBLIC_PATHS = new Set(['/login'])
+
+router.beforeEach((to) => {
+  let token: string | null = null
+  try {
+    token = localStorage.getItem('token')
+  } catch {
+    token = null
+  }
+  if (!token && !PUBLIC_PATHS.has(to.path)) {
+    return { path: '/login', query: to.fullPath === '/' ? {} : { redirect: to.fullPath } }
+  }
+  if (token && to.path === '/login') {
+    return { path: '/dashboard' }
+  }
 })
 
 export default router
