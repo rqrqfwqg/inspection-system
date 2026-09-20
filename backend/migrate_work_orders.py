@@ -7,7 +7,7 @@
 3. **建表**：用 SQLAlchemy 元数据 `create_all` 只**新建缺失表**；
    **绝不 ALTER 任何既有表**（资产台账核心表一行不动）。
 4. **守恒核对**：迁移前后打印 `devices` / `records` / `fixed_assets` 行数，
-   证明资产底座未被触碰（AC-08：新表写入后 ledger total 恒为 8977）。
+   证明资产底座未被触碰（AC-08：新表写入后 ledger total 守恒不变；基线以线上为准，快照 8455）。
 
 用法
 ----
