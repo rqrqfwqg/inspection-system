@@ -28,7 +28,8 @@ class User(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True)
-    name = Column(String)
+    name = Column(String)                                  # 中文展示名（2026-09-21 起：同步自工器通 real_name）
+    username = Column(String, unique=True, index=True, nullable=True)  # 登录账号（英文名，与工器通对齐）；name 仅作展示
     password_hash = Column(String)
     department = Column(String)
     position = Column(String)
