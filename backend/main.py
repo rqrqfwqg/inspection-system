@@ -56,6 +56,7 @@ async def lifespan(app_instance):
         admin = User(
             email="admin@example.com",
             name="管理员",
+            username="admin",
             phone="00000000000",
             password_hash=get_password_hash(DEFAULT_ADMIN_PASSWORD),
             role="admin"
@@ -197,9 +198,10 @@ def fast_login(user_data: FastLoginRequest, request: Request, db: Session = Depe
     identifier = (user_data.identifier or user_data.phone or user_data.username or "").strip()
     if not identifier:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请填写手机号或用户名")
-    # 与工器通同语义：手机号或用户名（巡检侧额外兼容邮箱）匹配即签发，无密码
+    # 与工器通同语义：手机号 / 登录账号(username) / 邮箱 匹配即签发，无密码。
+    # name 仅作中文展示，不再作为登录标识（2026-09-21 起 username 承接英文登录账号）。
     user = db.query(User).filter(
-        (User.phone == identifier) | (User.name == identifier) | (User.email == identifier)
+        (User.username == identifier) | (User.phone == identifier) | (User.email == identifier) | (User.name == identifier)
     ).first()
     if not user:
         # 文案与工器通 routes/auth.js 保持一致
@@ -222,6 +224,7 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
     user = User(
         email=user_data.email,
         name=user_data.name,
+        username=user_data.username,
         password_hash=get_password_hash(password),
         department=user_data.department,
         position=user_data.position,
