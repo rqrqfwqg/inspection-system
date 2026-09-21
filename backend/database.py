@@ -22,6 +22,13 @@ def get_db():
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+    # 防御性迁移：create_all 不会为「已存在的表」新增列，手动补齐 username（2026-09-21）。
+    # 全新库由 create_all 直接建唯一索引；存量库走此 ALTER（列已存在则忽略）。
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE users ADD COLUMN username VARCHAR"))
+    except Exception:
+        pass
 
 class User(Base):
     __tablename__ = "users"
