@@ -6,6 +6,7 @@ from datetime import datetime
 class UserBase(BaseModel):
     email: str
     name: str
+    username: Optional[str] = None                        # 登录账号（英文名），2026-09-21 新增
     department: Optional[str] = None
     position: Optional[str] = None
     phone: Optional[str] = None
@@ -27,6 +28,7 @@ class FastLoginRequest(BaseModel):
     identifier: Optional[str] = None
     phone: Optional[str] = None
     username: Optional[str] = None
+    # 匹配顺序：username（登录账号）→ phone → email；name 仅中文展示，不作为登录标识。
 
 class UserResponse(UserBase):
     id: int
