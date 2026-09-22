@@ -644,12 +644,40 @@ def list_devices(q: Optional[str] = None, subsystem_id: Optional[int] = None,
         result.append(r)
     return result
 
+def _invalidate_ledger_cache() -> None:
+    """让「资产总台账」的进程内缓存立即失效（新建 / 更新设备后必须调）。
+
+    背景：`/assets/asset-ledger`（列表 + 关键词反查）与 `/asset-ledger/resolve` 共用
+    `asset_ledger_routes._load_all` 的 60s 行缓存与机身编码匹配索引缓存。此前只有
+    「机身编码补录」会失效它，**新建设备不会** —— 于是现场建档后最长 60 秒内：
+      · 设备页搜索该编号 → 0 命中（用户以为没建成功，实际已入库）
+      · 扫机身编码反查 → 同样命不中
+      · 区域树里该设备的计数也还是旧的
+    这里统一失效，保证「建档即可见」。
+
+    ⚠️ 台账模块函数用**函数内导入**：asset_ledger_routes 反过来 import 本模块，
+    模块级导入会造成循环依赖。
+    ⚠️ 缓存失效失败绝不能让写接口报错（最坏退化为等 60s 自然过期）。
+    """
+    try:
+        from asset_ledger_routes import _invalidate_caches
+        _invalidate_caches()
+    except Exception:
+        pass
+    try:
+        # 区域索引同在进程内缓存 60s（本模块内定义）
+        _AREA_INDEX_CACHE.update({"ts": 0.0, "data": None})
+    except Exception:
+        pass
+
+
 @router.post("/devices", response_model=DeviceResponse)
 def create_device(data: DeviceCreate, db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
     if db.query(Device).filter(Device.device_code == data.device_code).first():
         raise HTTPException(status_code=400, detail=f"设备编号 {data.device_code} 已存在")
     obj = Device(**data.model_dump())
     db.add(obj); db.commit(); db.refresh(obj)
+    _invalidate_ledger_cache()   # 🔴 建档后立即可见（否则 60s 内搜不到，像没建成功）
     r = DeviceResponse.model_validate(obj)
     r.subsystem_name = _subsystem_name(db, obj.subsystem_id)
     return r
@@ -675,6 +703,7 @@ def update_device(did: int, data: DeviceUpdate, db: Session = Depends(get_db), _
         setattr(obj, k, v)
     obj.updated_at = datetime.now(timezone.utc)
     db.commit(); db.refresh(obj)
+    _invalidate_ledger_cache()   # 🔴 位置/归属改动后立即反映到台账与区域树
     r = DeviceResponse.model_validate(obj)
     r.subsystem_name = _subsystem_name(db, obj.subsystem_id)
     return r
