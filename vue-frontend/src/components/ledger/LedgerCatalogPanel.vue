@@ -58,8 +58,7 @@ async function onToggleActive(table: DataTable) {
   if (!enabling) {
     try {
       await ElMessageBox.confirm(
-        `将停用资料表「${table.name}」（${table.code}）。\n` +
-          '停用为软删：记录与字段全部保留，可随时在「显示已停用」中恢复。',
+        `将停用资料表「${table.name}」（${table.code}）：停用为软删，记录与字段全部保留，可随时在「显示已停用」中恢复。`,
         '停用资料表',
         { type: 'warning', confirmButtonText: '停用', cancelButtonText: '取消' },
       )

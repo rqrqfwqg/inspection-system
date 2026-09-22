@@ -2,15 +2,17 @@
 /**
  * 资料配置 · 左列「资料表清单」
  * =====================================================================
- * 新建（表编码 + 表名称）/ 选中 / 删除，并显示每张表的真实覆盖率。
+ * 新建（表编码 + 表名称）/ 选中，并显示每张表的真实覆盖率。
  * 从 `SettingsFieldsTab` 抽出以控制单文件行数（ARCHITECTURE §7 规则 2）。
  *
  * 纪律：本组件**只发事件**，不直接调 API（数据操作留在 Tab 层统一编排，便于失败提示与刷新）；
  * 覆盖率条复用 `components/viz/CoverageBar.vue`。
+ * 删除入口已收口：资料表彻底删除**只在「数据表管理」页**提供（护栏更完备且能看到已停用的表），
+ * 故本清单不再提供删除按钮，仅以静态提示引导。
  */
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Delete, Plus } from '@element-plus/icons-vue'
+import { Plus } from '@element-plus/icons-vue'
 import CoverageBar from '@/components/viz/CoverageBar.vue'
 import { fmtPercent } from '@/lib/format'
 import type { DataTable } from '@/types/asset'
@@ -26,7 +28,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'select', id: string): void
   (e: 'create', payload: { code: string; name: string }): void
-  (e: 'remove', table: DataTable): void
 }>()
 
 const newCode = ref('')
@@ -58,6 +59,8 @@ function submit() {
       </el-button>
     </div>
 
+    <p class="stl__hint">删除资料表请在「数据表管理」页操作：先「停用」（软删，记录与字段保留、可恢复），确认无影响后再「彻底删除」。</p>
+
     <p v-if="props.loading" class="stl__hint">正在加载资料表…</p>
 
     <ul v-else-if="props.tables.length > 0" class="stl__list">
@@ -73,15 +76,6 @@ function submit() {
             <span class="stl__code mono ellipsis">{{ item.code }}</span>
           </button>
           <el-tag size="small" effect="plain" class="tnum">{{ item.field_count ?? 0 }} 字段</el-tag>
-          <el-button
-            link
-            type="danger"
-            :aria-label="`删除资料表 ${item.name}`"
-            title="删除资料表"
-            @click="emit('remove', item)"
-          >
-            <el-icon :size="16"><Delete /></el-icon>
-          </el-button>
         </div>
 
         <div v-if="props.statMap.get(item.id)" class="stl__cov">

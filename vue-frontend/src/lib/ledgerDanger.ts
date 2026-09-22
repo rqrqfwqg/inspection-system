@@ -1,11 +1,13 @@
 /**
- * 资料表「破坏性操作」统一护栏（两处入口共用，保证口径一致）
+ * 资料表「破坏性操作」统一护栏（唯一删除入口 = 「数据表管理」概览卡）
  * =====================================================================
  * 背景：资料表彻底删除是**级联硬删**（后端删除该表 + 全部 field_defs + 全部 records，不可恢复）。
- * 「数据表管理」概览卡 与 「资料配置 → 资料表与字段」各有一个删除入口，
- * 若两处护栏不一致，用户会从松的一侧误删。故把「输入 code 校验 + 影响面文案」收敛到此单点。
+ * 2026-09-22 入口收口：删除**只保留「数据表管理」概览卡**（护栏完备 + 能看到已停用表）；
+ * 「资料配置 → 资料表与字段」已不再提供删除。护栏收敛到此单点，避免从松的一侧误删。
  *
  * 纪律：
+ *  - **仅已停用的表可删**（`is_active === false`）：调用方必须在进入本函数前拦住活跃表
+ *    （模板层禁用 + 处理函数内 `is_active !== false → return` 双保险）；本函数自身不判活跃态；
  *  - 必须手动输入该表 code 才能提交（`inputValidator` 严格相等，不等于即拒绝）；
  *  - 文案必须含：表名、code、记录数、字段数，以及「删除后不可恢复 + 会减少资产总台账计数」；
  *  - 动态值（表名 / code）经 HTML 转义后再拼入，避免 dangerouslyUseHTMLString 注入。
@@ -47,7 +49,7 @@ export async function confirmDeleteTable(table: DataTable): Promise<boolean> {
         confirmButtonText: '彻底删除',
         cancelButtonText: '取消',
         dangerouslyUseHTMLString: true,
-        inputPlaceholder: table.code,
+        inputPlaceholder: '请输入该表 code',
         // 严格相等：输入不符则内联报错并阻止提交（对话框不关闭）
         inputValidator: (value: string) => (value === table.code ? true : `输入不一致，请准确输入：${table.code}`),
       },

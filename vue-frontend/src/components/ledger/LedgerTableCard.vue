@@ -136,7 +136,7 @@ const relationKeyText = computed(
         :show-after="200"
         append-to-body
       >
-        <span class="ltc__danger-wrap">
+        <span class="ltc__danger-wrap" @click.stop @keydown.stop>
           <el-button
             size="small"
             type="danger"

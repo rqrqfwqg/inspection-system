@@ -425,6 +425,10 @@ def delete_table(tid: int, db: Session = Depends(get_db), _: User = Depends(_req
     obj = db.query(DataTable).filter(DataTable.id == tid).first()
     if not obj:
         raise HTTPException(status_code=404, detail="资料表不存在")
+    # 纵深防御：硬删只允许删「已停用」的表（与前端 UI 护栏同口径）。
+    # 线上 DISABLE_AUTH=true 零鉴权，若只靠 UI 护栏，任何人 curl 即可删掉活跃表。
+    if obj.is_active:
+        raise HTTPException(status_code=409, detail="资料表处于启用状态，请先停用后再彻底删除")
     db.query(Record).filter(Record.table_id == tid).delete()
     db.query(FieldDef).filter(FieldDef.table_id == tid).delete()
     db.delete(obj)

@@ -2,19 +2,19 @@
 /**
  * 资料配置 · 资料表与字段 Tab（编排层）
  * =====================================================================
- * 结构：`SettingsTableList`（左，列表 + 新建/删除） | `TableProfilePanel`（右，数据画像）+ `FieldManager`。
+ * 结构：`SettingsTableList`（左，列表 + 新建/选中） | `TableProfilePanel`（右，数据画像）+ `FieldManager`。
  * 本文件只做编排与数据操作：拉资料表 / 字段 / 单表画像，并把事件接回 API 与父级刷新。
  *
  * 纪律：
  *  - 自持局部状态（tables / fields / detail），不把巨型 state 抬回页面；
- *  - 删除资料表是级联操作，必须 `ElMessageBox` 二次确认并写清影响面；
+ *  - 资料表**彻底删除已收口到「数据表管理」页**（那里护栏完备且能看到已停用表），本 Tab 不再提供删除，
+ *    仅在左列以静态提示引导；级联删除的 code 校验护栏见 `@/lib/ledgerDanger`；
  *  - 画像失败**静默降级**（不渲染画像块），不阻断字段管理。
  */
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import assetApi from '@/api/assetApi'
 import { getLinkTable } from '@/api/assetViz'
-import { confirmDeleteTable } from '@/lib/ledgerDanger'
 import SettingsTableList from './SettingsTableList.vue'
 import TableProfilePanel from './TableProfilePanel.vue'
 import FieldManager from './FieldManager.vue'
@@ -125,21 +125,6 @@ async function onCreate(payload: { code: string; name: string }) {
   }
 }
 
-async function onRemove(table: DataTable) {
-  // 与「数据表管理」概览卡同一护栏（必须输入 code 才能提交，文案含记录数/字段数）
-  const ok = await confirmDeleteTable(table)
-  if (!ok) return
-  try {
-    await assetApi.deleteTable(table.id)
-    ElMessage.success(`资料表「${table.name}」已彻底删除`)
-    if (String(table.id) === selectedTableId.value) selectedTableId.value = ''
-    await reloadTables(subId.value)
-    emit('changed')
-  } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : '删除失败')
-  }
-}
-
 async function onFieldChanged() {
   await reloadTables(subId.value)
   if (activeTable.value) await loadTableDetail(activeTable.value)
@@ -172,7 +157,6 @@ async function onFieldChanged() {
           :stat-map="statMap"
           @select="selectedTableId = $event"
           @create="onCreate"
-          @remove="onRemove"
         />
       </div>
 
