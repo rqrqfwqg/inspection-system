@@ -11,9 +11,10 @@
  *  - 画像失败**静默降级**（不渲染画像块），不阻断字段管理。
  */
 import { computed, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import assetApi from '@/api/assetApi'
 import { getLinkTable } from '@/api/assetViz'
+import { confirmDeleteTable } from '@/lib/ledgerDanger'
 import SettingsTableList from './SettingsTableList.vue'
 import TableProfilePanel from './TableProfilePanel.vue'
 import FieldManager from './FieldManager.vue'
@@ -125,18 +126,12 @@ async function onCreate(payload: { code: string; name: string }) {
 }
 
 async function onRemove(table: DataTable) {
-  try {
-    await ElMessageBox.confirm(
-      `将删除资料表「${table.name}」及其下全部字段定义与资料记录，操作不可撤销。`,
-      '删除资料表',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
-    )
-  } catch {
-    return
-  }
+  // 与「数据表管理」概览卡同一护栏（必须输入 code 才能提交，文案含记录数/字段数）
+  const ok = await confirmDeleteTable(table)
+  if (!ok) return
   try {
     await assetApi.deleteTable(table.id)
-    ElMessage.success(`资料表「${table.name}」已删除`)
+    ElMessage.success(`资料表「${table.name}」已彻底删除`)
     if (String(table.id) === selectedTableId.value) selectedTableId.value = ''
     await reloadTables(subId.value)
     emit('changed')
