@@ -55,6 +55,12 @@ function backToCatalog() {
   void router.push('/asset/ledger')
 }
 
+/** 切换「显示已停用」：同步 ref 并重载目录（默认关 → 不开则仍只显示启用中的表） */
+function toggleIncludeInactive(value: boolean) {
+  catalog.includeInactive.value = value
+  void catalog.loadCatalog()
+}
+
 /** 跨表跳转：关闭弹窗后切到目标表，并按命中编号预填表内搜索（同表则就地过滤） */
 function handleCrossJump(tid: number, value: string) {
   table.closeCrossRefs()
@@ -118,6 +124,9 @@ watch(
         :loading="catalog.loading.value"
         :error="catalog.error.value"
         :stat-map="catalog.statMap.value"
+        :include-inactive="catalog.includeInactive.value"
+        @update:include-inactive="toggleIncludeInactive"
+        @refresh="catalog.reload()"
         @open="openTable"
         @set-key="keyDialogTable = $event"
         @jump="handleCrossJump"
