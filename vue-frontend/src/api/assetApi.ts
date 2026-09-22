@@ -61,9 +61,18 @@ class AssetApiService {
   }
 
   // ==================== 资料表 ====================
-  listTables(subsystemId?: number) {
-    const q = subsystemId ? `?subsystem_id=${subsystemId}` : ''
-    return http.get<DataTable[]>(`${BASE}/tables${q}`)
+  /**
+   * 列出资料表。
+   * @param subsystemId   可选：按子系统过滤
+   * @param includeInactive 是否包含已停用（软删）的表；默认 false（仅启用中）
+   * 两参数可共存：`?subsystem_id=N&include_inactive=true`
+   */
+  listTables(subsystemId?: number, includeInactive = false) {
+    const params = new URLSearchParams()
+    if (subsystemId) params.set('subsystem_id', String(subsystemId))
+    if (includeInactive) params.set('include_inactive', 'true')
+    const q = params.toString()
+    return http.get<DataTable[]>(`${BASE}/tables${q ? '?' + q : ''}`)
   }
   getTable(id: number) {
     return http.get<DataTable>(`${BASE}/tables/${id}`)
