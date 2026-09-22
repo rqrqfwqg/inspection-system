@@ -82,6 +82,16 @@ function zoomFit() {
   zoomIndex.value = 2
 }
 
+/**
+ * 自动关联过滤（用户反馈：自动关联在图谱里偏「垃圾」，默认隐藏）。
+ * 仅在该开关打开时跳过 source==='auto' 的边；人工关联与 BA 问题始终保留。
+ * 内部开关即可覆盖全部消费方（DeviceDetailDrawer / DeviceAttrPanel），无需各自改。
+ */
+const autoHidden = ref(true)
+const autoEdgeCount = computed(
+  () => props.edges.filter((e) => (e.source ?? 'manual') === 'auto').length,
+)
+
 /** 边 → 节点：同一对端多条边时保留「自动」来源并合并关系类型（与 React 版同口径） */
 const nodes = computed<GraphNode[]>(() => {
   const center = props.centerCode
@@ -90,6 +100,8 @@ const nodes = computed<GraphNode[]>(() => {
     const f = String(e.from_code ?? '')
     const t = String(e.to_code ?? '')
     if (!f || !t) continue
+    // 【防垃圾】开启「隐藏自动关联」时，跳过自动边（人工/问题边不受影响）
+    if (autoHidden.value && (e.source ?? 'manual') === 'auto') continue
     const other = e.other_code != null ? String(e.other_code) : f === center ? t : f === t ? '' : f
     if (!other || other === center) continue
     const type = String(e.relation_type ?? '')
@@ -181,10 +193,18 @@ const problemCount = computed(() => nodes.value.filter((n) => n.kind === 'proble
           <el-icon :size="16"><ZoomIn /></el-icon>
         </el-button>
       </el-button-group>
+      <el-checkbox v-model="autoHidden" size="small" class="rg__hide-auto" title="自动关联多为系统推断，默认隐藏以减少干扰">
+        <span>隐藏自动关联</span>
+      </el-checkbox>
+      <span v-if="autoHidden && autoEdgeCount > 0" class="rg__bar-hint">已隐藏 {{ autoEdgeCount }} 条自动关联</span>
       <span class="rg__bar-hint">放大后可在画布内横向滚动（不改变宽高比）</span>
     </div>
 
-    <p v-if="!hasContent" class="rg__empty">该对象暂无可展示的关联与 BA 问题。</p>
+    <p v-if="!hasContent" class="rg__empty">
+      {{ autoHidden && autoEdgeCount > 0
+        ? `已隐藏 ${autoEdgeCount} 条自动关联；该对象暂无人工关联与 BA 问题。`
+        : '该对象暂无可展示的关联与 BA 问题。' }}
+    </p>
 
     <div v-else class="rg__canvas">
       <!-- 【防压扁】只给 viewBox，绝不写 width / height 像素属性；等比由 preserveAspectRatio 保证 -->
@@ -265,6 +285,14 @@ const problemCount = computed(() => nodes.value.filter((n) => n.kind === 'proble
 .rg__bar-hint {
   font-size: var(--text-xs);
   color: var(--muted);
+}
+
+.rg__hide-auto {
+  margin-right: var(--space-1);
+}
+.rg__hide-auto :deep(.el-checkbox__label) {
+  font-size: var(--text-xs);
+  color: var(--fg-2);
 }
 
 /* 画布：定高 + 自身横/纵滚动，页面级绝不出现横滚（§4.6） */
