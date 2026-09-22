@@ -11,6 +11,8 @@
  */
 import { computed, watch } from 'vue'
 import { ArrowRight, Cpu, Link, Share, User } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import assetApi from '@/api/assetApi'
 import BaProblemList from '@/components/viz/BaProblemList.vue'
 import DeviceProfileCard from '@/components/viz/DeviceProfileCard.vue'
 import FieldList from '@/components/viz/FieldList.vue'
@@ -76,6 +78,25 @@ const graphEdges = computed<GraphEdge[]>(() => {
   }))
 })
 
+async function removeEdge(id: number) {
+  try {
+    await ElMessageBox.confirm(
+      '确定删除该关联边？删除只影响链路关系，双方设备的资料与记录均保留。',
+      '删除关联',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await assetApi.deleteRelation(id)
+    ElMessage({ type: 'success', message: '关联已删除' })
+    if (props.deviceCode) await load(props.deviceCode, true)
+  } catch (e) {
+    ElMessage({ type: 'error', message: `删除失败：${e instanceof Error ? e.message : String(e)}` })
+  }
+}
+
 const hasContent = computed(() => !!search.value || !!link.value)
 </script>
 
@@ -140,6 +161,7 @@ const hasContent = computed(() => !!search.value || !!link.value)
               tone="auto"
               :edges="autoEdges"
               @select-code="emit('navigate', $event)"
+              @delete="removeEdge"
             />
             <LinkEdgeGroup
               v-if="manualEdges.length"
@@ -147,6 +169,7 @@ const hasContent = computed(() => !!search.value || !!link.value)
               tone="manual"
               :edges="manualEdges"
               @select-code="emit('navigate', $event)"
+              @delete="removeEdge"
             />
           </div>
         </section>
