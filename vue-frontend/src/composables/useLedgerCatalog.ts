@@ -22,6 +22,8 @@ export interface LedgerCatalog {
   loading: Ref<boolean>
   error: Ref<string>
   overview: Ref<LinkOverview | null>
+  /** 是否包含已停用（软删）的资料表；默认 false（不打开开关时仅显示启用中的表） */
+  includeInactive: Ref<boolean>
   /** table_id → 单表联动统计（覆盖率 / 关联键中文名） */
   statMap: ComputedRef<Map<number, LinkTableStat>>
   loadCatalog: () => Promise<void>
@@ -35,6 +37,7 @@ export function useLedgerCatalog(): LedgerCatalog {
   const loading = ref(true)
   const error = ref('')
   const overview = ref<LinkOverview | null>(null)
+  const includeInactive = ref(false)
 
   let catalogSeq = 0
 
@@ -43,7 +46,10 @@ export function useLedgerCatalog(): LedgerCatalog {
     loading.value = true
     error.value = ''
     try {
-      const [list, tableList] = await Promise.all([listSubsystems(), assetApi.listTables()])
+      const [list, tableList] = await Promise.all([
+        listSubsystems(),
+        assetApi.listTables(undefined, includeInactive.value),
+      ])
       if (mine !== catalogSeq) return
       subsystems.value = list
       tables.value = tableList
@@ -79,5 +85,5 @@ export function useLedgerCatalog(): LedgerCatalog {
     return map
   })
 
-  return { subsystems, tables, loading, error, overview, statMap, loadCatalog, loadOverview, reload }
+  return { subsystems, tables, loading, error, overview, includeInactive, statMap, loadCatalog, loadOverview, reload }
 }
