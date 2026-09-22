@@ -7,7 +7,7 @@
  * 界面上 自动（主色）/ 人工（中性）**始终成对出现、颜色与图标固定**，避免分不清某条边是谁建的。
  */
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Bell, Cpu, Files, Link, User } from '@element-plus/icons-vue'
 import AutoAssociatePanel from '@/components/viz/AutoAssociatePanel.vue'
 import ManualQueuePanel from '@/components/viz/ManualQueuePanel.vue'
@@ -17,6 +17,7 @@ import {
   getAutoRules, getLinkOverview, getManualQueue, getRelations,
   manualAssociate, rollbackAutoAssociate, runAutoAssociate,
 } from '@/api/assetViz'
+import assetApi from '@/api/assetApi'
 import { fmtInt } from '@/lib/format'
 import type {
   AutoAssociatePreview, AutoAssociateResult, AutoRulesResponse, LinkOverview,
@@ -136,6 +137,28 @@ async function submitManual(p: { from: string; to: string; relationType: string;
   }
 }
 
+async function removeEdge(id: number) {
+  try {
+    await ElMessageBox.confirm(
+      '确定删除该关联边？删除只影响链路关系，双方设备的资料与记录均保留。',
+      '删除关联',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  busy.value = 'delete'
+  try {
+    await assetApi.deleteRelation(id)
+    ElMessage({ type: 'success', message: '关联已删除' })
+    await load()
+  } catch (e) {
+    ElMessage({ type: 'error', message: `删除失败：${msg(e)}` })
+  } finally {
+    busy.value = null
+  }
+}
+
 </script>
 
 <template>
@@ -217,7 +240,7 @@ async function submitManual(p: { from: string; to: string; relationType: string;
         </h3>
       </header>
       <p class="lc__desc">自动关联为主色、人工关联为中性色 —— 每条边都能看出是谁建立的。</p>
-      <RecentEdges :relations="edges" :loading="loading" />
+      <RecentEdges :relations="edges" :loading="loading" @delete="removeEdge" />
     </section>
   </div>
 </template>
