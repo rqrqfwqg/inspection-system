@@ -15,6 +15,7 @@ import { ref, shallowRef, type Ref, type ShallowRef } from 'vue'
 import { searchDevice } from '@/api/search'
 import { getBaProblems, getDeviceLink, getGeoObservations } from '@/api/assetViz'
 import type { BaProblem, DeviceLinkResponse, GeoObservation, SearchResult } from '@/types/assetViz'
+import { stripCircuitLabelEdges } from '@/lib/linkEdges'
 
 export interface VizDeviceBundle {
   loading: Ref<boolean>
@@ -74,7 +75,10 @@ export function useVizDeviceBundle(): VizDeviceBundle {
 
     if (mine !== seq) return
     search.value = s
-    link.value = lk
+    // 显示收敛：剔掉「回路标注明细」（电气配电（图纸提取）的图纸文字标注图元）的关联边。
+    // 收敛点放在这里（而非各视图各自过滤）= 「关联图谱」与「关联关系」列表共用一处口径，
+    // 天然不会出现「列表里有、图里没有」的割裂；详见 @/lib/linkEdges 的说明。
+    link.value = stripCircuitLabelEdges(lk)
     problems.value = ba.items ?? []
     geo.value = g
     // 三源全空 = 该编号既不在设备域也不在资料域；不是错误，交给视图渲染空态
