@@ -10,7 +10,7 @@
  *     设计规范也明确「卡片不用左侧彩色粗边条」；改用来源徽标 + 中性描边表达。
  *  2. 证据文本用 `.ellipsis` 单行省略 + tooltip 兜底，长证据不再把行撑爆。
  */
-import { Cpu, Link, User } from '@element-plus/icons-vue'
+import { Cpu, Delete, Link, User } from '@element-plus/icons-vue'
 import { fmtValue } from '@/lib/format'
 import type { DeviceLinkEdge } from '@/types/assetViz'
 
@@ -24,7 +24,7 @@ withDefaults(
   { tone: 'manual' },
 )
 
-const emit = defineEmits<{ (e: 'select-code', code: string): void }>()
+const emit = defineEmits<{ (e: 'select-code', code: string): void; (e: 'delete', id: number): void }>()
 
 const OTHER_KIND_LABEL: Record<string, string> = {
   device: '设备',
@@ -62,6 +62,15 @@ function kindText(kind: string): string {
           </el-tooltip>
           <span v-if="e.other_name" class="leg__name ellipsis" :title="e.other_name">{{ e.other_name }}</span>
           <span v-if="e.rule" class="leg__rule">规则 {{ e.rule }}</span>
+          <el-button
+            link
+            type="danger"
+            :icon="Delete"
+            class="leg__del"
+            aria-label="删除关联"
+            title="删除该关联"
+            @click="emit('delete', e.id)"
+          />
         </div>
         <p v-if="e.evidence" class="leg__evidence ellipsis" :title="fmtValue(e.evidence)">
           <el-icon :size="16" class="leg__evidence-icon"><Link /></el-icon>
@@ -116,6 +125,11 @@ function kindText(kind: string): string {
   gap: var(--space-2);
   min-width: 0;
   font-size: var(--text-sm);
+}
+
+.leg__del {
+  margin-left: auto;
+  flex: 0 0 auto;
 }
 
 .leg__kind,
