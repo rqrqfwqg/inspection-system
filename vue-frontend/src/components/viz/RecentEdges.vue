@@ -4,10 +4,11 @@
  * 自动关联用主色徽标、人工关联用中性徽标；仅自动边展示命中规则与判定证据。
  */
 import { computed } from 'vue'
-import { TopRight } from '@element-plus/icons-vue'
+import { Delete, TopRight } from '@element-plus/icons-vue'
 import type { RelationEdge } from '@/types/assetViz'
 
 const props = defineProps<{ relations: RelationEdge[]; loading: boolean }>()
+const emit = defineEmits<{ (e: 'delete', id: number): void }>()
 
 const rows = computed(() =>
   props.relations.slice(0, 60).map((r) => {
@@ -40,6 +41,15 @@ const rows = computed(() =>
       <el-tag size="small" type="info" effect="plain">{{ r.type }}</el-tag>
       <span v-if="r.rule" class="rec__meta">规则 {{ r.rule }}</span>
       <span v-if="r.evidence" class="rec__meta ellipsis" :title="r.evidence">{{ r.evidence }}</span>
+      <el-button
+        link
+        type="danger"
+        :icon="Delete"
+        class="rec__del"
+        aria-label="删除关联"
+        title="删除该关联"
+        @click="emit('delete', r.id)"
+      />
     </div>
   </div>
 </template>
@@ -64,6 +74,11 @@ const rows = computed(() =>
 
 .rec__item + .rec__item {
   border-top: 1px solid var(--border-soft);
+}
+
+.rec__del {
+  margin-left: auto;
+  flex: 0 0 auto;
 }
 
 .rec__code {
