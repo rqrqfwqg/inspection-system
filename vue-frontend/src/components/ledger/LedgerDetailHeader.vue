@@ -17,7 +17,10 @@ const props = defineProps<{
   tableName: string
   subsystemName: string
   tableCode: string
+  /** 已加载记录数（分页下**非全表总数**，契约不给 total → 不得编造总数） */
   recordCount: number
+  /** 是否还有更多未加载（用于把徽标诚实标注为「已加载 N 条，还有更多」） */
+  hasMore?: boolean
   fieldCount: number
   coverage: number | null
   relationKeyLabel: string
@@ -62,7 +65,9 @@ function coveragePercent(): string {
     <div class="ldh__titles">
       <h1 class="ldh__title">
         <span>{{ props.tableName || `表 #${props.tableId}` }}</span>
-        <el-tag size="small" effect="plain" class="tnum">{{ props.recordCount }} 条</el-tag>
+        <el-tag size="small" effect="plain" class="tnum">
+          已加载 {{ props.recordCount }} 条{{ props.hasMore ? '，还有更多' : '' }}
+        </el-tag>
         <el-tag v-if="props.coverage !== null" size="small" type="success" effect="light">
           关联覆盖 {{ coveragePercent() }}
         </el-tag>

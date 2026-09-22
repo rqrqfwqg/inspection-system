@@ -11,9 +11,9 @@
  *  - 动态列默认 `show-overflow-tooltip`，编号类字段走 `.code-break` 强制断行不省略（编号少一位就查不到）；
  *  - 单元格取值一律走 `@/lib/format#fmtValue`（全站唯一格式化口径），空值恒呈现为「—」。
  */
-import { computed } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  Connection, Delete, Edit, Grid, Switch, TopRight,
+  ArrowDown, Connection, Delete, Edit, Grid, Switch, TopRight,
 } from '@element-plus/icons-vue'
 import { fmtValue, isCodeLike } from '@/lib/format'
 import type { FieldDef, RecordItem } from '@/types/asset'
@@ -34,6 +34,12 @@ const props = withDefaults(
     canOpenTable?: boolean
     /** 提供后每条记录左侧多出可点击的「关联键」列 → 打开该编号的设备详情 */
     canOpenDevice?: boolean
+    /** 增量加载：是否还有下一页（未传 = 未启用分页，行为与改造前完全一致） */
+    hasMore?: boolean
+    /** 增量加载：正在拉下一页 */
+    loadingMore?: boolean
+    /** 增量加载：已加载条数（**传入即视为启用分页**；未传则不渲染任何加载 UI） */
+    loadedCount?: number
   }>(),
   {
     selectable: false,
@@ -44,6 +50,8 @@ const props = withDefaults(
     canCrossRefs: false,
     canOpenTable: false,
     canOpenDevice: false,
+    hasMore: false,
+    loadingMore: false,
   },
 )
 
@@ -55,7 +63,62 @@ const emit = defineEmits<{
   (e: 'cross-refs', row: RecordItem): void
   (e: 'open-table'): void
   (e: 'open-device', code: string): void
+  (e: 'load-more'): void
 }>()
+
+/**
+ * 是否启用增量加载。
+ * 以「调用方是否传 `loadedCount`」为开关 —— 未传（如 `RecordGroupPanel`）时**不渲染任何加载 UI、不挂 observer**，
+ * 严格保持改造前的渲染结果，避免波及其它调用方。
+ */
+const paginated = computed(() => props.loadedCount !== undefined)
+
+/* ============================ 滚动到底自动加载 ============================ */
+/** 哨兵：进入视口（含 200px 预取区）即请求下一页 */
+const sentinel = ref<HTMLElement | null>(null)
+let observer: IntersectionObserver | null = null
+
+function teardownObserver() {
+  if (observer) {
+    observer.disconnect()
+    observer = null
+  }
+}
+
+function setupObserver() {
+  // 先拆旧的，避免"切换表后幽灵触发"与内存泄漏
+  teardownObserver()
+  const el = sentinel.value
+  if (!el || typeof IntersectionObserver === 'undefined') return
+  observer = new IntersectionObserver(
+    (entries) => {
+      // hasMore / loadingMore 由父级驱动；此处再兜一层，防止监听回调比 props 更新早一步
+      if (!props.hasMore || props.loadingMore) return
+      if (entries.some((entry) => entry.isIntersecting)) emit('load-more')
+    },
+    // el-table 未设 height → 滚动发生在整页（viewport），故用默认 root
+    { rootMargin: '200px' },
+  )
+  observer.observe(el)
+}
+
+onMounted(() => {
+  setupObserver()
+})
+
+onBeforeUnmount(() => {
+  teardownObserver()
+})
+
+// 记录增长后 el-table 重排，哨兵可能被卸载/重建；hasMore/loadingMore 变化也会影响是否该继续加载。
+// 变化后下一帧重新 observe —— 新建的 observer 会立即回报当前相交状态，
+// 因此"哨兵一直在视口内"时（如页面不够高）也能继续连续加载，不会卡死。
+watch(
+  () => [props.records.length, props.hasMore, props.loadingMore] as const,
+  () => {
+    void nextTick(() => setupObserver())
+  },
+)
 
 /** 列定义：字段定义优先；无字段定义时回落到首条记录的 data 键（后端字段名未冻结，原样展示） */
 const columns = computed(() => {
@@ -87,7 +150,10 @@ function onRowClick(row: RecordItem) {
     <header class="drt__head">
       <el-icon :size="16" class="drt__icon"><Grid /></el-icon>
       <span class="drt__title ellipsis" :title="title">{{ title }}</span>
-      <span class="drt__count tnum">{{ records.length }} 条</span>
+      <span v-if="paginated" class="drt__count tnum">
+        已加载 {{ loadedCount }} 条<template v-if="hasMore">（还有更多）</template>
+      </span>
+      <span v-else class="drt__count tnum">{{ records.length }} 条</span>
       <el-button v-if="canOpenTable" size="small" @click="emit('open-table')">
         <el-icon :size="16"><TopRight /></el-icon>
         <span>数据表管理</span>
@@ -183,6 +249,22 @@ function onRowClick(row: RecordItem) {
       </el-table>
     </div>
 
+    <!-- 滚动到底自动加载：哨兵 + 按钮兜底（IO 不可用/被拦截时仍可手动加载） -->
+    <template v-if="paginated">
+      <div v-if="hasMore" ref="sentinel" class="drt__sentinel" aria-hidden="true" />
+
+      <div class="drt__footer">
+        <template v-if="hasMore">
+          <el-button size="small" :loading="loadingMore" @click="emit('load-more')">
+            <el-icon v-if="!loadingMore" :size="16"><ArrowDown /></el-icon>
+            <span>{{ loadingMore ? '正在加载…' : '加载更多' }}</span>
+          </el-button>
+          <span class="drt__loaded tnum" role="status">已加载 {{ loadedCount }} 条</span>
+        </template>
+        <span v-else class="drt__done tnum" role="status">已全部加载（共 {{ loadedCount }} 条）</span>
+      </div>
+    </template>
+
     <p v-if="selectable" class="drt__tip">
       已选 <span class="tnum">{{ selected.size }}</span> 条 —— 全选只作用于当前筛选结果。
     </p>
@@ -254,6 +336,27 @@ function onRowClick(row: RecordItem) {
   margin: 0;
   padding: var(--space-1) var(--space-3);
   border-top: 1px solid var(--border-soft);
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+/* 滚动到底自动加载：哨兵（零高、不可见）与页脚 */
+.drt__sentinel {
+  height: 1px;
+}
+
+.drt__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border-soft);
+}
+
+.drt__loaded,
+.drt__done {
   font-size: var(--text-xs);
   color: var(--muted);
 }

@@ -10,7 +10,7 @@
  * 纪律：不 import `@/router`、不改 `src/styles/**`；路由参数只 `useRoute()` **读**，不在此装配路由；
  * 颜色走设计令牌；无 emoji；宽表横滚交给 DynamicRecordTable 的局部容器（红线 ② / ③）。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import CrossRefDialog from '@/components/ledger/CrossRefDialog.vue'
@@ -99,6 +99,13 @@ watch(
   },
 )
 
+/**
+ * 切表时会把 rowQuery 清空；这次清空**不该**触发搜索（首屏由 `load()` 负责）。
+ * 否则若 load() 稍慢，搜索请求会抢在它前面并作废它（fields 不再落地 → 列渲染回落）。
+ * 用一次性抑制标志挡掉这次 rowQuery 变更。
+ */
+let suppressSearchOnce = false
+
 /** 切表：清空弹窗、选择与行过滤，再并行取记录与画像 */
 watch(
   tableId,
@@ -107,12 +114,45 @@ watch(
     table.closeTransfer()
     table.closeCrossRefs()
     table.setSelection([])
+    suppressSearchOnce = true
     table.rowQuery.value = ''
+    void nextTick(() => {
+      suppressSearchOnce = false
+    })
     void table.load()
     void table.loadLinkDetail()
   },
   { immediate: true },
 )
+
+/**
+ * 表内搜索 → 走**服务端** `q`（不再本地过滤、也不再抽干全表）：
+ * 关键字稳定（防抖 300ms）后，若与当前页集的关键字不同，就用它重拉第 0 页。
+ * 命中集的分页由后端保证（`q` 在 skip/limit 之前施加），下滑继续加载「更多匹配」。
+ */
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
+
+watch(
+  () => table.rowQuery.value,
+  () => {
+    if (suppressSearchOnce) return
+    if (searchDebounceTimer !== null) {
+      clearTimeout(searchDebounceTimer)
+      searchDebounceTimer = null
+    }
+    searchDebounceTimer = setTimeout(() => {
+      searchDebounceTimer = null
+      void table.runSearch()
+    }, 300)
+  },
+)
+
+onBeforeUnmount(() => {
+  if (searchDebounceTimer !== null) {
+    clearTimeout(searchDebounceTimer)
+    searchDebounceTimer = null
+  }
+})
 </script>
 
 <template>
@@ -140,7 +180,8 @@ watch(
         :table-name="activeTable?.name || ''"
         :subsystem-name="activeTable?.subsystem_name || ''"
         :table-code="activeTable?.code || ''"
-        :record-count="table.records.value.length"
+        :record-count="table.loadedCount.value"
+        :has-more="table.hasMore.value"
         :field-count="table.fields.value.length"
         :coverage="table.linkDetail.value?.coverage.coverage ?? null"
         :relation-key-label="table.relationField.value?.label || ''"
@@ -166,9 +207,13 @@ watch(
         >
           <template #prefix><el-icon :size="16"><Search /></el-icon></template>
         </el-input>
-        <span v-if="table.rowQuery.value" class="lv__count">
-          命中 <span class="tnum">{{ table.visibleRecords.value.length }}</span> /
-          <span class="tnum">{{ table.records.value.length }}</span> 条（全选仅作用于筛选结果）
+        <span v-if="table.rowQuery.value" class="lv__count" role="status">
+          <template v-if="table.searching.value">搜索中…</template>
+          <template v-else>
+            命中 <span class="tnum">{{ table.visibleRecords.value.length }}</span> 条<template
+              v-if="table.hasMore.value"
+            >（还有更多匹配，继续下滑加载）</template>
+          </template>
         </span>
       </div>
 
@@ -184,6 +229,9 @@ watch(
         :title="activeTable?.name || ''"
         :records="table.visibleRecords.value"
         :fields="table.fields.value"
+        :has-more="table.hasMore.value"
+        :loading-more="table.loadingMore.value"
+        :loaded-count="table.loadedCount.value"
         selectable
         can-edit
         can-delete
@@ -195,6 +243,7 @@ watch(
         @delete="table.removeRecord"
         @transfer="(row) => table.openTransfer([row.id])"
         @cross-refs="table.openCrossRefs"
+        @load-more="table.loadMore"
       />
 
       <RecordEditDialog

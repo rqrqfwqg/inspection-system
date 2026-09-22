@@ -7,7 +7,7 @@
 """
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
-from sqlalchemy import text as sa_text, func, cast as sa_cast, Text as SAText
+from sqlalchemy import text as sa_text, func, or_, cast as sa_cast, Text as SAText
 from typing import Optional, List, Dict, Any
 import os
 import io
@@ -141,9 +141,19 @@ def _subsystem_name(db: Session, sid: Optional[int]) -> Optional[str]:
     return s.name if s else None
 
 
-def _serialize_record(db: Session, rec: Record) -> Dict[str, Any]:
-    dev = db.query(Device).filter(Device.device_code == rec.device_code).first()
-    tbl = db.query(DataTable).filter(DataTable.id == rec.table_id).first()
+def _serialize_record(db: Session, rec: Record,
+                      cache: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """序列化一条记录（附加 device_name / table_name）。
+
+    `cache` 为 None 时保持原逐条查询行为（单条增改等调用方，行为逐字节不变）；
+    传入批量预取字典（见 `_prefetch_record_refs`）时走内存映射，用于列表接口消除 N+1。
+    """
+    if cache is None:
+        dev = db.query(Device).filter(Device.device_code == rec.device_code).first()
+        tbl = db.query(DataTable).filter(DataTable.id == rec.table_id).first()
+    else:
+        dev = cache["devices"].get(rec.device_code) if rec.device_code else None
+        tbl = cache["tables"].get(rec.table_id)
     return {
         "id": rec.id,
         "table_id": rec.table_id,
@@ -155,6 +165,25 @@ def _serialize_record(db: Session, rec: Record) -> Dict[str, Any]:
         "device_name": dev.name if dev else None,
         "table_name": tbl.name if tbl else None,
     }
+
+
+def _prefetch_record_refs(db: Session, recs: List[Record]) -> Dict[str, Any]:
+    """批量预取记录引用（设备 / 资料表），把 O(N) 次查询压成 O(1)。
+
+    先收集本页所有非空 device_code 与涉及的 table_id，各用**一次 IN 查询**取回，
+    建成 {code: Device} / {id: DataTable} 映射，供 `_serialize_record(cache=...)` 命中。
+    """
+    codes = {r.device_code for r in recs if r.device_code}
+    tids = {r.table_id for r in recs if r.table_id is not None}
+    devices: Dict[str, Device] = {}
+    if codes:
+        for d in db.query(Device).filter(Device.device_code.in_(codes)).all():
+            devices[d.device_code] = d
+    tables: Dict[int, DataTable] = {}
+    if tids:
+        for t in db.query(DataTable).filter(DataTable.id.in_(tids)).all():
+            tables[t.id] = t
+    return {"devices": devices, "tables": tables}
 
 
 # ==================== 设备画像：未在 devices 登记的真实台账设备补全 ====================
@@ -520,12 +549,51 @@ def delete_field(tid: int, fid: int, db: Session = Depends(get_db), _: User = De
 # ========================= 资料记录 =========================
 
 @router.get("/tables/{tid}/records", response_model=List[RecordResponse])
-def list_records(tid: int, device_code: Optional[str] = None, db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
-    q = db.query(Record).filter(Record.table_id == tid)
+def list_records(tid: int, device_code: Optional[str] = None,
+                 skip: int = 0, limit: Optional[int] = None,
+                 q: Optional[str] = None,
+                 db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """资料记录列表（可选分页 + 可选服务端搜索 q）。
+
+    契约（须保持）：
+      - 响应体是**裸数组**（List[RecordResponse]），非 {items,total}；前端按数组消费。
+      - `limit` 缺省 None → 返回全部（与改动前逐字节一致，向后兼容）。
+      - 给了 limit 才分页：limit 夹紧到 [1,500]（<=0 不得返回空，否则前端误判「到底了」）；
+        skip 夹紧到 >=0；用 offset/limit 分页。
+      - 固定 `id desc` 排序，保证翻页稳定（不排序会丢行/重行）。
+      - 「还有没有更多」由前端按「返回条数 < 请求 limit」判定，不新增 has_more、不用响应头。
+      - `q`：服务端搜索，**刻意不加 max_length/Query 约束**（§13：超长 q 截断到 100 字符、
+        绝不报错；schema 不得宣传一个不强制执行的限制）。空/纯空白 q 视为「不过滤」，
+        与不传 q 逐字节一致。搜索**在 offset/limit 之前**施加，故分页即「命中集的分页」。
+    """
+    kw = (q or "").strip()[:100]
+    qq = db.query(Record).filter(Record.table_id == tid)
     if device_code:
-        q = q.filter(Record.device_code == device_code)
-    recs = q.order_by(Record.id.desc()).all()
-    return [_serialize_record(db, r) for r in recs]
+        qq = qq.filter(Record.device_code == device_code)
+    if kw:
+        # 行级搜索**唯一真源在服务端**：device_code 命中（大小写不敏感子串）
+        #   或 records.data 的【值】（**非键**）命中。
+        # 前端搜索框关键字原样透传为 q（不在本地二次过滤），故此处是唯一裁决点 ——
+        #   调整搜索语义只改这一段（不写死前端函数名，避免随前端重构产生注释漂移）。
+        # LIKE 通配符必须转义（§13 事故③：q=% 曾命中全表）；值走绑定参数，绝不拼接 SQL。
+        pat = "%" + kw.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        json_val_hit = sa_text(
+            "EXISTS (SELECT 1 FROM json_each(records.data) "
+            "WHERE LOWER(CAST(json_each.value AS TEXT)) LIKE :kw ESCAPE '\\')"
+        ).bindparams(kw=pat)
+        qq = qq.filter(or_(
+            func.lower(func.coalesce(Record.device_code, "")).like(pat, escape="\\"),
+            json_val_hit,
+        ))
+    qq = qq.order_by(Record.id.desc())
+    if limit is not None:
+        lim = max(1, min(int(limit), 500))
+        off = max(0, int(skip))
+        recs = qq.offset(off).limit(lim).all()
+    else:
+        recs = qq.all()
+    cache = _prefetch_record_refs(db, recs)
+    return [_serialize_record(db, r, cache) for r in recs]
 
 # ---- 「机房信息汇总」(room_master) → 核心 rooms 单向同步 ----
 # 背景（2026-09-16）：房间存在两套存储——数据表 room_master（records JSON，房间的
@@ -644,40 +712,12 @@ def list_devices(q: Optional[str] = None, subsystem_id: Optional[int] = None,
         result.append(r)
     return result
 
-def _invalidate_ledger_cache() -> None:
-    """让「资产总台账」的进程内缓存立即失效（新建 / 更新设备后必须调）。
-
-    背景：`/assets/asset-ledger`（列表 + 关键词反查）与 `/asset-ledger/resolve` 共用
-    `asset_ledger_routes._load_all` 的 60s 行缓存与机身编码匹配索引缓存。此前只有
-    「机身编码补录」会失效它，**新建设备不会** —— 于是现场建档后最长 60 秒内：
-      · 设备页搜索该编号 → 0 命中（用户以为没建成功，实际已入库）
-      · 扫机身编码反查 → 同样命不中
-      · 区域树里该设备的计数也还是旧的
-    这里统一失效，保证「建档即可见」。
-
-    ⚠️ 台账模块函数用**函数内导入**：asset_ledger_routes 反过来 import 本模块，
-    模块级导入会造成循环依赖。
-    ⚠️ 缓存失效失败绝不能让写接口报错（最坏退化为等 60s 自然过期）。
-    """
-    try:
-        from asset_ledger_routes import _invalidate_caches
-        _invalidate_caches()
-    except Exception:
-        pass
-    try:
-        # 区域索引同在进程内缓存 60s（本模块内定义）
-        _AREA_INDEX_CACHE.update({"ts": 0.0, "data": None})
-    except Exception:
-        pass
-
-
 @router.post("/devices", response_model=DeviceResponse)
 def create_device(data: DeviceCreate, db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
     if db.query(Device).filter(Device.device_code == data.device_code).first():
         raise HTTPException(status_code=400, detail=f"设备编号 {data.device_code} 已存在")
     obj = Device(**data.model_dump())
     db.add(obj); db.commit(); db.refresh(obj)
-    _invalidate_ledger_cache()   # 🔴 建档后立即可见（否则 60s 内搜不到，像没建成功）
     r = DeviceResponse.model_validate(obj)
     r.subsystem_name = _subsystem_name(db, obj.subsystem_id)
     return r
@@ -703,7 +743,6 @@ def update_device(did: int, data: DeviceUpdate, db: Session = Depends(get_db), _
         setattr(obj, k, v)
     obj.updated_at = datetime.now(timezone.utc)
     db.commit(); db.refresh(obj)
-    _invalidate_ledger_cache()   # 🔴 位置/归属改动后立即反映到台账与区域树
     r = DeviceResponse.model_validate(obj)
     r.subsystem_name = _subsystem_name(db, obj.subsystem_id)
     return r

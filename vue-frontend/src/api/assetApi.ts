@@ -102,9 +102,21 @@ class AssetApiService {
   }
 
   // ==================== 资料记录 ====================
-  listRecords(tableId: number, deviceCode?: string) {
-    const q = deviceCode ? `?device_code=${encodeURIComponent(deviceCode)}` : ''
-    return http.get<RecordItem[]>(`${BASE}/tables/${tableId}/records${q}`)
+  /**
+   * 列出某张资料表的记录。
+   * 传 `skip`/`limit` → 分页（返回仍是裸数组，形状不变）；**都不传 → 返回全部（老行为，向后兼容）**。
+   * 到底判据由调用方按契约自行判断：**返回条数 < 请求的 limit 即到底**（后端不给 has_more/total）。
+   * `q` → 服务端搜索：命中 `device_code` 或 `data` 中任一**值**（大小写不敏感子串），
+   *   **在 skip/limit 之前施加**，故分页即「命中集的分页」；空/纯空白 q 等同不传。
+   */
+  listRecords(tableId: number, deviceCode?: string, skip?: number, limit?: number, q?: string) {
+    const params = new URLSearchParams()
+    if (deviceCode) params.set('device_code', deviceCode)
+    if (skip !== undefined) params.set('skip', String(skip))
+    if (limit !== undefined) params.set('limit', String(limit))
+    if (q) params.set('q', q)
+    const qs = params.toString()
+    return http.get<RecordItem[]>(`${BASE}/tables/${tableId}/records${qs ? `?${qs}` : ''}`)
   }
   createRecord(tableId: number, data: RecordPayload) {
     return http.post<RecordItem>(`${BASE}/tables/${tableId}/records`, data)
