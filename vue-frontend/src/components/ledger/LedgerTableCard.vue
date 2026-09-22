@@ -11,7 +11,7 @@
  *  - 关键键按钮 `@click.stop`，避免点它误触「进入表维护」。
  */
 import { computed } from 'vue'
-import { EditPen, Grid, Key, List, Tickets } from '@element-plus/icons-vue'
+import { CircleCheck, CircleClose, Delete, EditPen, Grid, Key, List, Tickets } from '@element-plus/icons-vue'
 import CoverageBar from '@/components/viz/CoverageBar.vue'
 import type { DataTable } from '@/types/asset'
 import type { LinkTableStat } from '@/types/assetViz'
@@ -25,7 +25,13 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'open'): void
   (e: 'set-key'): void
+  /** 停用 / 启用该表（软删 / 恢复），由父级确认并调 API */
+  (e: 'toggle-active'): void
+  /** 彻底删除该表（硬删，仅已停用可用），由父级输入 code 校验后调 API */
+  (e: 'delete'): void
 }>()
+
+const inactive = computed(() => props.table.is_active === false)
 
 const resolved = computed(() =>
   props.stat ? props.stat.resolved_devices + props.stat.resolved_rooms : 0,
@@ -39,6 +45,7 @@ const relationKeyText = computed(
 <template>
   <article
     class="ltc panel"
+    :class="{ 'is-inactive': inactive }"
     role="button"
     tabindex="0"
     :aria-label="`进入资料表 ${table.name} 的行数据维护`"
@@ -52,6 +59,7 @@ const relationKeyText = computed(
         <span class="ltc__name ellipsis" :title="table.name">{{ table.name }}</span>
       </span>
       <span class="ltc__head-side">
+        <el-tag v-if="inactive" size="small" type="info" effect="light">已停用</el-tag>
         <el-tag v-if="table.subsystem_name" size="small" type="info" effect="light">
           {{ table.subsystem_name }}
         </el-tag>
@@ -105,6 +113,44 @@ const relationKeyText = computed(
           {{ relationKeyText }}
         </button>
       </p>
+    </div>
+
+    <div class="ltc__ops">
+      <el-button
+        size="small"
+        plain
+        :type="inactive ? 'primary' : 'default'"
+        :aria-label="inactive ? `启用资料表 ${table.name}` : `停用资料表 ${table.name}`"
+        @click.stop="emit('toggle-active')"
+        @keydown.stop
+      >
+        <el-icon :size="14"><component :is="inactive ? CircleCheck : CircleClose" /></el-icon>
+        <span>{{ inactive ? '启用' : '停用' }}</span>
+      </el-button>
+
+      <el-tooltip
+        :content="inactive
+          ? '彻底删除该表及其全部记录与字段（不可恢复）'
+          : '请先停用，确认无影响后再彻底删除'"
+        placement="top"
+        :show-after="200"
+        append-to-body
+      >
+        <span class="ltc__danger-wrap">
+          <el-button
+            size="small"
+            type="danger"
+            plain
+            :disabled="!inactive"
+            :aria-label="`彻底删除资料表 ${table.name}`"
+            @click.stop="emit('delete')"
+            @keydown.stop
+          >
+            <el-icon :size="14"><Delete /></el-icon>
+            <span>彻底删除</span>
+          </el-button>
+        </span>
+      </el-tooltip>
     </div>
   </article>
 </template>
@@ -238,5 +284,34 @@ const relationKeyText = computed(
   margin: 0;
   font-size: var(--text-xs);
   color: var(--meta);
+}
+
+/* 已停用（软删）：卡片灰显，但操作区保持可读，便于恢复 / 彻底清理 */
+.ltc.is-inactive {
+  background: var(--surface-2);
+  border-color: var(--border-soft);
+}
+.ltc.is-inactive .ltc__icon {
+  color: var(--muted);
+}
+.ltc.is-inactive .ltc__name,
+.ltc.is-inactive .ltc__code,
+.ltc.is-inactive .ltc__facts,
+.ltc.is-inactive .ltc__link {
+  opacity: 0.6;
+}
+
+.ltc__ops {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-soft);
+}
+
+.ltc__danger-wrap {
+  display: inline-flex;
 }
 </style>
