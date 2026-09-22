@@ -4,14 +4,19 @@
  * =====================================================================
  * 所有动态资料表以卡片平铺（名称/子系统/记录数/字段数/关联覆盖率/关键键入口），
  * 支持表名搜索 + 子系统筛选 + 全表搜索；点卡片进入单表维护。
+ * 删除能力两级：停用/启用（软删，可回滚）+ 彻底删除（硬删，仅已停用可用，需输入 code 确认）。
  *
- * 从 `LedgerView` 抽出以控制单文件行数（ARCHITECTURE §7 规则 2）。本组件只持有
- * 「筛选与弹窗」这类纯 UI 状态；数据由父级（`useLedgerCatalog`）传入。
+ * 从 `LedgerView` 抽出以控制单文件行数（ARCHITECTURE §7 规则 2）。本组件持有
+ * 「筛选与弹窗」这类纯 UI 状态；目录数据由父级（`useLedgerCatalog`）传入，
+ * 破坏性操作在此发起并 emit('refresh') 让父级重载目录。
  */
 import { computed, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Aim, Search } from '@element-plus/icons-vue'
 import GlobalSearchDialog from './GlobalSearchDialog.vue'
 import LedgerTableCard from './LedgerTableCard.vue'
+import assetApi from '@/api/assetApi'
+import { confirmDeleteTable } from '@/lib/ledgerDanger'
 import type { DataTable } from '@/types/asset'
 import type { Subsystem } from '@/api/dict'
 import type { LinkTableStat } from '@/types/assetViz'
@@ -22,6 +27,8 @@ const props = defineProps<{
   loading: boolean
   error: string
   statMap: Map<number, LinkTableStat>
+  /** 是否包含已停用（软删）的表；由父级 ref 双向绑定 */
+  includeInactive: boolean
 }>()
 
 const emit = defineEmits<{
@@ -29,11 +36,65 @@ const emit = defineEmits<{
   (e: 'set-key', table: DataTable): void
   (e: 'jump', tableId: number, value: string): void
   (e: 'retry'): void
+  (e: 'update:includeInactive', value: boolean): void
+  /** 破坏性操作完成后请求父级重载目录 */
+  (e: 'refresh'): void
 }>()
 
 const q = ref('')
 const subFilter = ref('all')
 const gSearchOpen = ref(false)
+const mutating = ref(false)
+
+const includeInactiveModel = computed({
+  get: () => props.includeInactive,
+  set: (value: boolean) => emit('update:includeInactive', value),
+})
+
+/** 停用（软删，需确认，说明可恢复）/ 启用（直接执行） */
+async function onToggleActive(table: DataTable) {
+  if (mutating.value) return
+  const enabling = table.is_active === false
+  if (!enabling) {
+    try {
+      await ElMessageBox.confirm(
+        `将停用资料表「${table.name}」（${table.code}）。\n` +
+          '停用为软删：记录与字段全部保留，可随时在「显示已停用」中恢复。',
+        '停用资料表',
+        { type: 'warning', confirmButtonText: '停用', cancelButtonText: '取消' },
+      )
+    } catch {
+      return
+    }
+  }
+  mutating.value = true
+  try {
+    await assetApi.updateTable(table.id, { is_active: enabling })
+    ElMessage.success(enabling ? `已启用「${table.name}」` : `已停用「${table.name}」`)
+    emit('refresh')
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '操作失败')
+  } finally {
+    mutating.value = false
+  }
+}
+
+/** 彻底删除（硬删）：仅已停用可用；必须输入 code 才能提交（护栏见 @/lib/ledgerDanger） */
+async function onDeleteTable(table: DataTable) {
+  if (mutating.value || table.is_active !== false) return
+  const ok = await confirmDeleteTable(table)
+  if (!ok) return
+  mutating.value = true
+  try {
+    await assetApi.deleteTable(table.id)
+    ElMessage.success(`资料表「${table.name}」已彻底删除`)
+    emit('refresh')
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '删除失败')
+  } finally {
+    mutating.value = false
+  }
+}
 
 const filteredTables = computed(() => {
   let list = props.tables
@@ -79,6 +140,14 @@ const filteredTables = computed(() => {
       />
     </el-select>
 
+    <label class="lcp__inactive">
+      <el-switch
+        v-model="includeInactiveModel"
+        aria-label="显示已停用（软删）的资料表"
+      />
+      <span class="lcp__inactive-text">显示已停用</span>
+    </label>
+
     <el-button @click="gSearchOpen = true">
       <el-icon :size="16"><Aim /></el-icon>
       <span>全表搜索</span>
@@ -106,6 +175,8 @@ const filteredTables = computed(() => {
       :stat="props.statMap.get(item.id) ?? null"
       @open="emit('open', item.id)"
       @set-key="emit('set-key', item)"
+      @toggle-active="onToggleActive(item)"
+      @delete="onDeleteTable(item)"
     />
   </div>
 
@@ -149,6 +220,19 @@ const filteredTables = computed(() => {
 
 .lcp__filter {
   flex: 0 0 clamp(160px, 18vw, 220px);
+}
+
+.lcp__inactive {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--fg-2);
+  cursor: pointer;
+}
+
+.lcp__inactive-text {
+  white-space: nowrap;
 }
 
 .lcp__count {
