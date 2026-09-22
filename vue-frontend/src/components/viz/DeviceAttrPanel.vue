@@ -78,7 +78,6 @@ const graphEdges = computed<GraphEdge[]>(() => {
     relation_type: String(e.type ?? '关联'), source: 'manual', other_kind: 'unknown',
   }))
 })
-})
 
 async function removeEdge(id: number) {
   try {
