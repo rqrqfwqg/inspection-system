@@ -9,11 +9,13 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { RefreshLeft, Search } from '@element-plus/icons-vue'
 import {
+  INVENTORY_STATUS_OPTIONS,
   LEDGER_PAGE_SIZES,
   LEDGER_STATE_OPTIONS,
   type AssetLedgerFacets,
   type AssetLedgerFilters,
   type AssetLedgerState,
+  type InventoryStatus,
 } from '@/types/assetLedger'
 
 interface Props {
@@ -27,6 +29,8 @@ interface Props {
   loading: boolean
   /** 后端汇总里的保修预警天数（默认 90），用于「保修 N 天内到期」选项文案 */
   warrantySoonDays: number
+  /** 设备台账 redesign：是否展示「已盘点 / 未盘点 / 全部」服务器端 Segmented（基础数据页隐藏） */
+  showInventorySegmented?: boolean
 }
 
 const props = defineProps<Props>()
@@ -87,6 +91,12 @@ const useDept = computed<string>({
 const stateValue = computed<AssetLedgerState | ''>({
   get: () => props.filters.state ?? '',
   set: (raw) => emit('patch', { state: raw ?? '' }),
+})
+
+/** 设备台账 redesign：盘点状态 Segmented（服务器端，变更即 page=1 重新请求，禁本地过滤） */
+const inventoryStatusValue = computed<'' | InventoryStatus>({
+  get: () => props.filters.inventory_status ?? '',
+  set: (raw) => emit('patch', { inventory_status: raw ?? '' }),
 })
 
 const pageSizeValue = computed<number>({
@@ -176,6 +186,14 @@ const resetTip = computed(() =>
         <el-option v-for="o in stateOptions" :key="o.value" :label="o.label" :value="o.value" />
       </el-select>
 
+      <el-segmented
+        v-if="showInventorySegmented"
+        v-model="inventoryStatusValue"
+        class="fbar__seg"
+        aria-label="盘点状态"
+        :options="INVENTORY_STATUS_OPTIONS"
+      />
+
       <div class="fbar__right">
         <el-select v-model="pageSizeValue" class="fbar__size" aria-label="每页条数">
           <el-option v-for="n in LEDGER_PAGE_SIZES" :key="n" :label="`每页 ${n} 条`" :value="n" />
@@ -222,6 +240,12 @@ const resetTip = computed(() =>
 .fbar__sel {
   flex: 0 1 176px;
   min-width: 148px;
+}
+.fbar__seg { flex: 0 0 auto; }
+.fbar__seg :deep(.el-segmented__item.is-selected) {
+  background-color: var(--accent-soft);
+  color: var(--accent);
+  font-weight: var(--weight-emphasize);
 }
 .fbar__right {
   flex: 0 0 auto;

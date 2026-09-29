@@ -13,6 +13,38 @@
 /** 行来源：devices=已登记进设备主表；ledger_only=只在现场台账、未登记 */
 export type LedgerRowSource = 'devices' | 'ledger_only'
 
+/** 盘点状态（设备台账 redesign：合并层 _load_all 派生字段，永不为 NULL） */
+export type InventoryStatus = 'confirmed' | 'unconfirmed'
+
+/** 基础数据页「来源」列派生种类（SPEC §5.2 下钻二） */
+export type SourceKind = 'devices' | 'ledger_only' | 'elec_dwg' | 'records' | 'fixed_assets'
+
+/** DeviceLedgerTable 可注入的盘点相关列（由父页按 §4.2 / §5.2 选择） */
+export type InventoryColumnKey = 'status' | 'room' | 'confirmed_at' | 'confirmed_by' | 'source'
+
+/** 管理员逃生舱：覆盖写（PUT）成功响应（SPEC §6.2 / 架构 §11.4） */
+export interface InventoryStatusOverrideResult {
+  device_code: string
+  status: InventoryStatus
+  overridden_by: string
+  overridden_at: string
+  reason: string | null
+  overridden: boolean
+}
+
+/** 管理员逃生舱：覆盖撤销（DELETE）响应 */
+export interface InventoryStatusClearResult {
+  device_code: string
+  cleared: boolean
+}
+
+/** 盘点状态 Segmented 选项（服务器端，禁本地过滤） */
+export const INVENTORY_STATUS_OPTIONS: { value: '' | InventoryStatus; label: string }[] = [
+  { value: 'confirmed', label: '已盘点' },
+  { value: 'unconfirmed', label: '未盘点' },
+  { value: '', label: '全部' },
+]
+
 /** 总台账单行（与后端 asset_ledger_routes.list_asset_ledger 的 items 一一对应） */
 export interface AssetLedgerRow {
   device_code: string
@@ -47,6 +79,20 @@ export interface AssetLedgerRow {
   record_count: number
   record_tables: string[]
   relation_count: number
+  /* ── 设备台账 redesign：盘点状态派生字段（资产合并层 _load_all 透出，SPEC §3）── */
+  inventory_status?: InventoryStatus
+  /** Concept-A 绑定房间（derived 行取 room_inventory_records 的房间；override 行同 derived 房间） */
+  inventory_room_code?: string | null
+  /** 最终状态来源：override=管理员覆盖（压过派生）；derived=房间盘点推导 */
+  inventory_status_source?: 'override' | 'derived'
+  /** 确认时间（derived→房间 completed_at；override→overrides.overridden_at） */
+  inventory_confirmed_at?: string | null
+  /** 确认人（derived→房间 operator；override→overrides.overridden_by） */
+  inventory_confirmed_by?: string | null
+  /** 仅 override 行非空，tooltip 展示（UI 设计 §10） */
+  inventory_override_reason?: string | null
+  /** 基础数据页「来源」列（UI 设计 §5.2）：devices / ledger_only / elec_dwg / records / fixed_assets */
+  source_kind?: SourceKind
 }
 
 export interface AssetLedgerSubsystemOption {
@@ -101,6 +147,10 @@ export interface AssetLedgerQuery {
   use_dept?: string
   state?: AssetLedgerState
   source?: LedgerRowSource
+  /** 设备台账 redesign：按盘点状态过滤（confirmed=已盘点 / unconfirmed=未盘点），不传=全量 */
+  inventory_status?: InventoryStatus
+  /** 基础数据页下钻：按来源表筛选（devices / ledger_only / elec_dwg / records / fixed_assets） */
+  source_kind?: SourceKind
   include_inactive?: boolean
   sort?: AssetLedgerSortKey
   order?: AssetLedgerOrder
@@ -108,12 +158,14 @@ export interface AssetLedgerQuery {
   page_size?: number
 }
 
-/** 汇总接口只接受这 4 个维度（不含 state/sort/page：后端签名如此，多传会被忽略） */
+/** 汇总接口只接受这 4 个维度（+ 设备台账 redesign 新增 inventory_status） */
 export interface AssetLedgerSummaryQuery {
   q?: string
   subsystem_id?: number
   area?: string
   use_dept?: string
+  /** 设备台账 redesign：汇总按盘点状态子集计（confirmed=已盘点总数 / unconfirmed=未盘点总数） */
+  inventory_status?: InventoryStatus
 }
 
 /** 页面级筛选模型（与 AssetLedgerQuery 的区别：这里是「未提交」的原始输入，空串表示不筛） */
@@ -123,6 +175,10 @@ export interface AssetLedgerFilters {
   area: string
   use_dept: string
   state: AssetLedgerState | ''
+  /** 设备台账 redesign：盘点状态筛选（''=全部 / confirmed=已盘点 / unconfirmed=未盘点） */
+  inventory_status: '' | InventoryStatus
+  /** 基础数据页下钻：按来源表筛选（''=不限） */
+  source_kind: '' | SourceKind
 }
 
 export interface AssetLedgerBucket {
@@ -149,6 +205,8 @@ export interface AssetLedgerSummary {
   by_area: AssetLedgerBucket[]
   by_subsystem: AssetLedgerBucket[]
   by_use_dept: AssetLedgerBucket[]
+  /** 设备台账 redesign：基础数据页「来源表分布」下钻（按 source_kind 聚合，可选） */
+  by_source?: AssetLedgerBucket[]
 }
 
 export interface AssetLedgerDeviceBrief {
@@ -199,6 +257,10 @@ export interface AssetLedgerDetail {
   records: AssetLedgerRecordItem[]
   record_count: number
   relations: AssetLedgerRelationItem[]
+  /* ── 设备台账 redesign：盘点状态（详情抽屉逃生舱撤销入口用，SPEC §4.4）── */
+  inventory_status?: InventoryStatus
+  inventory_overridden?: boolean
+  inventory_override_reason?: string | null
 }
 
 /** 台账反查（/assets/asset-ledger/resolve，走后端权威匹配内核） */
@@ -355,7 +417,7 @@ export function warrantyText(state: AssetLedgerRow['warranty_state']): string {
 }
 
 export function emptyFilters(): AssetLedgerFilters {
-  return { q: '', subsystem_id: null, area: '', use_dept: '', state: '' }
+  return { q: '', subsystem_id: null, area: '', use_dept: '', state: '', inventory_status: '', source_kind: '' }
 }
 
 export function emptyFacets(): AssetLedgerFacets {
@@ -364,5 +426,13 @@ export function emptyFacets(): AssetLedgerFacets {
 
 /** 筛选条件是否生效（决定空态文案与「清除筛选」入口） */
 export function hasActiveFilters(f: AssetLedgerFilters): boolean {
-  return !!f.q || f.subsystem_id !== null || !!f.area || !!f.use_dept || !!f.state
+  return (
+    !!f.q ||
+    f.subsystem_id !== null ||
+    !!f.area ||
+    !!f.use_dept ||
+    !!f.state ||
+    !!f.inventory_status ||
+    !!f.source_kind
+  )
 }

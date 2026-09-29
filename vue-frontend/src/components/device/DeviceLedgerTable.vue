@@ -13,8 +13,10 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { Document, Link, Refresh, WarningFilled } from '@element-plus/icons-vue'
 import {
   fmtDate, fmtInt, fmtMoney, matchTypeLabel, warrantyTagType, warrantyText,
-  type AssetLedgerRow, type LedgerResolveResult,
+  type AssetLedgerRow, type InventoryColumnKey, type LedgerResolveResult,
 } from '@/types/assetLedger'
+import InventoryStatusBadge from '@/components/device/InventoryStatusBadge.vue'
+import SourceTag from '@/components/device/SourceTag.vue'
 
 interface Props {
   rows: AssetLedgerRow[]
@@ -30,6 +32,14 @@ interface Props {
   /** 空结果时由父级触发的台账反查结果（/assets/asset-ledger/resolve） */
   resolveResult: LedgerResolveResult | null
   resolving: boolean
+  /** 设备台账 redesign：注入的盘点相关列（§4.2 / §5.2），由父页选择 */
+  inventoryColumns?: InventoryColumnKey[]
+  /** 行未透出 inventory_status 时的兜底（设备台账页=confirmed / 基础数据页=unconfirmed） */
+  inventoryDefaultStatus?: 'confirmed' | 'unconfirmed'
+  /** 是否展示「置状态」逃生舱按钮（仅 admin 且父页开启） */
+  showOverrideAction?: boolean
+  /** 当前用户是否管理员（逃生舱仅 admin 可见） */
+  isAdmin?: boolean
 }
 
 const props = defineProps<Props>()
@@ -41,6 +51,7 @@ const emit = defineEmits<{
   (e: 'open-code', code: string): void
   (e: 'reset-filters'): void
   (e: 'retry'): void
+  (e: 'override', row: AssetLedgerRow): void
 }>()
 
 /** 断点按 CSS 视口（已含系统缩放），只看宽度，不读 devicePixelRatio / screen */
@@ -53,6 +64,32 @@ const showWarranty = computed(() => vw.value >= 1024)
 const showRecords = computed(() => vw.value >= 1280)
 const showDept = computed(() => vw.value >= 1440)
 const showBrand = computed(() => vw.value >= 1536)
+
+/** 设备台账 redesign：盘点列断点（§4.2 / §5.2，与既有列同套视口栅格） */
+const showInvStatus = computed(() => vw.value >= 768)
+const showInvRoom = computed(() => vw.value >= 1024)
+const showInvConfirmedAt = computed(() => vw.value >= 1280)
+const showInvConfirmedBy = computed(() => vw.value >= 1440)
+const showInvSource = computed(() => vw.value >= 768)
+
+/** 某盘点列是否应渲染：同时受父页注入与断点可见性约束 */
+function hasInvCol(key: InventoryColumnKey): boolean {
+  if (!props.inventoryColumns?.includes(key)) return false
+  if (key === 'status') return showInvStatus.value
+  if (key === 'room') return showInvRoom.value
+  if (key === 'confirmed_at') return showInvConfirmedAt.value
+  if (key === 'confirmed_by') return showInvConfirmedBy.value
+  if (key === 'source') return showInvSource.value
+  return false
+}
+
+/** 行盘点状态（兜底到父页默认，避免后端未透出时反推为空） */
+function rowStatus(row: AssetLedgerRow): 'confirmed' | 'unconfirmed' {
+  return row.inventory_status ?? props.inventoryDefaultStatus ?? 'unconfirmed'
+}
+function rowSourceKind(row: AssetLedgerRow): 'devices' | 'ledger_only' | 'elec_dwg' | 'records' | 'fixed_assets' {
+  return row.source_kind ?? (row.source === 'ledger_only' ? 'ledger_only' : 'devices')
+}
 const pagerSmall = computed(() => vw.value < 1280)
 const pagerLayout = computed(() =>
   vw.value >= 1536 ? 'total, prev, pager, next, jumper' : vw.value >= 1280 ? 'total, prev, pager, next' : 'prev, pager, next')
@@ -188,6 +225,45 @@ function recordTablesText(row: AssetLedgerRow): string {
             </template>
           </el-table-column>
 
+          <!-- 设备台账 redesign：盘点状态列（§4.2 / §5.2，注入式，断点可见） -->
+          <el-table-column v-if="hasInvCol('status')" prop="inventory_status" label="盘点状态" min-width="112" fixed="left" :sortable="false">
+            <template #default="{ row }">
+              <InventoryStatusBadge
+                :status="rowStatus(row)"
+                :overridden="row.inventory_status_source === 'override'"
+                :override-by="row.inventory_confirmed_by"
+                :override-at="row.inventory_confirmed_at"
+                :override-reason="row.inventory_override_reason"
+              />
+            </template>
+          </el-table-column>
+
+          <el-table-column v-if="hasInvCol('room')" prop="inventory_room_code" label="确认房间" min-width="120" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span v-if="row.inventory_room_code" class="mono">{{ row.inventory_room_code }}</span>
+              <span v-else class="cell-empty">—</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column v-if="hasInvCol('confirmed_at')" prop="inventory_confirmed_at" label="确认时间" min-width="120" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span class="tnum">{{ fmtDate(row.inventory_confirmed_at) }}</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column v-if="hasInvCol('confirmed_by')" prop="inventory_confirmed_by" label="确认人" min-width="120" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span v-if="row.inventory_confirmed_by">{{ row.inventory_confirmed_by }}</span>
+              <span v-else class="cell-empty">—</span>
+            </template>
+          </el-table-column>
+
+          <el-table-column v-if="hasInvCol('source')" prop="source_kind" label="来源" min-width="110" show-overflow-tooltip>
+            <template #default="{ row }">
+              <SourceTag :kind="rowSourceKind(row)" />
+            </template>
+          </el-table-column>
+
           <el-table-column v-if="showBrand" prop="brand_model" label="品牌型号" min-width="170" show-overflow-tooltip>
             <template #default="{ row }">
               <span v-if="row.brand_model">{{ row.brand_model }}</span>
@@ -233,8 +309,15 @@ function recordTablesText(row: AssetLedgerRow): string {
             </template>
           </el-table-column>
 
-          <el-table-column label="操作" width="88" align="center" fixed="right">
+          <el-table-column label="操作" :width="props.showOverrideAction ? 132 : 88" align="center" fixed="right">
             <template #default="{ row }">
+              <el-button
+                v-if="props.showOverrideAction && props.isAdmin"
+                link
+                type="primary"
+                :aria-label="`修改设备 ${row.device_code} 的盘点状态`"
+                @click.stop="emit('override', row)"
+              >置状态</el-button>
               <el-button link type="primary" :aria-label="`查看设备 ${row.device_code} 的完整档案详情`" @click.stop="emit('open-detail', row)">详情</el-button>
             </template>
           </el-table-column>

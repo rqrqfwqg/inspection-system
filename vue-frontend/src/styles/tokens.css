@@ -423,6 +423,27 @@ html.is-dense .el-table .el-table__cell     { padding: 4px 0; }
 }
 
 /* ==========================================================================
+   盘点状态色标（设备台账 redesign 追加；色相数 = 0）
+   依据：设备台账redesign-SPEC §3.3 / §13。自绘（色块+文字+图标），禁 emoji。
+   - confirmed 复用 --dev-normal-* 绿系，单一事实源
+   - unconfirmed 取中性灰（H≈0），新增色相数 = 0
+   - override 复用 --warn 琥珀，警示但不引入新色相
+   - 对比度契约（WCAG 2.1 AA）：*-fg ≥4.5:1；*-base 仅用于 ≥24px 填充块；*-bg 仅用于状态块浅底
+   ========================================================================== */
+:root {
+  --inv-confirmed-base: #16A34A;   --inv-confirmed-bg: #EDF7F1;   --inv-confirmed-fg: #15803D;  /* 4.58:1 */
+  --inv-unconfirmed-base: #6B7280;  --inv-unconfirmed-bg: #F0F2F5; --inv-unconfirmed-fg: #4B5563;  /* 6.1:1 */
+  --inv-override-base: #D97706;     --inv-override-bg: #FBF1E6;   --inv-override-fg: #A34A06;     /* 5.3:1 */
+}
+
+/* 深色主题 —— 与现有 device-status 暗主题同族，沿用「仅 class 触发，不跟随系统」约定 */
+:root[data-theme="dark"] {
+  --inv-confirmed-base: #3E9A66;   --inv-confirmed-bg: #1B2E22;    --inv-confirmed-fg: #7FD39B;
+  --inv-unconfirmed-base: #8A8F98;  --inv-unconfirmed-bg: #232833;   --inv-unconfirmed-fg: #B4B8C0;
+  --inv-override-base: #E09B3D;     --inv-override-bg: #3A2A16;     --inv-override-fg: #F2B36A;
+}
+
+/* ==========================================================================
    状态色标组件骨架类（全局；组件内不得出现任何字面色值）
    用法：<span class="wo-tag" :style="{'--tone-bg': var(--wo-x-bg), '--tone-fg': var(--wo-x-fg)}">
    ========================================================================== */

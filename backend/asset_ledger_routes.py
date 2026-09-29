@@ -33,7 +33,7 @@
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text as sa_text
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 import re
 import time
 from datetime import datetime, date
@@ -41,11 +41,13 @@ from datetime import datetime, date
 from database import (
     get_db, User, Device, Subsystem, DataTable, Record, DeviceRelation,
     FixedAsset, DeviceArchive, DeviceSerialObservation, DeviceGeoObservation,
+    InventoryStatusOverride,
 )
-from dependencies import get_current_user as _get_current_user
+from dependencies import get_current_user as _get_current_user, require_admin
 from asset_routes import (
     _fa_to_dict, _da_to_dict, _records_profiles, _relation_type_meta,
     _subsystem_name, _canonical_relation_label,
+    _INV_LOCATE_LABEL, _room_code_resolver, _norm_room_code,
 )
 # 机身编码匹配内核（后端唯一权威实现，见 asset_code_match.py）
 from asset_code_match import (build_match_index, resolve_code,
@@ -54,6 +56,7 @@ from asset_schemas import (
     ObservationCreate, ObservationCreateResponse,
     ObservationResponse, ObservationDeleteResponse, ObservationConflict,
     GeoObservationCreate, GeoObservationCreateResponse, GeoObservationResponse,
+    InventoryStatusOverrideIn,
 )
 
 router = APIRouter(prefix="/assets", tags=["asset-ledger"])
@@ -82,6 +85,16 @@ def _iso_date(v: Any) -> Optional[str]:
         return v.isoformat()[:10]
     s = str(v).strip()
     return s[:10] if s else None
+
+
+def _iso_dt(v: Any) -> Optional[str]:
+    """DateTime 列 → ISO 字符串（兼容 datetime / 字符串 / None）。"""
+    if v is None:
+        return None
+    if hasattr(v, "isoformat"):
+        return v.isoformat()
+    s = str(v).strip()
+    return s or None
 
 
 def _to_float(v: Any) -> Optional[float]:
@@ -231,6 +244,130 @@ def _enrich_from_ledger(db: Session, rows: List[Dict[str, Any]]) -> None:
         r["area"] = _ledger_area(r["location"], r["building"])
 
 
+def _attach_inventory_status(db: Session, rows: List[Dict[str, Any]]) -> None:
+    """给 `_load_all` 的每行追加盘点派生字段（Concept A ∩ completed 房间）+ override 覆盖。
+
+    口径（设备台账redesign-SPEC §2 / §3 / 架构 §4 / §11）：
+    - Concept-A 绑定房间 = device_relations(relation_type='所在机房') 的 to_code
+      （经房间号归一化解析，复用 asset_routes._room_code_resolver，避免归一化漂移）
+      ∪ Device.room_id → rooms.code；
+    - inspected_rooms = room_inventory_records.status='completed' 的 room_code 集合
+      （完成时间 / 操作人取该房间 room_inventory_records.completed_at / operator）；
+    - derived confirmed iff 绑定房间 ∩ inspected_rooms ≠ ∅；否则 unconfirmed（永不为 NULL）；
+    - 若 inventory_status_overrides 含该 device_code → 以 override.status 为 final，
+      source='override'；否则 derived，source='derived'。
+    - source_kind（基础数据页「来源」列）：devices / fixed_assets / ledger_only
+      （elec_dwg / records 为「未挂接源数据」，由基础数据页独立下钻，不在此 ledger 行产生）。
+
+    本函数**原地修改 rows**（与 _load_all 同 60s 生命周期，不新增查询层）。
+    """
+    # 1) inspected_rooms + 完成记录（确认时间/操作人取房间级 room_inventory_records）
+    inspected_rooms: set = set()
+    inspected_rec: Dict[str, Any] = {}
+    for r in db.execute(sa_text(
+            "SELECT room_code, completed_at, operator FROM room_inventory_records"
+            " WHERE status = 'completed'")).all():
+        m = dict(r._mapping)
+        rc = (m.get("room_code") or "").strip()
+        if rc:
+            inspected_rooms.add(rc)
+            inspected_rec[rc] = m
+
+    # 2) Concept-A 绑定：device_relations('所在机房') + Device.room_id
+    exact, norm = _room_code_resolver(db)
+
+    # 设备「所在机房」关系 → (id, 解析后 room_code)，按 id 取最新为 primary
+    rel_bind: Dict[str, List[tuple]] = {}
+    for r in db.execute(sa_text(
+            "SELECT id, from_code, to_code FROM device_relations"
+            " WHERE relation_type = :lab"), {"lab": _INV_LOCATE_LABEL}).all():
+        m = dict(r._mapping)
+        fc = (m.get("from_code") or "").strip()
+        tc = (m.get("to_code") or "").strip()
+        if not fc:
+            continue
+        resolved = exact.get(tc) or norm.get(_norm_room_code(tc))
+        if not resolved:
+            continue
+        rel_bind.setdefault(fc, []).append((int(m.get("id") or 0), resolved))
+
+    # Device.room_id → rooms.code（一次 JOIN 覆盖全量）
+    room_id_bind: Dict[str, str] = {}
+    for r in db.execute(sa_text(
+            "SELECT d.device_code AS dc, r.code AS rc FROM devices d"
+            " JOIN rooms r ON r.id = d.room_id"
+            " WHERE d.room_id IS NOT NULL")).all():
+        m = dict(r._mapping)
+        dc = (m.get("dc") or "").strip()
+        rc = (m.get("rc") or "").strip()
+        if dc and rc:
+            room_id_bind[dc] = rc
+
+    # 3) override 覆盖层（量极小，同 60s 生命周期）
+    ov_map: Dict[str, Dict[str, Any]] = {}
+    for r in db.execute(sa_text(
+            "SELECT device_code, status, reason, overridden_by, overridden_at"
+            " FROM inventory_status_overrides")).all():
+        m = dict(r._mapping)
+        dc = (m.get("device_code") or "").strip()
+        if not dc:
+            continue
+        ov_map[dc] = {
+            "status": m.get("status"),
+            "reason": m.get("reason"),
+            "overridden_by": m.get("overridden_by"),
+            "overridden_at": _iso_dt(m.get("overridden_at")),
+        }
+
+    # 4) 逐行计算（派生 + override 优先）
+    for row in rows:
+        code = row["device_code"]
+        rel_list = rel_bind.get(code)
+        primary_room: Optional[str] = None
+        cand_rooms: set = set()
+        if rel_list:
+            rel_list.sort(key=lambda x: -x[0])
+            for (_id, rc) in rel_list:
+                cand_rooms.add(rc)
+            primary_room = rel_list[0][1]
+        rid_room = room_id_bind.get(code)
+        if rid_room:
+            cand_rooms.add(rid_room)
+            if primary_room is None:
+                primary_room = rid_room
+
+        derived_confirmed = bool(cand_rooms & inspected_rooms)
+
+        if code in ov_map:
+            ov = ov_map[code]
+            row["inventory_status"] = ov["status"]
+            row["inventory_status_source"] = "override"
+            row["inventory_override_reason"] = ov["reason"]
+            row["inventory_room_code"] = primary_room
+            row["inventory_confirmed_at"] = ov["overridden_at"]
+            row["inventory_confirmed_by"] = ov["overridden_by"]
+        else:
+            row["inventory_status"] = "confirmed" if derived_confirmed else "unconfirmed"
+            row["inventory_status_source"] = "derived"
+            row["inventory_override_reason"] = None
+            row["inventory_room_code"] = primary_room
+            # 确认时间/人：优先 primary 绑定房（若 completed），否则任一 completed 绑定房
+            confirmed_room = primary_room if primary_room in inspected_rooms else None
+            if confirmed_room is None:
+                confirmed_room = next((rc for rc in cand_rooms if rc in inspected_rooms), None)
+            rec = inspected_rec.get(confirmed_room) if confirmed_room else None
+            row["inventory_confirmed_at"] = _iso_dt(rec.get("completed_at")) if rec else None
+            row["inventory_confirmed_by"] = (rec.get("operator") or "") if rec else None
+
+        # 来源维度（基础数据页「来源」列）
+        if row["source"] == "devices":
+            row["source_kind"] = "devices"
+        elif row["from_asset_name"]:
+            row["source_kind"] = "fixed_assets"
+        else:
+            row["source_kind"] = "ledger_only"
+
+
 def _load_all(db: Session) -> List[Dict[str, Any]]:
     """全量总台账行（约 9000 行），进程内缓存 60s；后续筛选/分页都在内存做。
 
@@ -313,6 +450,9 @@ def _load_all(db: Session) -> List[Dict[str, Any]]:
         r["record_count"] = rec_n.get(code, 0)
         r["relation_count"] = rel_n.get(code, 0)
 
+    # 盘点派生字段（Concept A ∩ completed 房间）+ override 覆盖（同 60s 生命周期）
+    _attach_inventory_status(db, rows)
+
     _ALL_CACHE.update({"key": "all", "ts": now, "rows": rows})
     # §2.2：复用同一批行、同一生命周期建匹配索引（不修改 rows，列表接口输出不变）
     _MATCH_INDEX.update({"key": "all", "ts": now, "idx": build_match_index(db, rows)})
@@ -350,6 +490,7 @@ def _apply_filters(rows: List[Dict[str, Any]], q: Optional[str] = None,
                    subsystem_id: Optional[int] = None, area: Optional[str] = None,
                    use_dept: Optional[str] = None, state: Optional[str] = None,
                    source: Optional[str] = None,
+                   inventory_status: Optional[str] = None,
                    include_inactive: bool = False) -> List[Dict[str, Any]]:
     out = rows
     if not include_inactive:
@@ -383,6 +524,11 @@ def _apply_filters(rows: List[Dict[str, Any]], q: Optional[str] = None,
         out = [r for r in out if r["bim_tag"]]
     elif state == "no_location":
         out = [r for r in out if not r["location"]]
+    # 盘点状态过滤（设备台账redesign）：confirmed / unconfirmed（派生 + override 后终值）
+    if inventory_status == "confirmed":
+        out = [r for r in out if r.get("inventory_status") == "confirmed"]
+    elif inventory_status == "unconfirmed":
+        out = [r for r in out if r.get("inventory_status") == "unconfirmed"]
     return out
 
 
@@ -416,6 +562,7 @@ def _sort_rows(rows: List[Dict[str, Any]], sort: str, order: str) -> List[Dict[s
 def list_asset_ledger(q: Optional[str] = None, subsystem_id: Optional[int] = None,
                       area: Optional[str] = None, use_dept: Optional[str] = None,
                       state: Optional[str] = None, source: Optional[str] = None,
+                      inventory_status: Optional[Literal['confirmed', 'unconfirmed']] = None,
                       include_inactive: bool = False,
                       sort: str = "device_code", order: str = "asc",
                       page: int = 1, page_size: int = 50,
@@ -425,6 +572,8 @@ def list_asset_ledger(q: Optional[str] = None, subsystem_id: Optional[int] = Non
     `state` 可取：with_asset / without_asset / ledger_only / has_records /
     warranty_soon / warranty_expired / bim / no_location。
     `source` 可取：devices（已登记）/ ledger_only（只在台账，未登记）。
+    `inventory_status` 可取：confirmed（已盘点）/ unconfirmed（未盘点）（设备台账redesign）；
+    声明式校验（Literal），非法取值由框架以 4xx 拒绝；不传 = 全量。
     `sort` 可取：device_code / name / area / use_dept / subsystem / record_count /
     price_tax / warranty_end。
     """
@@ -434,6 +583,7 @@ def list_asset_ledger(q: Optional[str] = None, subsystem_id: Optional[int] = Non
     all_rows = _load_all(db)
     rows = _apply_filters(all_rows, q=q, subsystem_id=subsystem_id, area=area,
                           use_dept=use_dept, state=state, source=source,
+                          inventory_status=inventory_status,
                           include_inactive=include_inactive)
     rows = _sort_rows(rows, sort, order)
 
@@ -443,6 +593,8 @@ def list_asset_ledger(q: Optional[str] = None, subsystem_id: Optional[int] = Non
     # facets 基于「同关键词 + 同子系统、不施加区域/状态筛选」的集合，避免选项被自己筛没
     facet_rows = _apply_filters(all_rows, q=q, subsystem_id=subsystem_id,
                                 include_inactive=include_inactive)
+    inv_confirmed = sum(1 for r in facet_rows if r.get("inventory_status") == "confirmed")
+    inv_unconfirmed = sum(1 for r in facet_rows if r.get("inventory_status") == "unconfirmed")
     return {
         "total": total,
         "page": page,
@@ -455,8 +607,76 @@ def list_asset_ledger(q: Optional[str] = None, subsystem_id: Optional[int] = Non
             "subsystems": sorted(
                 [{"id": s.id, "name": s.name} for s in db.query(Subsystem).all()],
                 key=lambda x: x["id"]),
+            # 设备台账redesign：盘点状态分面（与 areas 同口径集合，两者之和 = 同口径全集合）
+            "inventory_status": {
+                "confirmed": inv_confirmed,
+                "unconfirmed": inv_unconfirmed,
+            },
         },
     }
+
+
+# ==================== 管理员逃生舱：盘点状态覆盖（设备台账redesign · §4 / §7.5 / §11） ==================
+#
+# 落点纪律（与机身编号/定位观测一致）：
+#   - **只写 `inventory_status_overrides`**，绝不改 devices / records / fixed_assets / room_inventory_records；
+#   - 两个端点均 `Depends(require_admin)` 守护（非 admin → 403）；
+#   - 写后**立即失效** `_ALL_CACHE` + `_MATCH_INDEX`（本模块 `_invalidate_caches()`），
+#     列表 / 汇总 / 详情马上反映覆盖值，否则最长 60s 状态陈旧。
+
+@router.put("/asset-ledger/{device_code}/inventory-status")
+def set_inventory_status_override(
+    device_code: str,
+    payload: InventoryStatusOverrideIn,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """管理员手动覆盖单台设备盘点状态（逃生舱）。
+
+    override sticky：压过房间派生值，直到 `DELETE` 清除。幂等（重复同值更新同一条，无重复行）。
+    写后 `_invalidate_caches()` → 列表 / 汇总 / 详情立即反映。
+    """
+    device_code = (device_code or "").strip()
+    # 设备必须存在于台账（与 observations 端点同一判定口径），否则 404
+    if not any(r["device_code"] == device_code for r in _load_all(db)):
+        raise HTTPException(status_code=404,
+                            detail=f"设备 {device_code} 不存在于台账，无法覆盖盘点状态")
+
+    ov = db.query(InventoryStatusOverride).filter_by(device_code=device_code).first()
+    if ov is None:
+        ov = InventoryStatusOverride(device_code=device_code)
+        db.add(ov)
+    ov.status = payload.status
+    ov.overridden_by = admin.email or admin.name or "admin"
+    ov.overridden_at = datetime.utcnow()
+    ov.reason = payload.reason
+    db.commit()
+    _invalidate_caches()   # 🔴 立即失效 → 派生值（含 facets）马上反映覆盖
+    return {
+        "device_code": device_code,
+        "status": ov.status,
+        "source": "override",
+        "overridden_by": ov.overridden_by,
+        "overridden_at": ov.overridden_at.isoformat() if ov.overridden_at else None,
+        "reason": ov.reason,
+    }
+
+
+@router.delete("/asset-ledger/{device_code}/inventory-status")
+def clear_inventory_status_override(
+    device_code: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """清除该设备的手动覆盖 → 回退到房间派生值。幂等（无覆盖行时返回 cleared=False）。"""
+    device_code = (device_code or "").strip()
+    ov = db.query(InventoryStatusOverride).filter_by(device_code=device_code).first()
+    if ov is None:
+        return {"device_code": device_code, "cleared": False}
+    db.delete(ov)
+    db.commit()
+    _invalidate_caches()   # 🔴 立即失效 → 设备 revert 到 derived，列表马上反映
+    return {"device_code": device_code, "cleared": True}
 
 
 @router.get("/asset-ledger/summary")

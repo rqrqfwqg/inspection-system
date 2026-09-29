@@ -1,4 +1,5 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, Boolean, ForeignKey, JSON, Numeric, Date, Float
+from sqlalchemy import (create_engine, Column, Integer, String, DateTime, Text,
+                         Boolean, ForeignKey, JSON, Numeric, Date, Float, CheckConstraint)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime, timezone
@@ -401,6 +402,34 @@ class RoomInventoryRecord(Base):
     completed_at = Column(DateTime, default=datetime.now(timezone.utc))
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+
+
+# =====================================================================
+# 设备台账盘点状态覆盖（管理员逃生舱 · 设备台账 redesign）
+# =====================================================================
+
+class InventoryStatusOverride(Base):
+    """管理员手动覆盖单台设备盘点状态（逃生舱）。
+
+    设计要点（设备台账redesign-SPEC §4 / 架构 §11）：
+    1) **只存例外**：绝大多数设备无此行；正常路径仍是 `_load_all` 派生（单一真源）。
+    2) `device_code` 引用台账（与 `_load_all` 行键同源），**不建 devices 外键**（一期 C1）；
+       不在 ledger 中的 code 由 API 层拒绝写入（404）。
+    3) `status` CHECK 限定两值；override 恒优先于房间派生值，直到 `DELETE` 清除（sticky）。
+    4) 量极小（仅被例外的设备），无外键、无额外索引；不进 `_ALL_SQL`、不污染 total（8455）。
+    5) `overridden_at` / `overridden_by` / `reason` 落审计；`reason` 在 API 层强制非空。
+    """
+    __tablename__ = "inventory_status_overrides"
+
+    device_code = Column(String, primary_key=True)                 # 台账 device_code
+    status = Column(String, nullable=False)                         # 'confirmed' / 'unconfirmed'
+    overridden_by = Column(String, nullable=False)                 # 管理员标识（user.email / name）
+    overridden_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    reason = Column(Text, nullable=True)                            # 人工覆盖原因（API 层强制必填）
+
+    __table_args__ = (
+        CheckConstraint("status IN ('confirmed','unconfirmed')", name="ck_iso_status"),
+    )
 
 
 # =====================================================================

@@ -1,6 +1,6 @@
 """分系统资料管理 · Pydantic Schemas"""
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Literal
 
 
 # ==================== 子系统 ====================
@@ -436,3 +436,25 @@ class GeoObservationResponse(_NullTolerantModel):
     observed_at: Any = None
     created_at: Any = None
     model_config = ConfigDict(from_attributes=True)
+
+
+# ==================== 设备台账盘点状态覆盖（管理员逃生舱 · 设备台账 redesign） ====================
+
+class InventoryStatusOverrideIn(BaseModel):
+    """PUT /asset-ledger/{device_code}/inventory-status 请求体（SPEC §4 / 架构 §7.5 / §11.4）。
+
+    落点：upsert inventory_status_overrides；require_admin 守护。
+    status 声明式校验（Literal，守 SPEC §5 参数校验硬规则）；
+    reason 在 API 层强制必填（审计留痕，去首尾空白后不可为空）。
+    """
+    status: Literal["confirmed", "unconfirmed"]
+    reason: str
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_nonempty(cls, v):
+        # Pydantic 2 的 strip_whitespace 已废弃且不生效，这里显式 strip + 必填校验
+        if v is None or not str(v).strip():
+            raise ValueError("reason 必填且不可为空（含纯空白）")
+        return str(v).strip()
+

@@ -17,22 +17,33 @@ import { Refresh, WarningFilled } from '@element-plus/icons-vue'
 import DeviceDetailDrawer from '@/components/device/DeviceDetailDrawer.vue'
 import DeviceFilterBar from '@/components/device/DeviceFilterBar.vue'
 import DeviceLedgerTable from '@/components/device/DeviceLedgerTable.vue'
+import InventoryOverrideDialog from '@/components/device/InventoryOverrideDialog.vue'
 import LedgerSummaryCards from '@/components/device/LedgerSummaryCards.vue'
 import {
-  getAssetLedgerDetail, getAssetLedgerSummary, listAssetLedger, resolveAssetLedgerCode,
+  getAssetLedgerDetail, resolveAssetLedgerCode,
 } from '@/api/assetLedger'
+import { getAssetLedgerSummary, listAssetLedger } from '@/api/inventoryStatusApi'
 import { listSubsystems } from '@/api/dict'
+import { useIsAdmin } from '@/composables/useIsAdmin'
 import {
   LEDGER_DEFAULT_SORT, LEDGER_SORTABLE_KEYS, emptyFacets, emptyFilters, hasActiveFilters,
   type AssetLedgerDetail, type AssetLedgerFacets, type AssetLedgerFilters, type AssetLedgerQuery,
   type AssetLedgerRow, type AssetLedgerSortKey, type AssetLedgerState, type AssetLedgerSubsystemOption,
-  type AssetLedgerSummary, type AssetLedgerSummaryQuery, type LedgerResolveResult,
+  type AssetLedgerSummary, type AssetLedgerSummaryQuery, type InventoryColumnKey, type LedgerResolveResult,
 } from '@/types/assetLedger'
 
 const route = useRoute()
 const router = useRouter()
+const { isAdmin } = useIsAdmin()
 
-const filters = ref<AssetLedgerFilters>(emptyFilters())
+const filters = ref<AssetLedgerFilters>({ ...emptyFilters(), inventory_status: 'confirmed' })
+
+/** 设备台账 redesign：默认只显已盘点（§5.1 守住「只显已盘点」），注入 §4.2 四列 */
+const ledgerInventoryColumns: InventoryColumnKey[] = ['status', 'room', 'confirmed_at', 'confirmed_by']
+
+/** 管理员逃生舱：覆盖对话框状态 */
+const overrideTarget = ref<AssetLedgerRow | null>(null)
+const overrideVisible = ref(false)
 const sortProp = ref<AssetLedgerSortKey>(LEDGER_DEFAULT_SORT)
 const sortOrder = ref<'asc' | 'desc'>('asc')
 const page = ref(1)
@@ -73,6 +84,8 @@ const listQuery = computed<AssetLedgerQuery>(() => ({
   area: filters.value.area || undefined,
   use_dept: filters.value.use_dept || undefined,
   state: filters.value.state || undefined,
+  inventory_status: filters.value.inventory_status || undefined,
+  source_kind: filters.value.source_kind || undefined,
   sort: sortProp.value,
   order: sortOrder.value,
   page: page.value,
@@ -84,6 +97,7 @@ const summaryQuery = computed<AssetLedgerSummaryQuery>(() => ({
   subsystem_id: filters.value.subsystem_id ?? undefined,
   area: filters.value.area || undefined,
   use_dept: filters.value.use_dept || undefined,
+  inventory_status: filters.value.inventory_status || undefined,
 }))
 
 let listSeq = 0
@@ -206,6 +220,25 @@ function onSortChange(payload: { prop: string; order: 'asc' | 'desc' }) {
   page.value = 1
 }
 
+/** 管理员逃生舱：行内「置状态」→ 打开覆盖对话框 */
+function onOverride(row: AssetLedgerRow) {
+  overrideTarget.value = row
+  overrideVisible.value = true
+}
+
+/** 覆盖写成功 → 关弹窗 + 刷新列表（60s 缓存失效后即时反映），同步拉详情 */
+function onOverrideSubmitted() {
+  overrideVisible.value = false
+  void loadList()
+  if (detailCode.value) void loadDetail(detailCode.value)
+}
+
+/** 覆盖撤销成功（详情抽屉内）→ 刷新列表 + 详情 */
+function onOverrideRemoved() {
+  void loadList()
+  if (detailCode.value) void loadDetail(detailCode.value)
+}
+
 function openDetail(row: AssetLedgerRow) { openCode(row.device_code) }
 
 /** AC-09：深链。打开用 push（浏览器返回可关抽屉），关闭用 replace（不额外堆历史） */
@@ -282,6 +315,7 @@ onMounted(async () => {
       :has-filters="hasFilters"
       :loading="loading"
       :warranty-soon-days="warrantySoonDays"
+      :show-inventory-segmented="true"
       @patch="patchFilters"
       @reset="resetFilters"
       @page-size="onPageSize"
@@ -301,12 +335,17 @@ onMounted(async () => {
         :sort-order="sortOrder"
         :resolve-result="resolveResult"
         :resolving="resolving"
+        :inventory-columns="ledgerInventoryColumns"
+        :inventory-default-status="'confirmed'"
+        :show-override-action="true"
+        :is-admin="isAdmin"
         @page-change="onPageChange"
         @sort-change="onSortChange"
         @open-detail="openDetail"
         @open-code="openCode"
         @reset-filters="resetFilters"
         @retry="loadList"
+        @override="onOverride"
       />
     </div>
 
@@ -316,9 +355,19 @@ onMounted(async () => {
       :detail="detail"
       :loading="detailLoading"
       :error="detailError"
+      :can-override="isAdmin"
+      :override-active="!!detail?.inventory_overridden"
       @update:model-value="onDrawerVisible"
       @open-code="openCode"
       @retry="retryDetail"
+      @override-removed="onOverrideRemoved"
+    />
+
+    <InventoryOverrideDialog
+      v-model="overrideVisible"
+      :device-code="overrideTarget?.device_code ?? ''"
+      :current-status="overrideTarget?.inventory_status ?? 'confirmed'"
+      @submitted="onOverrideSubmitted"
     />
   </div>
 </template>

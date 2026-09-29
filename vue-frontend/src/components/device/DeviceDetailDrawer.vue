@@ -7,11 +7,12 @@
  * - 长编号走 .break-code（禁止省略号），金额与表格同口径（fmtMoney）
  */
 import { computed, ref, watch } from 'vue'
-import { ArrowDown, ArrowRight, Refresh, WarningFilled } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowRight, CircleClose, Refresh, WarningFilled } from '@element-plus/icons-vue'
 import {
   LEDGER_SOURCE_LABELS, fmtInt, fmtMoney, fmtValue, hasDisplayValue, isCodeLike, ledgerFieldLabel,
   type AssetLedgerDetail, type AssetLedgerRecordItem,
 } from '@/types/assetLedger'
+import { deleteInventoryStatus } from '@/api/inventoryStatusApi'
 
 interface Props {
   modelValue: boolean
@@ -19,6 +20,10 @@ interface Props {
   detail: AssetLedgerDetail | null
   loading: boolean
   error: string
+  /** 当前用户是否管理员（逃生舱撤销入口仅 admin 可见） */
+  canOverride?: boolean
+  /** 该设备是否处于管理员覆盖态（仅覆盖态显示「撤销覆盖」） */
+  overrideActive?: boolean
 }
 
 const props = defineProps<Props>()
@@ -27,7 +32,25 @@ const emit = defineEmits<{
   (e: 'update:modelValue', v: boolean): void
   (e: 'open-code', code: string): void
   (e: 'retry'): void
+  (e: 'override-removed'): void
 }>()
+
+const removing = ref(false)
+const removeError = ref('')
+
+async function removeOverride() {
+  if (!props.code || removing.value) return
+  removing.value = true
+  removeError.value = ''
+  try {
+    await deleteInventoryStatus(props.code)
+    emit('override-removed')
+  } catch (e) {
+    removeError.value = e instanceof Error ? e.message : '撤销覆盖失败，请重试'
+  } finally {
+    removing.value = false
+  }
+}
 
 interface Entry { key: string; label: string; value: string; code: boolean }
 interface Section { title: string; entries: Entry[] }
@@ -151,6 +174,16 @@ const keepOpen = (v: boolean) => { emit('update:modelValue', v) }
         <el-descriptions :column="1" size="small" border :label-width="96">
           <el-descriptions-item v-for="m in meta" :key="m.label" :label="m.label">{{ m.value }}</el-descriptions-item>
         </el-descriptions>
+
+        <div v-if="props.canOverride && props.overrideActive" class="dover">
+          <span class="dover__hint">该设备盘点状态由管理员人工覆盖，当前不随房间盘点推导</span>
+          <el-button size="small" :loading="removing" :disabled="removing" @click="removeOverride">
+            <el-icon :size="16"><CircleClose /></el-icon><span>撤销覆盖</span>
+          </el-button>
+          <p v-if="removeError" class="dover__err" role="alert">
+            <el-icon :size="16"><WarningFilled /></el-icon><span>{{ removeError }}</span>
+          </p>
+        </div>
 
         <section v-for="s in sections" :key="s.title" class="dsec">
           <h4 class="dsec__title">{{ s.title }}</h4>
