@@ -3,14 +3,14 @@
  * 数据表管理 · 单表页头（/asset/ledger/:tableId）
  * =====================================================================
  * 返回、面包屑、表名与徽标（记录数 / 关联覆盖率 / 子系统）、关联键与字段数，
- * 以及行级操作（新增 / Excel 导入 / 导出 / 转移选中）。
+ * 以及行级操作（新增 / Excel 导入 / 导出 / 打印选中标签 / 转移选中）。
  *
  * 从 `LedgerView` 抽出以控制单文件行数（ARCHITECTURE §7 规则 2）。
  * 纪律：隐藏文件输入留在本组件内（只有它知道 input 元素），选中文件后 `file` 事件把文件交回父级；
  * 宽高不写死像素，动作区随容器折行。
  */
 import { ref } from 'vue'
-import { ArrowLeft, Download, Plus, Switch, Upload } from '@element-plus/icons-vue'
+import { ArrowLeft, Download, Plus, Printer, Switch, Upload } from '@element-plus/icons-vue'
 
 const props = defineProps<{
   tableId: number
@@ -32,6 +32,7 @@ const emit = defineEmits<{
   (e: 'back'): void
   (e: 'create'): void
   (e: 'export'): void
+  (e: 'print-labels'): void
   (e: 'transfer'): void
   (e: 'set-key'): void
   (e: 'file', file: File): void
@@ -100,6 +101,10 @@ function coveragePercent(): string {
       <el-button @click="emit('export')">
         <el-icon :size="16"><Download /></el-icon>
         <span>导出</span>
+      </el-button>
+      <el-button v-if="props.selectedCount > 0" plain @click="emit('print-labels')">
+        <el-icon :size="16"><Printer /></el-icon>
+        <span>打印标签 {{ props.selectedCount }} 张</span>
       </el-button>
       <el-button v-if="props.selectedCount > 0" type="primary" plain @click="emit('transfer')">
         <el-icon :size="16"><Switch /></el-icon>

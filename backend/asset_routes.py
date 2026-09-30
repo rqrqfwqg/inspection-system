@@ -605,6 +605,75 @@ _ROOM_SYNC_TABLE_CODE = "room_master"
 _ROOM_SYNC_DEFAULT_TYPE = "设备机房"
 
 
+# ========================= 现场新建设备 → 专用资料表 双写 =========================
+
+# 用户需求（2026-09-30）：「新增的设备要单独出放一个表」。
+# 口径（已与用户确认）：**普通资料表**（同现有 32 张表）/ **计入总台账** / **两边都写**。
+# 实现：`POST /devices` 成功建主表后，在同一事务旁路补写一条该表记录，
+# 让「现场建档的新增设备」在数据表管理里可单独查看与导出。
+#
+# 🔴 total 口径：台账 `_ALL_SQL` 用 `UNION`（非 UNION ALL）合并 devices ∪ records ∪
+#    fixed_assets 的 device_code，**同编号自动去重**。故本双写虽写两处，
+#    新建 1 台设备 total 仍只 +1，不会重复计数（守恒检验见 tests）。
+# 🔴 该表必须挂**非排除**子系统（这里 other/8），否则不计入 total，与用户口径不符。
+_SITE_CREATED_TABLE_CODE = "site_created_devices"
+_SITE_CREATED_SOURCE = "现场扫码"
+
+
+def _invalidate_ledger_cache() -> None:
+    """让资产总台账的行缓存 / 匹配索引立即失效。
+
+    🔴 必须函数内惰性导入：`asset_ledger_routes` 顶层 `from asset_routes import ...`，
+    若在此处顶层反向导入会造成循环导入（import 期直接崩）。
+    调用时机在请求期，届时两模块均已加载完毕，惰性导入是安全的。
+    """
+    try:
+        from asset_ledger_routes import _invalidate_caches
+        _invalidate_caches()
+    except Exception:
+        # 缓存失效失败不应让写请求失败；TTL 60s 后自然过期兜底
+        pass
+
+
+def _write_site_created_record(db: Session, dev: Device, creator: str) -> Optional[Record]:
+    """把新建设备补写进「现场新建设备」资料表（幂等；表不存在则静默跳过）。
+
+    幂等：同 device_code 已存在记录时不重复插入 —— 保证接口重试不产生孤行。
+    容错：表未建（如未跑迁移的环境）时直接返回 None，**绝不影响设备主表写入**。
+    """
+    tbl = db.query(DataTable).filter(DataTable.code == _SITE_CREATED_TABLE_CODE).first()
+    if not tbl:
+        return None
+    code = (dev.device_code or "").strip()
+    if not code:
+        return None
+    if db.query(Record).filter(Record.table_id == tbl.id, Record.device_code == code).first():
+        return None
+    # 「所在机房」用 room_id 反查名称，避免表里只有裸 id
+    room_name = ""
+    if dev.room_id:
+        room = db.query(Room).filter(Room.id == dev.room_id).first()
+        if room:
+            room_name = room.name or room.code or ""
+    data: Dict[str, Any] = {
+        "device_code": code,
+        "device_name": dev.name or "",
+        "subsystem": _subsystem_name(db, dev.subsystem_id) or "",
+        "building": dev.building or "",
+        "floor": dev.floor or "",
+        "location_desc": dev.location_desc or "",
+        "room_name": room_name,
+        "serial_no": "",
+        "source": _SITE_CREATED_SOURCE,
+        "created_by": creator or "",
+        "remark": "",
+    }
+    rec = Record(table_id=tbl.id, device_code=code, data=data, created_by=creator or "")
+    db.add(rec)
+    db.flush()
+    return rec
+
+
 def _sync_room_master_to_rooms(db: Session, tbl: Optional[DataTable], rec: Record) -> None:
     """把 room_master 的一条记录 upsert 进核心 rooms（幂等；只增改，不删）。"""
     if tbl is None or (tbl.code or "") != _ROOM_SYNC_TABLE_CODE:
@@ -713,11 +782,21 @@ def list_devices(q: Optional[str] = None, subsystem_id: Optional[int] = None,
     return result
 
 @router.post("/devices", response_model=DeviceResponse)
-def create_device(data: DeviceCreate, db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+def create_device(data: DeviceCreate, db: Session = Depends(get_db), current_user: User = Depends(_get_current_user)):
+    """新建设备（设备主表 + 「现场新建设备」资料表**双写**）。
+
+    用户口径（2026-09-30）：新增设备要单独出表 → 两边都写、计入总台账。
+    写后立即 `_invalidate_caches()`：台账行缓存 TTL 60s，不失效则新设备最长 60 秒
+    在总台账里搜不到（与补录同一红线）。
+    """
     if db.query(Device).filter(Device.device_code == data.device_code).first():
         raise HTTPException(status_code=400, detail=f"设备编号 {data.device_code} 已存在")
     obj = Device(**data.model_dump())
-    db.add(obj); db.commit(); db.refresh(obj)
+    db.add(obj)
+    db.flush()   # 先取 id，供双写记录引用（不 commit，保证两写同生共死）
+    _write_site_created_record(db, obj, current_user.name)
+    db.commit(); db.refresh(obj)
+    _invalidate_ledger_cache()   # 🔴 不做则 60s 内总台账仍看不到新设备
     r = DeviceResponse.model_validate(obj)
     r.subsystem_name = _subsystem_name(db, obj.subsystem_id)
     return r

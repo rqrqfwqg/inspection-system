@@ -13,6 +13,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import CrossRefDialog from '@/components/ledger/CrossRefDialog.vue'
 import DynamicRecordTable from '@/components/ledger/DynamicRecordTable.vue'
 import LedgerCatalogPanel from '@/components/ledger/LedgerCatalogPanel.vue'
@@ -20,6 +21,7 @@ import LedgerDetailHeader from '@/components/ledger/LedgerDetailHeader.vue'
 import LedgerLinkStrip from '@/components/ledger/LedgerLinkStrip.vue'
 import RecordEditDialog from '@/components/ledger/RecordEditDialog.vue'
 import RecordTransferDialog from '@/components/ledger/RecordTransferDialog.vue'
+import RecordLabelSheet from '@/components/qr/RecordLabelSheet.vue'
 import TableKeyDialog from '@/components/ledger/TableKeyDialog.vue'
 import { useLedgerCatalog } from '@/composables/useLedgerCatalog'
 import { useLedgerTable } from '@/composables/useLedgerTable'
@@ -46,6 +48,24 @@ const activeTable = computed<DataTable | null>(
 const table = useLedgerTable(tableId, () => activeTable.value?.name ?? '')
 
 const keyDialogTable = ref<DataTable | null>(null)
+
+/**
+ * 批量打印标签：勾选记录 → 浮层预览 → A4 横向打印。
+ * 数据取「当前已加载的选中记录」（`visibleRecords ∩ selectedIds`）——
+ * 分页下未加载的记录本来就不在选中集里，故不会漏打也不会凭空多打。
+ */
+const printLabelsOpen = ref(false)
+const printLabelRecords = computed(() =>
+  table.visibleRecords.value.filter((r) => table.selectedIds.value.includes(r.id)),
+)
+
+function openPrintLabels() {
+  if (printLabelRecords.value.length === 0) {
+    ElMessage.warning('请先勾选要打印的设备')
+    return
+  }
+  printLabelsOpen.value = true
+}
 
 function openTable(id: number) {
   void router.push(`/asset/ledger/${id}`)
@@ -190,6 +210,7 @@ onBeforeUnmount(() => {
         @back="backToCatalog"
         @create="table.openCreate()"
         @export="table.exportExcel()"
+        @print-labels="openPrintLabels"
         @transfer="table.openTransfer(table.selectedIds.value)"
         @set-key="activeTable && (keyDialogTable = activeTable)"
         @file="handleFile"
@@ -244,6 +265,14 @@ onBeforeUnmount(() => {
         @transfer="(row) => table.openTransfer([row.id])"
         @cross-refs="table.openCrossRefs"
         @load-more="table.loadMore"
+      />
+
+      <RecordLabelSheet
+        v-if="printLabelsOpen"
+        :records="printLabelRecords"
+        :fields="table.fields.value"
+        :table-name="activeTable?.name || ''"
+        @close="printLabelsOpen = false"
       />
 
       <RecordEditDialog
