@@ -43,6 +43,11 @@ from dependencies import get_current_user as _get_current_user, require_admin as
 from import_engine import import_workbook, detect_template, TEMPLATE_INFO
 # 设备编号别名归一内核：写路径统一收口，防止已合并的旧编号被重新写回
 from device_alias_normalizer import resolve_device_code, get_normalizer, reset_normalizer
+# 数据表记录的结构化条件筛选：JSON 条件 → SQL 谓词（字段名白名单 + 值绑定，绝不拼 SQL）
+from record_filters import (
+    parse_filters, parse_logic, build_filter_clause,
+    FilterError, DEVICE_CODE_FIELD,
+)
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
@@ -554,8 +559,10 @@ def delete_field(tid: int, fid: int, db: Session = Depends(get_db), _: User = De
 def list_records(tid: int, device_code: Optional[str] = None,
                  skip: int = 0, limit: Optional[int] = None,
                  q: Optional[str] = None,
+                 filters: Optional[str] = None,
+                 filter_logic: Optional[str] = None,
                  db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
-    """资料记录列表（可选分页 + 可选服务端搜索 q）。
+    """资料记录列表（可选分页 + 可选服务端搜索 q + 可选结构化条件筛选 filters）。
 
     契约（须保持）：
       - 响应体是**裸数组**（List[RecordResponse]），非 {items,total}；前端按数组消费。
@@ -567,6 +574,12 @@ def list_records(tid: int, device_code: Optional[str] = None,
       - `q`：服务端搜索，**刻意不加 max_length/Query 约束**（§13：超长 q 截断到 100 字符、
         绝不报错；schema 不得宣传一个不强制执行的限制）。空/纯空白 q 视为「不过滤」，
         与不传 q 逐字节一致。搜索**在 offset/limit 之前**施加，故分页即「命中集的分页」。
+      - `filters`：**结构化多字段条件**（JSON 数组字符串），语义与编译见 `record_filters`；
+        与 `q` **同时生效 = AND**（q 先筛、filters 再筛）。空/不传 → 不加任何条件，
+        与改造前逐字节一致。
+      - `filter_logic`：多条件之间的组合方式 `and`（缺省）/ `or`。
+      - 🔴 `filters` 不合法一律 **400** 并带人话原因（绝不静默忽略条件 —— 静默忽略会让用户
+        以为筛选生效了，实际没有）。字段名走 field_defs 白名单，杜绝注入与「筛不存在的字段」。
     """
     kw = (q or "").strip()[:100]
     qq = db.query(Record).filter(Record.table_id == tid)
@@ -587,6 +600,25 @@ def list_records(tid: int, device_code: Optional[str] = None,
             func.lower(func.coalesce(Record.device_code, "")).like(pat, escape="\\"),
             json_val_hit,
         ))
+    # ---- 结构化条件筛选（可与 q 共存，AND 关系）----
+    if filters and filters.strip():
+        # 白名单 = 该表 field_defs 的 key + 关联键（__device_code）。
+        # 🔴 刻意**不**把「数据里出现但未定义字段」的键放进白名单：那些列用户根本看不到，
+        #    允许筛它们只会让用户「筛了个看不见的列」。
+        field_keys = {
+            (f.key or "").strip()
+            for f in db.query(FieldDef).filter(FieldDef.table_id == tid).all()
+            if (f.key or "").strip()
+        }
+        field_keys.add(DEVICE_CODE_FIELD)
+        try:
+            conditions, _ = parse_filters(filters, field_keys)
+            logic = parse_logic(filter_logic)
+        except FilterError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        clause = build_filter_clause(conditions, logic)
+        if clause is not None:
+            qq = qq.filter(clause)
     qq = qq.order_by(Record.id.desc())
     if limit is not None:
         lim = max(1, min(int(limit), 500))

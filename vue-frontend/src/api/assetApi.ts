@@ -14,6 +14,8 @@
  */
 import * as XLSX from 'xlsx'
 import http from './http'
+import { serializeFilters } from '@/types/assetFilter'
+import type { FilterLogic, RecordFilter } from '@/types/assetFilter'
 import type {
   Subsystem,
   SubsystemPayload,
@@ -108,13 +110,30 @@ class AssetApiService {
    * 到底判据由调用方按契约自行判断：**返回条数 < 请求的 limit 即到底**（后端不给 has_more/total）。
    * `q` → 服务端搜索：命中 `device_code` 或 `data` 中任一**值**（大小写不敏感子串），
    *   **在 skip/limit 之前施加**，故分页即「命中集的分页」；空/纯空白 q 等同不传。
+   * `filters` → **结构化多字段条件**（`RecordFilter[]`，本方法内部序列化）；
+   *   `filterLogic` → 多条件组合（and/or，缺省 and）。
+   *   🔴 `filters` 与 `q` **同时生效 = AND**（q 先筛、filters 再筛）。
+   *   非法条件后端返 400，`http` 层会抛错 —— 调用方负责提示，**不得静默吞掉**
+   *   （静默失败会让用户以为筛过了，实际没筛）。
    */
-  listRecords(tableId: number, deviceCode?: string, skip?: number, limit?: number, q?: string) {
+  listRecords(
+    tableId: number,
+    deviceCode?: string,
+    skip?: number,
+    limit?: number,
+    q?: string,
+    filters?: RecordFilter[],
+    filterLogic?: FilterLogic,
+  ) {
     const params = new URLSearchParams()
     if (deviceCode) params.set('device_code', deviceCode)
     if (skip !== undefined) params.set('skip', String(skip))
     if (limit !== undefined) params.set('limit', String(limit))
     if (q) params.set('q', q)
+    // 序列化在 api 层做（唯一真源），视图/composable 只管传数组
+    const fs = serializeFilters(filters ?? [])
+    if (fs) params.set('filters', fs)
+    if (fs && filterLogic) params.set('filter_logic', filterLogic)
     const qs = params.toString()
     return http.get<RecordItem[]>(`${BASE}/tables/${tableId}/records${qs ? `?${qs}` : ''}`)
   }

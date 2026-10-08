@@ -92,3 +92,5 @@ docs/rewrite-vue/shots/
 
 # 设备别名归一内核测试产生的临时库
 backend/tests/__pycache__/
+# 记录筛选真值表测试的临时 sqlite
+backend/tests/_filter_probe.db

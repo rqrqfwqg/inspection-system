@@ -15,6 +15,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import assetApi from '@/api/assetApi'
 import { getLinkTable } from '@/api/assetViz'
 import type { FieldDef, RecordItem, TransferResult } from '@/types/asset'
+import {
+  DEVICE_CODE_FIELD, VALUELESS_OPS, isFilterActive, makeFilter, serializeFilters,
+  type FilterLogic, type RecordFilter,
+} from '@/types/assetFilter'
 import type { LinkTableDetail } from '@/types/assetViz'
 
 export interface LedgerTable {
@@ -48,6 +52,25 @@ export interface LedgerTable {
   load: () => Promise<void>
   /** 追加下一页（重入保护：loadingMore/searching 为真或没有更多时直接 return） */
   loadMore: () => Promise<void>
+  /** 结构化筛选条件（可组合；空值条件不发请求） */
+  filters: Ref<RecordFilter[]>
+  /** 多条件组合方式 */
+  filterLogic: Ref<FilterLogic>
+  /** 已填完整、真正会生效的条件数（= 会发给后端的条数） */
+  activeFilterCount: ComputedRef<number>
+  /** 筛选条件的稳定指纹（用于跳过「条件没实质变化」的重复请求） */
+  filterSignature: ComputedRef<string>
+  /** 增删改一条条件（由视图绑定到筛选条） */
+  addFilter: (field?: string) => void
+  removeFilter: (index: number) => void
+  setFilterField: (index: number, field: string) => void
+  setFilterOp: (index: number, op: RecordFilter['op']) => void
+  setFilterValue: (index: number, value: string) => void
+  setFilterLogic: (logic: FilterLogic) => void
+  /** 清空全部筛选条件 */
+  clearFilters: () => void
+  /** 用当前条件重拉第 0 页（防抖由调用方做） */
+  runFilteredSearch: () => Promise<void>
   /** 用 rowQuery 当前关键字走服务端 `q` 重拉第 0 页（与 queryKw 相同则跳过） */
   runSearch: () => Promise<void>
   loadLinkDetail: () => Promise<void>
@@ -74,6 +97,10 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
   const loading = ref(false)
   const error = ref('')
   const rowQuery = ref('')
+  /** 结构化筛选条件（视图直接改这里，composable 负责去抖与请求） */
+  const filters = ref<RecordFilter[]>([])
+  /** 多条件组合方式（and / or） */
+  const filterLogic = ref<FilterLogic>('and')
   const selectedIds = ref<number[]>([])
   const importing = ref(false)
   const linkDetail = ref<LinkTableDetail | null>(null)
@@ -97,6 +124,8 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
    * 那样第 2 页会来自另一个结果集，列表被静默拼成混合数据。
    */
   const queryKw = ref('')
+  /** 当前页集是由哪个筛选签名拉回来的；`loadMore` 必须沿用它（理由同 queryKw） */
+  const queryFilterSig = ref('')
 
   /** 跨表跳转带过来的过滤词：等目标表记录到位后再应用（否则会被清空） */
   let pendingQuery = ''
@@ -109,6 +138,20 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
   let loadSeq = 0
 
   const loadedCount = computed(() => records.value.length)
+
+  /**
+   * 已填完整、真正会生效的条件数。
+   * 未填值的条件**不计入** —— 否则会出现「界面显示 3 个条件，实际只筛了 1 个」
+   * 的错位（用户会以为筛过了，实际没筛，排查时最容易被骗）。
+   */
+  const activeFilterCount = computed(() => filters.value.filter(isFilterActive).length)
+
+  /**
+   * 筛选条件的稳定指纹（序列化后的字符串）。
+   * `runFilteredSearch` 据此跳过「条件没实质变化」的重复请求 ——
+   * 防止「只改了下拉但选了同一个值」也打一次网络。
+   */
+  const filterSignature = computed(() => serializeFilters(filters.value) ?? '')
 
   /** 载入第一页：切表 / 增删改后调用；**沿用当前关键字**（增删改后仍保持搜索态，与改造前一致） */
   async function load() {
@@ -123,10 +166,15 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
       loadingMore.value = false
       searching.value = false
       queryKw.value = ''
+      queryFilterSig.value = ''
       return
     }
     const mine = ++loadSeq
     const kw = rowQuery.value.trim()
+    // 🔴 快照筛选态：请求在途时用户可能改条件，用快照值发请求（与 queryKw 同理）
+    const fs = filters.value.filter(isFilterActive)
+    const sig = filterSignature.value
+    const flg = filterLogic.value
     loading.value = true
     error.value = ''
     hasMore.value = false
@@ -135,13 +183,14 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
     try {
       const [fieldList, recordList] = await Promise.all([
         assetApi.listFields(id),
-        assetApi.listRecords(id, undefined, 0, PAGE_SIZE, kw || undefined),
+        assetApi.listRecords(id, undefined, 0, PAGE_SIZE, kw || undefined, fs, flg),
       ])
       if (mine !== loadSeq) return
       fields.value = fieldList
       records.value = recordList
       hasMore.value = recordList.length === PAGE_SIZE
       queryKw.value = kw
+      queryFilterSig.value = sig
       if (pendingQuery) {
         rowQuery.value = pendingQuery
         pendingQuery = ''
@@ -166,9 +215,11 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
     const mine = loadSeq
     loadingMore.value = true
     try {
-      // 【关键】用 queryKw 而非 rowQuery：保证第 2 页与第 1 页来自**同一个结果集**
+      // 【关键】用 queryKw / queryFilterSig 而非实时值：保证第 2 页与第 1 页
+      // 来自**同一个结果集**（请求在途时用户改了条件也不会把两个集拼在一起）
       const next = await assetApi.listRecords(
         id, undefined, records.value.length, PAGE_SIZE, queryKw.value || undefined,
+        filters.value.filter(isFilterActive), filterLogic.value,
       )
       if (mine !== loadSeq) return
       records.value = [...records.value, ...next]
@@ -183,30 +234,37 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
   }
 
   /**
-   * 服务端搜索：用 `rowQuery` 当前关键字走 `q` 重拉第 0 页。
-   * 与 `queryKw` 相同则跳过（防抖后重复触发不再打请求）。
-   * 保护：
-   *  - 复用 `loadSeq` 世代号：切表 / 关键字再变都会使在途请求作废，绝不把旧结果盖回来；
-   *  - 失败只报一次并停，绝不循环重试。
+   * 服务端搜索（`q` + 结构化条件 `filters` 一起）：重拉第 0 页。
+   * - 与当前页集的关键字 + 筛选签名都相同则跳过（防抖后重复触发不再打请求）；
+   * - 复用 `loadSeq` 世代号：切表 / 条件再变都会使在途请求作废，绝不把旧结果盖回来；
+   * - 失败只报一次并停，绝不循环重试；
+   * - 请求在途期间条件又变了 → 立即用最新条件重搜（否则输入框与列表不一致）。
+   *
+   * 🔴 `q` 与 `filters` 共存时是 **AND**（后端先按 q 筛、再按 filters 筛）。
    */
   async function runSearch() {
     const id = tableId.value
     if (!id) return
     const kw = rowQuery.value.trim()
-    if (kw === queryKw.value) return
+    const sig = filterSignature.value
+    if (kw === queryKw.value && sig === queryFilterSig.value) return
     const mine = ++loadSeq
     searching.value = true
     error.value = ''
     hasMore.value = false
     loadingMore.value = false
     try {
-      const result = await assetApi.listRecords(id, undefined, 0, PAGE_SIZE, kw || undefined)
+      const result = await assetApi.listRecords(
+        id, undefined, 0, PAGE_SIZE, kw || undefined,
+        filters.value.filter(isFilterActive), filterLogic.value,
+      )
       if (mine !== loadSeq) return
       records.value = result
       hasMore.value = result.length === PAGE_SIZE
       queryKw.value = kw
-      // 请求在途期间用户又改了关键字 → 立即用最新关键字重搜（否则输入框与列表不一致）
-      if (rowQuery.value.trim() !== kw) void runSearch()
+      queryFilterSig.value = sig
+      // 请求在途期间用户又改了关键字或条件 → 立即用最新值重搜（否则界面与列表不一致）
+      if (rowQuery.value.trim() !== kw || filterSignature.value !== sig) void runSearch()
     } catch (e) {
       if (mine !== loadSeq) return
       records.value = []
@@ -215,6 +273,54 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
     } finally {
       if (mine === loadSeq) searching.value = false
     }
+  }
+
+  /** 用当前筛选条件重拉第 0 页（视图对条件变更做防抖后调用） */
+  async function runFilteredSearch() {
+    await runSearch()
+  }
+
+  // ---- 筛选条件的增删改（纯本地改 ref，**不直接发请求**）----
+  // 请求统一由视图在防抖后调 runFilteredSearch —— 否则「拖动下拉连发 6 次请求」。
+  function addFilter(field?: string) {
+    // 默认落在第一个字段（关联键），字段为空时用户再选
+    filters.value = [...filters.value, makeFilter(field ?? filters.value[0]?.field ?? DEVICE_CODE_FIELD)]
+  }
+
+  function removeFilter(index: number) {
+    filters.value = filters.value.filter((_, i) => i !== index)
+  }
+
+  function setFilterField(index: number, field: string) {
+    if (!filters.value[index]) return
+    const next = [...filters.value]
+    next[index] = { ...next[index], field }
+    filters.value = next
+  }
+
+  function setFilterOp(index: number, op: RecordFilter['op']) {
+    if (!filters.value[index]) return
+    const next = [...filters.value]
+    // 切到「为空/不为空」时清掉旧值 —— 否则后端会忽略 value，
+    // 界面上却还留着上一条算子的输入框内容，用户会困惑
+    const value = VALUELESS_OPS.includes(op) ? '' : next[index].value
+    next[index] = { ...next[index], op, value }
+    filters.value = next
+  }
+
+  function setFilterValue(index: number, value: string) {
+    if (!filters.value[index]) return
+    const next = [...filters.value]
+    next[index] = { ...next[index], value }
+    filters.value = next
+  }
+
+  function setFilterLogic(logic: FilterLogic) {
+    filterLogic.value = logic
+  }
+
+  function clearFilters() {
+    filters.value = []
   }
 
   async function loadLinkDetail() {
@@ -333,13 +439,20 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
     // 否则会导出从未上屏的结果集（同 `loadMore` 的理由）。
     const kw = queryKw.value
     try {
-      const full = await assetApi.listRecords(id, undefined, undefined, undefined, kw || undefined)
+      const full = await assetApi.listRecords(
+        id, undefined, undefined, undefined, kw || undefined,
+        filters.value.filter(isFilterActive), filterLogic.value,
+      )
       if (full.length === 0) {
         ElMessage.warning('暂无可导出的记录')
         return
       }
       assetApi.exportRecordsToExcel(full, fields.value, tableName() || '资料导出')
-      ElMessage.success(kw ? `已导出 ${full.length} 条（当前筛选「${kw}」）` : `已导出 ${full.length} 条`)
+      const scope = [
+        kw ? `关键词「${kw}」` : '',
+        activeFilterCount.value > 0 ? `条件 ${activeFilterCount.value} 项` : '',
+      ].filter(Boolean).join(' + ')
+      ElMessage.success(scope ? `已导出 ${full.length} 条（当前筛选：${scope}）` : `已导出 ${full.length} 条`)
     } catch (e) {
       ElMessage.error(e instanceof Error ? e.message : '导出失败')
     }
@@ -379,8 +492,10 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
   return {
     fields, records, loading, error, rowQuery, selectedIds, importing, linkDetail,
     editTarget, transferIds, crossRecord, catalogDirty, hasMore, loadingMore, searching, queryKw, loadedCount,
+    filters, filterLogic, activeFilterCount, filterSignature,
     visibleRecords, editOpen, editInitial, relationField,
-    load, loadMore, runSearch, loadLinkDetail, applyPendingQuery, setPendingQuery, setSelection,
+    load, loadMore, runSearch, runFilteredSearch, loadLinkDetail, applyPendingQuery, setPendingQuery, setSelection,
+    addFilter, removeFilter, setFilterField, setFilterOp, setFilterValue, setFilterLogic, clearFilters,
     openCreate, openEdit, closeEdit, onEditSaved, removeRecord, importFile, exportExcel,
     openTransfer, closeTransfer, onTransferred, openCrossRefs, closeCrossRefs,
   }

@@ -20,12 +20,14 @@ import LedgerCatalogPanel from '@/components/ledger/LedgerCatalogPanel.vue'
 import LedgerDetailHeader from '@/components/ledger/LedgerDetailHeader.vue'
 import LedgerLinkStrip from '@/components/ledger/LedgerLinkStrip.vue'
 import RecordEditDialog from '@/components/ledger/RecordEditDialog.vue'
+import RecordFilterBar from '@/components/ledger/RecordFilterBar.vue'
 import RecordTransferDialog from '@/components/ledger/RecordTransferDialog.vue'
 import RecordLabelSheet from '@/components/qr/RecordLabelSheet.vue'
 import TableKeyDialog from '@/components/ledger/TableKeyDialog.vue'
 import { useLedgerCatalog } from '@/composables/useLedgerCatalog'
 import { useLedgerTable } from '@/composables/useLedgerTable'
 import type { DataTable } from '@/types/asset'
+import type { FilterLogic } from '@/types/assetFilter'
 
 const route = useRoute()
 const router = useRouter()
@@ -136,6 +138,8 @@ watch(
     table.setSelection([])
     suppressSearchOnce = true
     table.rowQuery.value = ''
+    // 筛选条件同样必须跨表清空：字段集不同，留着必然 400（字段不属于这张表）
+    table.clearFilters()
     void nextTick(() => {
       suppressSearchOnce = false
     })
@@ -167,10 +171,37 @@ watch(
   },
 )
 
+/**
+ * 筛选条件变更 → 走**服务端** `filters`（不再本地过滤）。
+ * 防抖 400ms：比 q 的 300ms 略长，因为条件编辑多为「连续输入 + 换下拉」，
+ * 400ms 能把一次「输完一段值」合并成一次请求。
+ * 🔴 用 `filterSignature` 而非 filters 数组本身做依赖 —— 只改了下拉但选了同一个值时
+ *    签名不变，不会白发一次请求。
+ */
+let filterDebounceTimer: ReturnType<typeof setTimeout> | null = null
+
+watch(
+  () => [table.filterSignature.value, table.filterLogic.value] as const,
+  () => {
+    if (filterDebounceTimer !== null) {
+      clearTimeout(filterDebounceTimer)
+      filterDebounceTimer = null
+    }
+    filterDebounceTimer = setTimeout(() => {
+      filterDebounceTimer = null
+      void table.runFilteredSearch()
+    }, 400)
+  },
+)
+
 onBeforeUnmount(() => {
   if (searchDebounceTimer !== null) {
     clearTimeout(searchDebounceTimer)
     searchDebounceTimer = null
+  }
+  if (filterDebounceTimer !== null) {
+    clearTimeout(filterDebounceTimer)
+    filterDebounceTimer = null
   }
 })
 </script>
@@ -237,6 +268,23 @@ onBeforeUnmount(() => {
           </template>
         </span>
       </div>
+
+      <!-- 条件筛选：放在搜索栏下方、表格上方 —— 与关键字搜索共存（AND 关系），两者都服务端实时刷新 -->
+      <RecordFilterBar
+        :fields="table.fields.value"
+        :filters="table.filters.value"
+        :logic="table.filterLogic.value"
+        :active-count="table.activeFilterCount.value"
+        :result-count="table.visibleRecords.value.length"
+        :loading="table.searching.value"
+        @add="(field) => table.addFilter(field)"
+        @remove="(index) => table.removeFilter(index)"
+        @update:field="(p) => table.setFilterField(p.index, p.field)"
+        @update:op="(p) => table.setFilterOp(p.index, p.op)"
+        @update:value="(p) => table.setFilterValue(p.index, p.value)"
+        @update:logic="(v: FilterLogic) => table.setFilterLogic(v)"
+        @clear="table.clearFilters()"
+      />
 
       <p v-if="table.error.value" class="lv__warn" role="alert">
         <span>记录加载失败：{{ table.error.value }}</span>
