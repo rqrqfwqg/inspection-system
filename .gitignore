@@ -89,3 +89,6 @@ vue-frontend/docs/rewrite-vue/verify_summary.txt
 
 # 根级验收截图同样为真实系统画面，不进公开仓库
 docs/rewrite-vue/shots/
+
+# 设备别名归一内核测试产生的临时库
+backend/tests/__pycache__/

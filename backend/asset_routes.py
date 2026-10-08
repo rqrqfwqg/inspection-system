@@ -41,6 +41,8 @@ from asset_schemas import (
 from dependencies import get_current_user as _get_current_user, require_admin as _require_admin
 # 数据导入引擎：把上传的 Excel 解析并落库（自包含，避免循环依赖）
 from import_engine import import_workbook, detect_template, TEMPLATE_INFO
+# 设备编号别名归一内核：写路径统一收口，防止已合并的旧编号被重新写回
+from device_alias_normalizer import resolve_device_code, get_normalizer, reset_normalizer
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
@@ -717,6 +719,9 @@ def create_record(tid: int, data: RecordCreate, db: Session = Depends(get_db), c
             device_code = str(data.data[rel_field.key])
     if not device_code:
         raise HTTPException(status_code=400, detail="缺少设备编号：请填写关联键字段或显式传入 device_code")
+    # 别名归一：关联键里可能留着「已被合并」的旧编号（设备台账合并只改列不改 JSON 的历史数据），
+    # 直接落库会让旧设备复活、台账总数反弹。归一到规范编号后再落库。
+    device_code = resolve_device_code(db, device_code)
     rec = Record(table_id=tid, device_code=device_code, data=data.data, created_by=current_user.name)
     db.add(rec); db.flush()
     _sync_room_master_to_rooms(db, tbl, rec)  # 房间「加一次、到处都有」
@@ -730,9 +735,17 @@ def update_record(tid: int, rid: int, data: RecordUpdate, db: Session = Depends(
         raise HTTPException(status_code=404, detail="记录不存在")
     tbl = db.query(DataTable).filter(DataTable.id == tid).first()
     if data.device_code is not None:
-        rec.device_code = data.device_code
+        rec.device_code = resolve_device_code(db, data.device_code)
     if data.data is not None:
         rec.data = data.data
+        # 只改列不改 JSON 的历史数据防御：若本表的关联键字段值命中别名，一并归一，
+        # 否则下次同一条记录被再编辑时，旧编号会从JSON 里被反推回records.device_code。
+        rel_field = db.query(FieldDef).filter(
+            FieldDef.table_id == tid, FieldDef.is_relation_key == True).first()
+        if rel_field and rel_field.key in rec.data:
+            raw = rec.data.get(rel_field.key)
+            if isinstance(raw, str) and raw.strip():
+                rec.device_code = resolve_device_code(db, raw)
     rec.updated_at = datetime.now(timezone.utc)
     _sync_room_master_to_rooms(db, tbl, rec)  # 房间编辑同步到核心 rooms
     db.commit(); db.refresh(rec)
@@ -1249,6 +1262,8 @@ def bulk_create_records(tid: int, payload: BulkRecordCreate,
         if not device_code:
             skipped += 1
             continue
+        # 别名归一：同 create_record，批量导入是旧编号复活的主要入口
+        device_code = resolve_device_code(db, device_code)
         rec = Record(table_id=tid, device_code=device_code, data=item.data, created_by=current_user.name)
         db.add(rec)
         db.flush()
@@ -1472,6 +1487,9 @@ def transfer_records(tid: int, payload: RecordTransferRequest,
             stats["skipped"] += 1
             skipped.append({"record_id": rec.id, "device_code": "", "reason": "缺少设备编号（关联键）"})
             continue
+        # 别名归一：目标表关联键里可能仍是已合并的旧编号，归一后再查重/落库，
+        # 否则会按旧编号判成"新设备"，在旧编号名下又长出一条记录。
+        dc = resolve_device_code(db, dc)
 
         exist = db.query(Record).filter(Record.table_id == tgt.id, Record.device_code == dc).first()
         if exist and payload.on_conflict == "skip":
