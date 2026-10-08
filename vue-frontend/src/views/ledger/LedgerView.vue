@@ -276,6 +276,8 @@ onBeforeUnmount(() => {
         :logic="table.filterLogic.value"
         :active-count="table.activeFilterCount.value"
         :result-count="table.visibleRecords.value.length"
+        :value-options="table.valueOptions.value"
+        :value-meta="table.valueMeta.value"
         :loading="table.searching.value"
         @add="(field) => table.addFilter(field)"
         @remove="(index) => table.removeFilter(index)"
@@ -284,6 +286,7 @@ onBeforeUnmount(() => {
         @update:value="(p) => table.setFilterValue(p.index, p.value)"
         @update:logic="(v: FilterLogic) => table.setFilterLogic(v)"
         @clear="table.clearFilters()"
+        @load-values="(p) => table.loadFieldValues(p.field, p.q)"
       />
 
       <p v-if="table.error.value" class="lv__warn" role="alert">

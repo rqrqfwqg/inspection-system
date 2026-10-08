@@ -22,7 +22,7 @@
 铁律
 ----
 1. 🔴 **绝不拼接 SQL**：字段名与值一律走绑定参数 / `json_extract` 绑定键，
-   值里的 `%` `_` `\` 必须转义（LIKE 通配符，§13 事故③ 曾因 `q=%` 命中全表）。
+   值里的 `%` `_` 与反斜杠必须转义（LIKE 通配符，§13 事故③ 曾因 `q=%` 命中全表）。
 2. 🔴 **字段名先白名单校验**：只允许出现在该表 `field_defs` 里的 key，
    杜绝任意键注入与「筛一个根本不存在的字段」。
 3. 🔴 **未知 op / 未知 logic 一律 400**，绝不静默忽略条件（静默忽略会让用户
@@ -86,7 +86,22 @@ def _escape_like(raw: str) -> str:
 
 
 def _like_pattern(value: str) -> str:
-    return "%" + _escape_like(value.lower()) + "%"
+    return "%" + _escape_like(ascii_lower(value)) + "%"
+
+
+def ascii_lower(s: str) -> str:
+    """🔴 **只折叠 ASCII 大写**的字符串小写化（与 SQLite `lower()` 逐字符等价）。
+
+    为什么不能用 `str.lower()`：SQLite 内建 `lower()` **只处理 ASCII**，
+    实测（服务器 app.db 同版本 sqlite）`lower('Ä')='Ä'`、`lower('ä')='ä'`、
+    `lower('2#楼')='2#楼'` —— 非 ASCII 一律原样返回。
+    本模块所有大小写不敏感匹配（`eq`/`ne`/`contains`…）都走 `func.lower()`，
+    故候选值枚举侧（`record_field_values`）也**必须**用同样的 ASCII 折叠，
+    否则会出现「下拉里选得到、筛起来中不中」——
+    例如库里同时有 `UPS` 与 `ÄPF`：Python `str.lower()` 会把两者折叠成一类，
+    而 SQL 不会，候选列表就会多出一条永远筛不中的项。
+    """
+    return "".join(chr(ord(c) + 32) if "A" <= c <= "Z" else c for c in s)
 
 
 def parse_filters(
@@ -234,7 +249,10 @@ def _pred(col, op: str, value: str, pv: str):
         return sa_text(f"({col} != '' AND TRIM({col}) != '')"), None
 
     low = func.lower(col)
-    lit = value.lower()
+    # 🔴 值侧也必须 ASCII 折叠（ascii_lower），与 SQL 侧 func.lower() 严格对称：
+    #    若这里用 Python 的 str.lower()，输入「Ä」会被折成「ä」，而库里的「Ä」
+    #    经 SQL lower() 仍是「Ä」→ 双向都匹配不上，且**不报错**（静默漏筛）。
+    lit = ascii_lower(value)
 
     if op == "eq":
         return low == sa_text(f":{pv}"), lit

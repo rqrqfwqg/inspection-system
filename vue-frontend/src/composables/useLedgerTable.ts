@@ -17,7 +17,7 @@ import { getLinkTable } from '@/api/assetViz'
 import type { FieldDef, RecordItem, TransferResult } from '@/types/asset'
 import {
   DEVICE_CODE_FIELD, VALUELESS_OPS, isFilterActive, makeFilter, serializeFilters,
-  type FilterLogic, type RecordFilter,
+  type FieldValueItem, type FilterLogic, type RecordFilter,
 } from '@/types/assetFilter'
 import type { LinkTableDetail } from '@/types/assetViz'
 
@@ -69,6 +69,14 @@ export interface LedgerTable {
   setFilterLogic: (logic: FilterLogic) => void
   /** 清空全部筛选条件 */
   clearFilters: () => void
+  /** 取某字段的候选值（值下拉）；`q` 为下拉内搜索词，不传则取前 50 条 */
+  loadFieldValues: (field: string, q?: string) => Promise<void>
+  /** 候选值表（字段名 → 候选项），由视图传给筛选条 */
+  valueOptions: Ref<Record<string, FieldValueItem[]>>
+  /** 候选值加载状态表（字段名 → loading / error / truncated / total / matched） */
+  valueMeta: Ref<Record<string, { loading: boolean; error: boolean; truncated: boolean; total: number; matched: number }>>
+  /** 清空候选值缓存（切表时调用：字段名跨表不通用，留着必然是错数据） */
+  resetFieldValues: () => void
   /** 用当前条件重拉第 0 页（防抖由调用方做） */
   runFilteredSearch: () => Promise<void>
   /** 用 rowQuery 当前关键字走服务端 `q` 重拉第 0 页（与 queryKw 相同则跳过） */
@@ -167,9 +175,17 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
       searching.value = false
       queryKw.value = ''
       queryFilterSig.value = ''
+      resetFieldValues()
       return
     }
     const mine = ++loadSeq
+    // 🔴 换表即清候选：候选按字段名做键，而「楼层」在 A 表与 B 表取值完全不同，
+    //    不清就会在 B 表看到 A 表的楼层候选（最典型的「明明不对却查不出来」）。
+    //    同表重载不清（候选有服务端 60s 缓存，清了也没新数据，只会白拉一次）。
+    if (valueTableId !== id) {
+      valueTableId = id
+      resetFieldValues()
+    }
     const kw = rowQuery.value.trim()
     // 🔴 快照筛选态：请求在途时用户可能改条件，用快照值发请求（与 queryKw 同理）
     const fs = filters.value.filter(isFilterActive)
@@ -293,8 +309,13 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
 
   function setFilterField(index: number, field: string) {
     if (!filters.value[index]) return
+    const cur = filters.value[index]
+    if (cur.field === field) return
     const next = [...filters.value]
-    next[index] = { ...next[index], field }
+    // 🔴 换字段必须**清掉旧值**：A 字段的值对 B 字段几乎必然无意义
+    //    （「楼层=3F」切到「楼栋」后拿 3F 去比楼栋名，只会命中 0 条）。
+    //    以前靠手打碰巧没暴露，现在值来自候选下拉，不清会直接选出错条件。
+    next[index] = { ...next[index], field, value: '' }
     filters.value = next
   }
 
@@ -321,6 +342,56 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
 
   function clearFilters() {
     filters.value = []
+  }
+
+  // ---- 字段候选值（值下拉数据源） ----
+  // 🔴 键用**字段名**（不是条件行下标）：同一张表里多条条件可能筛同一字段，
+  //    按下标存会各拉一份。切表时必须整体重置 —— 否则 A 表的「楼层」候选
+  //    会出现在 B 表的楼层下拉里（字段名相同但取值完全不同，是最典型的错觉来源）。
+  type ValueMeta = {
+    loading: boolean
+    /** 候选拉取失败 → 组件降级为「纯手输」并明确提示，绝不静默显示「无值」 */
+    error: boolean
+    truncated: boolean
+    total: number
+    matched: number
+  }
+  const EMPTY_META: ValueMeta = { loading: false, error: false, truncated: false, total: 0, matched: 0 }
+  const valueOptions = ref<Record<string, FieldValueItem[]>>({})
+  const valueMeta = ref<Record<string, ValueMeta>>({})
+  /** 竞态保护：同一字段并发搜索时，只有最后一次请求的结果生效 */
+  const valueSeq = new Map<string, number>()
+  /** 候选值当前属于哪张表（切表时据此判断要不要清） */
+  let valueTableId: number | null = null
+
+  /** 切表时清空候选（字段名跨表不通用，留着必然是错数据） */
+  function resetFieldValues() {
+    valueOptions.value = {}
+    valueMeta.value = {}
+    valueSeq.clear()
+  }
+
+  async function loadFieldValues(field: string, q?: string) {
+    const id = tableId.value
+    if (!id || !field) return
+    const seq = (valueSeq.get(field) ?? 0) + 1
+    valueSeq.set(field, seq)
+    valueMeta.value = { ...valueMeta.value, [field]: { ...(valueMeta.value[field] ?? EMPTY_META), loading: true } }
+    try {
+      const res = await assetApi.listFieldValues(id, field, q, 50)
+      if (seq !== valueSeq.get(field)) return          // 旧请求后到，丢弃
+      valueOptions.value = { ...valueOptions.value, [field]: res.values }
+      valueMeta.value = {
+        ...valueMeta.value,
+        [field]: { loading: false, error: false, truncated: res.truncated, total: res.total, matched: res.matched },
+      }
+    } catch {
+      if (seq !== valueSeq.get(field)) return
+      // 🔴 失败即「降级为纯手输」：清空选项 + 标 error，由组件提示用户。
+      //    绝不能静默给空数组 —— 那等于骗用户「这列没有值」。
+      valueOptions.value = { ...valueOptions.value, [field]: [] }
+      valueMeta.value = { ...valueMeta.value, [field]: { loading: false, error: true, truncated: false, total: 0, matched: 0 } }
+    }
   }
 
   async function loadLinkDetail() {
@@ -496,6 +567,7 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
     visibleRecords, editOpen, editInitial, relationField,
     load, loadMore, runSearch, runFilteredSearch, loadLinkDetail, applyPendingQuery, setPendingQuery, setSelection,
     addFilter, removeFilter, setFilterField, setFilterOp, setFilterValue, setFilterLogic, clearFilters,
+    loadFieldValues, valueOptions, valueMeta, resetFieldValues,
     openCreate, openEdit, closeEdit, onEditSaved, removeRecord, importFile, exportExcel,
     openTransfer, closeTransfer, onTransferred, openCrossRefs, closeCrossRefs,
   }

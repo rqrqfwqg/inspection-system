@@ -15,7 +15,7 @@
 import * as XLSX from 'xlsx'
 import http from './http'
 import { serializeFilters } from '@/types/assetFilter'
-import type { FilterLogic, RecordFilter } from '@/types/assetFilter'
+import type { FieldValuesResult, FilterLogic, RecordFilter } from '@/types/assetFilter'
 import type {
   Subsystem,
   SubsystemPayload,
@@ -136,6 +136,22 @@ class AssetApiService {
     if (fs && filterLogic) params.set('filter_logic', filterLogic)
     const qs = params.toString()
     return http.get<RecordItem[]>(`${BASE}/tables/${tableId}/records${qs ? `?${qs}` : ''}`)
+  }
+  /**
+   * 取某表某字段的候选值（筛选条的值下拉）。
+   * @param q 下拉内的搜索词（服务端做「包含」过滤，与 contains 算子同语义）
+   * @param limit 本次条数上限（后端夹紧 [1,200]，缺省 50）
+   * 🔴 失败必须让调用方 reject —— 组件据此降级为「纯手输」并提示，
+   *    绝不能静默返回空数组（那会让用户以为「这列没有值」）。
+   */
+  listFieldValues(tableId: number, field: string, q?: string, limit?: number) {
+    const params = new URLSearchParams()
+    params.set('field', field)
+    if (q) params.set('q', q)
+    if (limit !== undefined) params.set('limit', String(limit))
+    return http.get<FieldValuesResult>(
+      `${BASE}/tables/${tableId}/field-values?${params.toString()}`,
+    )
   }
   createRecord(tableId: number, data: RecordPayload) {
     return http.post<RecordItem>(`${BASE}/tables/${tableId}/records`, data)

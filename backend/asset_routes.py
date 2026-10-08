@@ -30,6 +30,7 @@ from asset_schemas import (
     DataTableCreate, DataTableUpdate, DataTableResponse,
     FieldDefCreate, FieldDefUpdate, FieldDefResponse,
     RecordCreate, RecordUpdate, RecordResponse,
+    FieldValuesResponse,
     DeviceRelationCreate, DeviceRelationUpdate, DeviceRelationResponse,
     RelationTypeResponse,
     BulkRecordCreate, BulkRecordItem,
@@ -47,6 +48,11 @@ from device_alias_normalizer import resolve_device_code, get_normalizer, reset_n
 from record_filters import (
     parse_filters, parse_logic, build_filter_clause,
     FilterError, DEVICE_CODE_FIELD,
+)
+# 字段候选值枚举（筛选条的值下拉）：GROUP BY 值 → COUNT，按命中数降序
+from record_field_values import (
+    list_field_values, reset_cache as reset_field_value_cache,
+    FieldValueError,
 )
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -469,6 +475,7 @@ def delete_table(tid: int, db: Session = Depends(get_db), _: User = Depends(_req
     db.query(FieldDef).filter(FieldDef.table_id == tid).delete()
     db.delete(obj)
     db.commit()
+    _invalidate_field_value_cache()   # 表连记录一起没了，候选缓存必须清（否则下拉里还在)
     return {"success": True, "message": "资料表及其字段、记录已删除"}
 
 
@@ -554,6 +561,45 @@ def delete_field(tid: int, fid: int, db: Session = Depends(get_db), _: User = De
 
 
 # ========================= 资料记录 =========================
+
+@router.get("/tables/{tid}/field-values", response_model=FieldValuesResponse)
+def list_field_value_options(
+    tid: int,
+    field: str,
+    q: Optional[str] = None,
+    limit: Optional[int] = None,
+    db: Session = Depends(get_db), _: User = Depends(_get_current_user),
+):
+    """某表某字段的**候选值列表**（筛选条的值下拉数据源，EXCEL 式体验）。
+
+    用户需求（2026-10-08）：「条件选项内的选项是根据表格内的已有数据进行筛选，
+    相对灵活像 EXCEL 一样」—— 值应当**从该列已有数据里挑**，而不是凭记忆手打
+    （打错一个字就命中 0 条，且完全看不出错在哪）。
+
+    契约（须保持）：
+      - 白名单与 `list_records` 的 filters **完全同一套**：field_defs.key + `__device_code`，
+        刻意不含「有数据但未定义字段」的键（那些列用户根本看不到）。
+      - 🔴 非法字段一律 **400** 带人话原因（绝不返回空列表假装「没值」——
+        那会让用户以为这列是空的，实际是自己写错了字段名）。
+      - 每项带 `count`（该值在本表命中行数）：选之前就知道会命中几条，这是候选下拉的核心价值。
+      - 按 `count DESC, value ASC` 排序：高频值在前，低频长尾在后。
+      - 空值（NULL / 空串 / 纯空白）**不进候选**：空值由 `is_empty`/`not_empty` 负责，
+        混进下拉只会让用户「选了个空字符串然后莫名其妙 0 条」。
+      - `q` 做「包含」过滤，与 `contains` 算子同语义；`limit` 缺省 50、夹紧 [1,200]。
+      - `truncated=true` 表示还有更多，前端应提示「继续输入以缩小范围」。
+      - 自带 60s 只读缓存（GROUP BY 全表扫，最大表实测 12ms）；写记录后即时清缓存。
+    """
+    field_keys = {
+        (f.key or "").strip()
+        for f in db.query(FieldDef).filter(FieldDef.table_id == tid).all()
+        if (f.key or "").strip()
+    }
+    field_keys.add(DEVICE_CODE_FIELD)
+    try:
+        return list_field_values(db, tid, field, field_keys, q=q, limit=limit)
+    except FieldValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 @router.get("/tables/{tid}/records", response_model=List[RecordResponse])
 def list_records(tid: int, device_code: Optional[str] = None,
@@ -669,6 +715,24 @@ def _invalidate_ledger_cache() -> None:
         pass
 
 
+def _invalidate_field_value_cache() -> None:
+    """让筛选条的**字段候选值**缓存立即失效（写记录后调用）。
+
+    为什么要单独一个：候选值缓存在 `record_field_values` 里（TTL 60s），
+    若不主动清，用户新增/编辑一条记录后回到筛选条，下拉里**看不到自己刚填的值**——
+    这在「刚录完数据立刻想按它筛」的场景下非常迷惑（会以为没保存成功）。
+
+    🔴 清**全部**表而非只清当前表：字段改名 / 跨表转移会让别的表的候选也变，
+       而候选缓存本身极轻（每表每字段一条 distinct 列表，最大 607 项），
+       全清的成本远小于「猜错哪几张表被影响」。
+    """
+    try:
+        reset_field_value_cache()
+    except Exception:
+        # 清缓存失败不应让写请求失败；TTL 60s 后自然过期兜底
+        pass
+
+
 def _write_site_created_record(db: Session, dev: Device, creator: str) -> Optional[Record]:
     """把新建设备补写进「现场新建设备」资料表（幂等；表不存在则静默跳过）。
 
@@ -758,6 +822,7 @@ def create_record(tid: int, data: RecordCreate, db: Session = Depends(get_db), c
     db.add(rec); db.flush()
     _sync_room_master_to_rooms(db, tbl, rec)  # 房间「加一次、到处都有」
     db.commit(); db.refresh(rec)
+    _invalidate_field_value_cache()   # 新值要能立刻出现在筛选下拉里
     return _serialize_record(db, rec)
 
 @router.put("/tables/{tid}/records/{rid}", response_model=RecordResponse)
@@ -781,6 +846,7 @@ def update_record(tid: int, rid: int, data: RecordUpdate, db: Session = Depends(
     rec.updated_at = datetime.now(timezone.utc)
     _sync_room_master_to_rooms(db, tbl, rec)  # 房间编辑同步到核心 rooms
     db.commit(); db.refresh(rec)
+    _invalidate_field_value_cache()   # 改过的值/新增的键要能立刻出现在筛选下拉里
     return _serialize_record(db, rec)
 
 @router.delete("/tables/{tid}/records/{rid}")
@@ -789,6 +855,7 @@ def delete_record(tid: int, rid: int, db: Session = Depends(get_db), _: User = D
     if not rec:
         raise HTTPException(status_code=404, detail="记录不存在")
     db.delete(rec); db.commit()
+    _invalidate_field_value_cache()   # 删掉的值要从筛选下拉里消失（否则 count 对不上）
     return {"success": True, "message": "记录已删除"}
 
 
@@ -1302,6 +1369,7 @@ def bulk_create_records(tid: int, payload: BulkRecordCreate,
         _sync_room_master_to_rooms(db, tbl, rec)  # 批量导入房间同样同步
         created += 1
     db.commit()
+    _invalidate_field_value_cache()   # 批量导入是候选值变化的最大来源，必须清
     return {"success": True, "created": created, "skipped": skipped}
 
 
@@ -1557,6 +1625,8 @@ def transfer_records(tid: int, payload: RecordTransferRequest,
 
     if not payload.dry_run:
         db.commit()
+        # 转移同时动源表与目标表 → 两边候选值都变了
+        _invalidate_field_value_cache()
 
     return {
         "success": True,

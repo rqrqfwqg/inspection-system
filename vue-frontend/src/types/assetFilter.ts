@@ -66,3 +66,36 @@ export function describeFilters(filters: RecordFilter[], logic: FilterLogic): st
   if (parts.length === 0) return '无筛选条件'
   return parts.join(logic === 'and' ? ' 且 ' : ' 或 ')
 }
+// =====================================================================
+// 字段候选值（值下拉数据源）—— 与后端 record_field_values.py 契约一一对应
+// =====================================================================
+
+/** 单个候选值。`count` = 该值在本表命中行数（选之前就知道会命中几条） */
+export interface FieldValueItem {
+  value: string
+  count: number
+}
+
+/**
+ * 候选值接口响应。
+ * 🔴 `truncated` 为 true 表示还有更多（前端必须提示「继续输入以缩小范围」，
+ *    否则用户会以为「这就是全部」，进而怀疑数据漏了）。
+ * 🔴 候选已由后端按 **ASCII 大小写折叠** 合并（`UPS` 与 `ups` 合为一项），
+ *    所以 `count` 与用该值做 `eq` 筛选的实际命中数**严格相等**。
+ */
+export interface FieldValuesResult {
+  field: string
+  values: FieldValueItem[]
+  /** 该字段 distinct 非空值总数（截断前） */
+  total: number
+  /** 本次实际返回条数 */
+  returned: number
+  /** q 过滤后命中条数（未截断） */
+  matched: number
+  truncated: boolean
+}
+
+/** 下拉里展示的文案：`值` + `· 命中 N 条`（条数是候选下拉的核心价值，不能省） */
+export function describeValueItem(item: FieldValueItem): string {
+  return `${item.value} · ${item.count} 条`
+}

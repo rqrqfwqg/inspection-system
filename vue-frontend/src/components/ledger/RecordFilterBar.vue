@@ -16,10 +16,10 @@
  * 红线：只用 @element-plus/icons-vue 图标、无 emoji、无渐变、颜色全走 token。
  */
 import { computed } from 'vue'
-import { Delete, Filter, Plus, RefreshLeft } from '@element-plus/icons-vue'
+import { Delete, Filter, Plus, RefreshLeft, WarningFilled } from '@element-plus/icons-vue'
 import {
   DEVICE_CODE_FIELD, FILTER_OPS, VALUELESS_OPS,
-  isFilterActive, type FilterLogic, type RecordFilter,
+  isFilterActive, type FieldValueItem, type FilterLogic, type RecordFilter,
 } from '@/types/assetFilter'
 import type { FieldDef } from '@/types/asset'
 
@@ -33,10 +33,25 @@ const props = withDefaults(
     activeCount: number
     /** 命中条数（用于「条件 → 结果」的即时反馈） */
     resultCount: number
+    /** 候选值表：字段名 → 该字段的候选项（由 composable 维护，切表自动重置） */
+    valueOptions: Record<string, FieldValueItem[]>
+    /** 候选值加载状态表：字段名 → loading / error / truncated / total / matched */
+    valueMeta: Record<string, ValueMeta>
     loading?: boolean
   }>(),
   { loading: false },
 )
+
+/** 候选值加载状态（与 composable 的 ValueMeta 同形） */
+type ValueMeta = {
+  loading: boolean
+  error: boolean
+  truncated: boolean
+  total: number
+  matched: number
+}
+
+const NO_META: ValueMeta = { loading: false, error: false, truncated: false, total: 0, matched: 0 }
 
 const emit = defineEmits<{
   (e: 'add', field?: string): void
@@ -46,6 +61,8 @@ const emit = defineEmits<{
   (e: 'update:value', payload: { index: number; value: string }): void
   (e: 'update:logic', logic: FilterLogic): void
   (e: 'clear'): void
+  /** 取某字段的候选值（懒加载：下拉首次展开 / 下拉内搜索时才发） */
+  (e: 'load-values', payload: { field: string; q?: string }): void
 }>()
 
 /** 可选字段：关联键 + 该表全部字段（label 优先，回落到 key） */
@@ -81,6 +98,43 @@ function needsValue(op: RecordFilter['op']): boolean {
 /** 未填完整的条件：不生效，用弱化样式标出来 */
 function isPending(f: RecordFilter): boolean {
   return !isFilterActive(f)
+}
+
+// ------------------------------------------------------------------
+// 字段候选值（值下拉）
+// ------------------------------------------------------------------
+/** 下拉内搜索词的本地防抖计时器（按字段分桶，避免 A 字段的输入取消 B 字段的） */
+const searchTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const SEARCH_DEBOUNCE = 250
+
+function optionsOf(field: string): FieldValueItem[] {
+  return props.valueOptions[field] ?? []
+}
+
+function metaOf(field: string): ValueMeta {
+  return props.valueMeta[field] ?? NO_META
+}
+
+/** 下拉首次展开才拉候选：避免加了一堆条件就发一堆无用请求 */
+function onValueOpen(field: string, visible: boolean) {
+  if (!visible) return
+  if (metaOf(field).loading) return
+  if (optionsOf(field).length === 0 && !metaOf(field).error) {
+    emit('load-values', { field })
+  }
+}
+
+/** 下拉内输入 → 服务端「包含」搜索（防抖 250ms，与筛选条件的 400ms 独立计时） */
+function onValueSearch(field: string, q: string) {
+  const pending = searchTimers.get(field)
+  if (pending) clearTimeout(pending)
+  searchTimers.set(
+    field,
+    setTimeout(() => {
+      searchTimers.delete(field)
+      emit('load-values', { field, q: q.trim() || undefined })
+    }, SEARCH_DEBOUNCE),
+  )
 }
 
 const hasAny = computed(() => props.filters.length > 0)
@@ -168,17 +222,54 @@ const canAdd = computed(() => props.filters.length < MAX)
           <el-option v-for="o in opOptions" :key="o.value" :label="o.label" :value="o.value" />
         </el-select>
 
-        <!-- 「为空/不为空」不需要值：不渲染输入框，避免留一个填了也没用的空框 -->
-        <el-input
-          v-if="needsValue(f.op)"
-          :model-value="f.value"
-          size="small"
-          class="rf__value"
-          clearable
-          :aria-label="`${fieldLabel(f.field)} ${opLabel(f.op)} 的值`"
-          :placeholder="`填入要${opLabel(f.op)}的内容`"
-          @update:model-value="(v: string) => emit('update:value', { index: i, value: v })"
-        />
+        <!--
+          值：可搜索下拉 + 允许手输（allow-create）。
+          用户要求「选项根据表格内已有数据、像 EXCEL 一样」→ 从该列已有值里挑，
+          而不是凭记忆敲（敲错一个字就 0 条且看不出错在哪）。
+          但**必须允许手输**：① 长尾值候选里可能没有（truncated）；
+          ② 用户有时就想按片段找（配合「开头是/包含」）。
+          每项显示命中条数 —— 选之前就知道会命中几条，这是候选下拉的核心价值。
+        -->
+        <template v-if="needsValue(f.op)">
+          <div class="rf__valuewrap">
+            <el-select
+              :model-value="f.value"
+              size="small"
+              class="rf__value"
+              filterable
+              allow-create
+              default-first-option
+              :reserve-keyword="false"
+              :loading="metaOf(f.field).loading"
+              :no-data-text="metaOf(f.field).error ? '候选值加载失败，可直接输入' : '该字段没有可选值，可直接输入'"
+              :no-match-text="metaOf(f.field).loading ? '搜索中…' : '无匹配项，可直接输入该值'"
+              :aria-label="`${fieldLabel(f.field)} ${opLabel(f.op)} 的值`"
+              :placeholder="`选或输入要${opLabel(f.op)}的内容`"
+              @visible-change="(v: boolean) => onValueOpen(f.field, v)"
+              @remote-method="(q: string) => onValueSearch(f.field, q)"
+              @update:model-value="(v: string) => emit('update:value', { index: i, value: v })"
+            >
+              <el-option
+                v-for="it in optionsOf(f.field)"
+                :key="it.value"
+                :label="it.value"
+                :value="it.value"
+              >
+                <span class="rf__opt-val" :title="it.value">{{ it.value }}</span>
+                <span class="rf__opt-count tnum">{{ it.count }} 条</span>
+              </el-option>
+            </el-select>
+
+            <!-- 候选状态说明：截断必须说清，否则用户会以为「这就是全部」 -->
+            <span v-if="metaOf(f.field).truncated" class="rf__vnote">
+              共 {{ metaOf(f.field).total }} 个值，继续输入可缩小范围
+            </span>
+            <span v-else-if="metaOf(f.field).error" class="rf__vnote rf__vnote--warn">
+              <el-icon :size="12"><WarningFilled /></el-icon>
+              <span>候选值加载失败，可直接输入</span>
+            </span>
+          </div>
+        </template>
         <span v-else class="rf__novalue">不需要填值</span>
 
         <el-button
@@ -304,6 +395,43 @@ const canAdd = computed(() => props.filters.length < MAX)
 .rf__value {
   flex: 1 1 220px;
   min-width: 160px;
+}
+
+/* 值区：下拉 + 其下方的候选状态说明（说明换行显示，不挤压同行其他控件） */
+.rf__valuewrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  flex: 1 1 220px;
+  min-width: 160px;
+}
+
+.rf__vnote {
+  font-size: var(--text-xs);
+  color: var(--muted);
+  line-height: var(--leading-normal, 1.5);
+}
+
+/* 候选加载失败：明确降级为「手输」，不静默显示「无值」 */
+.rf__vnote--warn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--warning, var(--fg-2));
+}
+
+/* 下拉选项：值占位可截断（最长实测 161 字符），条数右对齐不换行 */
+.rf__opt-val {
+  margin-right: var(--space-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rf__opt-count {
+  float: right;
+  color: var(--muted);
+  font-size: var(--text-xs);
 }
 
 .rf__novalue {

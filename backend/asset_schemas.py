@@ -166,6 +166,23 @@ class RecordResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# ---------- 字段候选值（筛选条的值下拉数据源） ----------
+
+class FieldValueItem(BaseModel):
+    """单个候选值。`count` = 该值在本表命中行数（EXCEL 式体验的关键：选之前就知道会命中几条）。"""
+    value: str
+    count: int
+
+
+class FieldValuesResponse(BaseModel):
+    field: str
+    values: List[FieldValueItem]
+    total: int          # 该字段 distinct 非空值总数（截断前）
+    returned: int       # 本次实际返回条数
+    matched: int        # q 过滤后命中条数（未截断）
+    truncated: bool     # matched > returned → 还有更多，靠 q 继续缩小
+
+
 # ---------- 记录跨表转移（字段映射） ----------
 
 class TransferMappingItem(BaseModel):
