@@ -30,7 +30,7 @@ from asset_schemas import (
     DataTableCreate, DataTableUpdate, DataTableResponse,
     FieldDefCreate, FieldDefUpdate, FieldDefResponse,
     RecordCreate, RecordUpdate, RecordResponse,
-    FieldValuesResponse,
+    FieldValuesResponse, FilterStatsResponse,
     DeviceRelationCreate, DeviceRelationUpdate, DeviceRelationResponse,
     RelationTypeResponse,
     BulkRecordCreate, BulkRecordItem,
@@ -46,9 +46,11 @@ from import_engine import import_workbook, detect_template, TEMPLATE_INFO
 from device_alias_normalizer import resolve_device_code, get_normalizer, reset_normalizer
 # 数据表记录的结构化条件筛选：JSON 条件 → SQL 谓词（字段名白名单 + 值绑定，绝不拼 SQL）
 from record_filters import (
-    parse_filters, parse_logic, build_filter_clause,
+    parse_filters, parse_logic, build_filter_clause, build_search_clause,
     FilterError, DEVICE_CODE_FIELD,
 )
+# 筛选命中归因（每条条件独立命中数）：与 list_records 共用同一套筛选内核
+from record_filter_stats import compute_filter_stats
 # 字段候选值枚举（筛选条的值下拉）：GROUP BY 值 → COUNT，按命中数降序
 from record_field_values import (
     list_field_values, reset_cache as reset_field_value_cache,
@@ -632,20 +634,11 @@ def list_records(tid: int, device_code: Optional[str] = None,
     if device_code:
         qq = qq.filter(Record.device_code == device_code)
     if kw:
-        # 行级搜索**唯一真源在服务端**：device_code 命中（大小写不敏感子串）
-        #   或 records.data 的【值】（**非键**）命中。
-        # 前端搜索框关键字原样透传为 q（不在本地二次过滤），故此处是唯一裁决点 ——
-        #   调整搜索语义只改这一段（不写死前端函数名，避免随前端重构产生注释漂移）。
-        # LIKE 通配符必须转义（§13 事故③：q=% 曾命中全表）；值走绑定参数，绝不拼接 SQL。
-        pat = "%" + kw.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-        json_val_hit = sa_text(
-            "EXISTS (SELECT 1 FROM json_each(records.data) "
-            "WHERE LOWER(CAST(json_each.value AS TEXT)) LIKE :kw ESCAPE '\\')"
-        ).bindparams(kw=pat)
-        qq = qq.filter(or_(
-            func.lower(func.coalesce(Record.device_code, "")).like(pat, escape="\\"),
-            json_val_hit,
-        ))
+        # 行级搜索语义的**唯一真源**：`record_filters.build_search_clause`。
+        #   命中归因端点（filter-stats）也调它，两处语义必须一致——
+        #   否则会出现「归因说命中 8 条、实际筛出 0 条」，比不给归因更伤排查。
+        #   前端搜索框关键字原样透传为 q（不在本地二次过滤）。
+        qq = qq.filter(build_search_clause(kw))
     # ---- 结构化条件筛选（可与 q 共存，AND 关系）----
     if filters and filters.strip():
         # 白名单 = 该表 field_defs 的 key + 关联键（__device_code）。
@@ -674,6 +667,55 @@ def list_records(tid: int, device_code: Optional[str] = None,
         recs = qq.all()
     cache = _prefetch_record_refs(db, recs)
     return [_serialize_record(db, r, cache) for r in recs]
+
+@router.get("/tables/{tid}/filter-stats", response_model=FilterStatsResponse)
+def list_filter_stats(
+    tid: int,
+    filters: Optional[str] = None,
+    filter_logic: Optional[str] = None,
+    q: Optional[str] = None,
+    device_code: Optional[str] = None,
+    db: Session = Depends(get_db), _: User = Depends(_get_current_user),
+):
+    """筛选命中归因：每条条件**单独**能命中多少行（回答「是哪条把结果杀成 0 的」）。
+
+    用户需求（2026-10-08）：筛选出 0 条时，条件条一排看不出问题出在哪。
+    本端点给出每条条件的独立命中数，前端显示在条件行尾。
+
+    契约（须保持）：
+      - 全部输入（`filters` / `filter_logic` / `q` / `device_code`）与 `list_records`
+        **完全同源**：同一个 `parse_filters` + `build_filter_clause` +
+        `build_search_clause`。归因数字若与实际筛结果对不上，
+        就会出现「归因说命中 8 条、筛出条 0」——比不给归因更伤排查。
+      - `counts[i]` = 只有第 i 条条件生效时的命中行数（其余条件全放开；
+        `q` 仍生效，因为 q 是搜索框语义、不属于「这些条件」）。
+      - `counts` 与条件**等长同序**（而不是只返回命中数的那几条）：
+        前端按下标直接取，不在前端做「过滤掉 0」的对齐（极易错位）。
+      - `total` = 不带条件、只带 q 的行数（归因的分母）；
+        `combined` = 全部条件组合后的行数（== 前端实际会看到的条数）。
+      - 无条件时 `counts=[]`、`combined==total`（前端可直接展示总数，不必再发请求）。
+      - 非法条件一律 **400** 带人话原因（与 `list_records` 一致）。
+    """
+    field_keys = {
+        (f.key or "").strip()
+        for f in db.query(FieldDef).filter(FieldDef.table_id == tid).all()
+        if (f.key or "").strip()
+    }
+    field_keys.add(DEVICE_CODE_FIELD)
+    conditions: List[Dict[str, Any]] = []
+    logic = "and"
+    if filters and filters.strip():
+        try:
+            conditions, _ = parse_filters(filters, field_keys)
+            logic = parse_logic(filter_logic)
+        except FilterError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    kw = (q or "").strip()[:100]
+    return compute_filter_stats(
+        db, tid, conditions, logic=logic, device_code=device_code,
+        q_clause=build_search_clause(kw) if kw else None,
+    )
+
 
 # ---- 「机房信息汇总」(room_master) → 核心 rooms 单向同步 ----
 # 背景（2026-09-16）：房间存在两套存储——数据表 room_master（records JSON，房间的

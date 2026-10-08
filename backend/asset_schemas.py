@@ -183,6 +183,15 @@ class FieldValuesResponse(BaseModel):
     truncated: bool     # matched > returned → 还有更多，靠 q 继续缩小
 
 
+# ---------- 筛选命中归因（哪条条件把结果杀成 0） ----------
+
+class FilterStatsResponse(BaseModel):
+    """每条条件的独立命中数。`counts` 与请求里的条件**等长同序**（前端按下标取）。"""
+    total: int          # 不带条件、只带 q 的行数（归因的分母）
+    combined: int       # 全部条件按 logic 组合后的行数（== 实际会看到的条数）
+    counts: List[int]   # counts[i] = 只有第 i 条条件生效时的命中行数
+
+
 # ---------- 记录跨表转移（字段映射） ----------
 
 class TransferMappingItem(BaseModel):

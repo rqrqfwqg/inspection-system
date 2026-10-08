@@ -15,7 +15,9 @@
 import * as XLSX from 'xlsx'
 import http from './http'
 import { serializeFilters } from '@/types/assetFilter'
-import type { FieldValuesResult, FilterLogic, RecordFilter } from '@/types/assetFilter'
+import type {
+  FieldValuesResult, FilterLogic, FilterStatsResult, RecordFilter,
+} from '@/types/assetFilter'
 import type {
   Subsystem,
   SubsystemPayload,
@@ -151,6 +153,29 @@ class AssetApiService {
     if (limit !== undefined) params.set('limit', String(limit))
     return http.get<FieldValuesResult>(
       `${BASE}/tables/${tableId}/field-values?${params.toString()}`,
+    )
+  }
+  /**
+   * 筛选命中归因：每条条件**单独**能命中多少行（回答「是哪条把结果杀成 0 的」）。
+   * 🔴 与 `listRecords` 用同一个 `serializeFilters`（唯一真源）——
+   *    两处若各序列化一次，归因数字就会与实际筛出的条数对不上，
+   *    那比不给归因更伤排查（用户会以为系统算错了）。
+   * @returns counts 与传入的有效条件**等长同序**，前端按下标直接取
+   */
+  listFilterStats(
+    tableId: number,
+    filters?: RecordFilter[],
+    filterLogic?: FilterLogic,
+    q?: string,
+  ) {
+    const params = new URLSearchParams()
+    const fs = serializeFilters(filters ?? [])
+    if (fs) params.set('filters', fs)
+    if (fs && filterLogic) params.set('filter_logic', filterLogic)
+    if (q) params.set('q', q)
+    const qs = params.toString()
+    return http.get<FilterStatsResult>(
+      `${BASE}/tables/${tableId}/filter-stats${qs ? `?${qs}` : ''}`,
     )
   }
   createRecord(tableId: number, data: RecordPayload) {

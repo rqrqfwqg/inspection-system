@@ -190,6 +190,10 @@ watch(
     filterDebounceTimer = setTimeout(() => {
       filterDebounceTimer = null
       void table.runFilteredSearch()
+      // 🔴 归因与列表**同一个防抖里一起发**：分开发会让用户在归因数字还停在
+      //    上一版条件时就看到新结果（数字与结果对不上，比慢 400ms 严重得多）。
+      //    `refreshFilterStats` 内有指纹判重，条件没实质变化时不会重复请求。
+      void table.refreshFilterStats()
     }, 400)
   },
 )
@@ -278,12 +282,14 @@ onBeforeUnmount(() => {
         :result-count="table.visibleRecords.value.length"
         :value-options="table.valueOptions.value"
         :value-meta="table.valueMeta.value"
+        :filter-stats="table.filterStats.value"
+        :filter-total="table.filterTotal.value"
         :loading="table.searching.value"
         @add="(field) => table.addFilter(field)"
         @remove="(index) => table.removeFilter(index)"
         @update:field="(p) => table.setFilterField(p.index, p.field)"
         @update:op="(p) => table.setFilterOp(p.index, p.op)"
-        @update:value="(p) => table.setFilterValue(p.index, p.value)"
+        @update:values="(p) => table.setFilterValues(p.index, p.values)"
         @update:logic="(v: FilterLogic) => table.setFilterLogic(v)"
         @clear="table.clearFilters()"
         @load-values="(p) => table.loadFieldValues(p.field, p.q)"

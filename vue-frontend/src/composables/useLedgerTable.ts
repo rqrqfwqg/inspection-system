@@ -16,8 +16,9 @@ import assetApi from '@/api/assetApi'
 import { getLinkTable } from '@/api/assetViz'
 import type { FieldDef, RecordItem, TransferResult } from '@/types/asset'
 import {
-  DEVICE_CODE_FIELD, VALUELESS_OPS, isFilterActive, makeFilter, serializeFilters,
-  type FieldValueItem, type FilterLogic, type RecordFilter,
+  DEVICE_CODE_FIELD, VALUELESS_OPS, isFilterActive, makeFilter,
+  filterSignature as computeFilterSignature,
+  type FieldValueItem, type FilterLogic, type FilterStatsMap, type RecordFilter,
 } from '@/types/assetFilter'
 import type { LinkTableDetail } from '@/types/assetViz'
 
@@ -65,7 +66,8 @@ export interface LedgerTable {
   removeFilter: (index: number) => void
   setFilterField: (index: number, field: string) => void
   setFilterOp: (index: number, op: RecordFilter['op']) => void
-  setFilterValue: (index: number, value: string) => void
+  /** 覆盖式设置某条条件的全部已选值（多选框一次性回传整个数组） */
+  setFilterValues: (index: number, values: string[]) => void
   setFilterLogic: (logic: FilterLogic) => void
   /** 清空全部筛选条件 */
   clearFilters: () => void
@@ -77,6 +79,14 @@ export interface LedgerTable {
   valueMeta: Ref<Record<string, { loading: boolean; error: boolean; truncated: boolean; total: number; matched: number }>>
   /** 清空候选值缓存（切表时调用：字段名跨表不通用，留着必然是错数据） */
   resetFieldValues: () => void
+  /** 每条条件的独立命中数（**按下标**取；count 为 undefined = 未知/未查） */
+  filterStats: Ref<FilterStatsMap>
+  /** 全部条件组合后的真实命中条数（后端算出，非当前页条数） */
+  filterTotal: Ref<number | undefined>
+  /** 刷新归因（视图在条件变更防抖后调用；条件未实质变化则跳过） */
+  refreshFilterStats: () => Promise<void>
+  /** 已把归因清空（视图可据此收起归因区） */
+  resetFilterStats: () => void
   /** 用当前条件重拉第 0 页（防抖由调用方做） */
   runFilteredSearch: () => Promise<void>
   /** 用 rowQuery 当前关键字走服务端 `q` 重拉第 0 页（与 queryKw 相同则跳过） */
@@ -159,7 +169,9 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
    * `runFilteredSearch` 据此跳过「条件没实质变化」的重复请求 ——
    * 防止「只改了下拉但选了同一个值」也打一次网络。
    */
-  const filterSignature = computed(() => serializeFilters(filters.value) ?? '')
+  const filterSignature = computed(() =>
+    computeFilterSignature(filters.value, filterLogic.value),
+  )
 
   /** 载入第一页：切表 / 增删改后调用；**沿用当前关键字**（增删改后仍保持搜索态，与改造前一致） */
   async function load() {
@@ -176,6 +188,7 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
       queryKw.value = ''
       queryFilterSig.value = ''
       resetFieldValues()
+      resetFilterStats()
       return
     }
     const mine = ++loadSeq
@@ -185,6 +198,8 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
     if (valueTableId !== id) {
       valueTableId = id
       resetFieldValues()
+      // 换表必然换字段集，旧归因的下标与含义全部作废
+      resetFilterStats()
     }
     const kw = rowQuery.value.trim()
     // 🔴 快照筛选态：请求在途时用户可能改条件，用快照值发请求（与 queryKw 同理）
@@ -315,24 +330,30 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
     // 🔴 换字段必须**清掉旧值**：A 字段的值对 B 字段几乎必然无意义
     //    （「楼层=3F」切到「楼栋」后拿 3F 去比楼栋名，只会命中 0 条）。
     //    以前靠手打碰巧没暴露，现在值来自候选下拉，不清会直接选出错条件。
-    next[index] = { ...next[index], field, value: '' }
+    next[index] = { ...next[index], field, values: [] }
     filters.value = next
   }
 
   function setFilterOp(index: number, op: RecordFilter['op']) {
     if (!filters.value[index]) return
     const next = [...filters.value]
-    // 切到「为空/不为空」时清掉旧值 —— 否则后端会忽略 value，
+    // 切到「为空/不为空」时清掉旧值 —— 否则后端会忽略 values，
     // 界面上却还留着上一条算子的输入框内容，用户会困惑
-    const value = VALUELESS_OPS.includes(op) ? '' : next[index].value
-    next[index] = { ...next[index], op, value }
+    const values = VALUELESS_OPS.includes(op) ? [] : next[index].values
+    next[index] = { ...next[index], op, values }
     filters.value = next
   }
 
-  function setFilterValue(index: number, value: string) {
+  /**
+   * 覆盖式设置已选值（多选框回传整个数组）。
+   * 🔴 归一化（trim / 去 ASCII 大小写重复 / 上限）只在 `serializeFilters` 里做，
+   *    这里**原样保存**：本地显示必须与用户刚点的完全一致，
+   *    否则界面显示「已选 2 项」而后端只收到 1 项，归因数字当场与结果对不上。
+   */
+  function setFilterValues(index: number, values: string[]) {
     if (!filters.value[index]) return
     const next = [...filters.value]
-    next[index] = { ...next[index], value }
+    next[index] = { ...next[index], values: [...values] }
     filters.value = next
   }
 
@@ -342,6 +363,8 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
 
   function clearFilters() {
     filters.value = []
+    // 🔴 清条件必须同时清归因：旧 counts 的下标对应旧条件行，留着会张冠李戴
+    resetFilterStats()
   }
 
   // ---- 字段候选值（值下拉数据源） ----
@@ -391,6 +414,72 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
       //    绝不能静默给空数组 —— 那等于骗用户「这列没有值」。
       valueOptions.value = { ...valueOptions.value, [field]: [] }
       valueMeta.value = { ...valueMeta.value, [field]: { loading: false, error: true, truncated: false, total: 0, matched: 0 } }
+    }
+  }
+
+  // ---- 筛选命中归因（每条条件的独立命中数）----
+  // 🔴 归因与列表是两次独立请求，但必须共用同一个 `filterSignature` 口径：
+  //    两者若用不同序列化，同一次操作会算出「列表 12 条、归因 combined 8 条」，
+  //    用户只会认为归因坏了（其实是我们自己不一致）。
+  // 🔴 counts 按**下标**存（不按字段/算子）：条件行会增删移动，按内容存必然错位。
+  const filterStats = ref<FilterStatsMap>({})
+  const filterTotal = ref<number | undefined>(undefined)
+  /** 归因请求世代号（条件再变就丢弃旧结果，绝不把过期数字盖回来） */
+  let statsSeq = 0
+  /** 已计算过的条件指纹（相同则跳过重复请求） */
+  let statsSignature = ''
+
+  function resetFilterStats() {
+    statsSeq += 1
+    statsSignature = ''
+    filterStats.value = {}
+    filterTotal.value = undefined
+  }
+
+  async function refreshFilterStats() {
+    const id = tableId.value
+    if (!id) return
+    // 没有有效条件：不必问后端（它也会返回 counts=[]），直接清空
+    if (!filters.value.some(isFilterActive)) {
+      resetFilterStats()
+      return
+    }
+    const sig = filterSignature.value
+    if (sig === statsSignature) return
+    const mine = ++statsSeq
+    // 未查到的位置标 loading：显示「算命中数…」比空白更诚实
+    const pending: FilterStatsMap = {}
+    for (let i = 0; i < filters.value.length; i += 1) {
+      pending[i] = isFilterActive(filters.value[i])
+        ? { ...(filterStats.value[i] ?? {}), loading: true }
+        : {}
+    }
+    filterStats.value = pending
+    try {
+      const res = await assetApi.listFilterStats(id, filters.value, filterLogic.value)
+      if (mine !== statsSeq) return
+      statsSignature = sig
+      filterTotal.value = res.combined
+      // 🔴 后端 counts 与「**有效条件**」等长同序，而这里按下标对齐**全部条件行**：
+      //    未填完的条件在后端被丢弃、不占 counts 位，所以必须逐行重映射。
+      //    直接 set(i, res.counts[i]) 会把数字安到错误的行上（最典型的「归因指错人」）。
+      const map: FilterStatsMap = {}
+      let k = 0
+      for (let i = 0; i < filters.value.length; i += 1) {
+        if (!isFilterActive(filters.value[i])) {
+          map[i] = {}
+          continue
+        }
+        map[i] = { count: res.counts[k], loading: false }
+        k += 1
+      }
+      filterStats.value = map
+    } catch {
+      if (mine !== statsSeq) return
+      // 🔴 归因失败**不打断筛选**：清空归因即可，列表结果依然正确。
+      //    绝不抛错或弹提示 —— 归因是辅助信息，不该让主流程失败。
+      filterStats.value = {}
+      filterTotal.value = undefined
     }
   }
 
@@ -564,9 +653,10 @@ export function useLedgerTable(tableId: Ref<number | null>, tableName: () => str
     fields, records, loading, error, rowQuery, selectedIds, importing, linkDetail,
     editTarget, transferIds, crossRecord, catalogDirty, hasMore, loadingMore, searching, queryKw, loadedCount,
     filters, filterLogic, activeFilterCount, filterSignature,
+    filterStats, filterTotal, refreshFilterStats, resetFilterStats,
     visibleRecords, editOpen, editInitial, relationField,
     load, loadMore, runSearch, runFilteredSearch, loadLinkDetail, applyPendingQuery, setPendingQuery, setSelection,
-    addFilter, removeFilter, setFilterField, setFilterOp, setFilterValue, setFilterLogic, clearFilters,
+    addFilter, removeFilter, setFilterField, setFilterOp, setFilterValues, setFilterLogic, clearFilters,
     loadFieldValues, valueOptions, valueMeta, resetFieldValues,
     openCreate, openEdit, closeEdit, onEditSaved, removeRecord, importFile, exportExcel,
     openTransfer, closeTransfer, onTransferred, openCrossRefs, closeCrossRefs,
