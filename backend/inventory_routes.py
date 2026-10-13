@@ -236,6 +236,27 @@ def inventory_report(building: Optional[str] = Query(None, max_length=64),
     if building:
         rooms = rooms.filter(AR.Room.building == building)
     rooms = rooms.all()
+
+    # 🔴 性能：一次性算出「房间 → 已绑定设备数」，与 overview 同款 O(1) 口径。
+    # 绝不能在下面的循环里逐个调 _room_bound_codes —— 那个函数每次都全表扫
+    # device_relations + devices，882 个房间 = 882 次全表扫（实测 >90s 超时）。
+    exact, norm = AR._room_code_resolver(db)
+    counts: Dict[str, set] = {}
+    for rel in db.query(AR.DeviceRelation).filter(
+            AR.DeviceRelation.relation_type == AR._INV_LOCATE_LABEL).all():
+        tc = (rel.to_code or "").strip()
+        rc = exact.get(tc) or norm.get(AR._norm_room_code(tc))
+        if rc and rel.from_code:
+            counts.setdefault(rc, set()).add(rel.from_code)
+    room_by_id = {r.id: r.code for r in rooms}
+    for dc, rid in db.query(AR.Device.device_code, AR.Device.room_id) \
+            .filter(AR.Device.room_id.isnot(None)).all():
+        rc = room_by_id.get(rid)
+        if rc and dc:
+            counts.setdefault(rc, set()).add(dc)
+    for rc, st in counts.items():
+        st.discard(rc)
+
     rec_map = {r.room_code: r for r in db.query(RoomInventoryRecord).all()}
 
     total = 0
@@ -254,7 +275,7 @@ def inventory_report(building: Optional[str] = Query(None, max_length=64),
     for room in rooms:
         total += 1
         rec = rec_map.get(room.code)
-        expected = len(AR._room_bound_codes(db, room))
+        expected = len(counts.get(room.code, set()))
         expected_sum += expected
         if rec is None:
             pending += 1
@@ -280,6 +301,8 @@ def inventory_report(building: Optional[str] = Query(None, max_length=64),
         else:
             pending += 1
         scanned_sum += int(rec.scanned_count or 0)
+        if st == "abnormal":
+            diff_total += max(0, expected - int(rec.scanned_count or 0))
         if rec.operator:
             operator = rec.operator
         if rec.completed_at and (last_at is None or rec.completed_at > last_at):
