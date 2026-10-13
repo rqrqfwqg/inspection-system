@@ -23,7 +23,10 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from database import User
-from ops_errors import bad_request, forbidden, not_found, unprocessable, version_conflict
+from ops_errors import (
+    CODE_VERSION_CONFLICT, ApiError, bad_request, forbidden, not_found,
+    unprocessable, version_conflict,
+)
 from ops_rbac import has_permission
 from work_order_models import WorkOrder
 from work_order_refs import validate_device_code, validate_room_code
@@ -33,9 +36,10 @@ from work_order_repository import (
 )
 from work_order_schemas import WorkOrderCreate
 from work_order_state import (
-    EV_CLOSED, EV_CREATED, EV_FIELD_CHANGED, EV_REOPENED, EV_SYNC_CONFLICT,
-    REOPEN_FROM, REOPEN_TARGETS, ST_CLOSED, ST_IN_PROGRESS, ST_PENDING_DISPATCH,
-    ST_PENDING_REVIEW, action_meta, can_apply, review_action_name,
+    EV_CLOSED, EV_CREATED, EV_DISPATCHED, EV_FIELD_CHANGED, EV_REOPENED,
+    EV_SYNC_CONFLICT, REOPEN_FROM, REOPEN_TARGETS, ST_ASSIGNED, ST_CLOSED,
+    ST_IN_PROGRESS, ST_PENDING_DISPATCH, ST_PENDING_REVIEW,
+    action_meta, can_apply, review_action_name,
 )
 from work_order_serialize import serialize, serialize_event
 
@@ -160,6 +164,60 @@ def _apply_version_guard(wo: WorkOrder, expected_version: Optional[int]) -> None
 def _check_permission(actor: User, permission: str) -> None:
     if not has_permission(actor, permission):
         raise forbidden(f"缺少权限位 {permission}")
+
+
+def _assignee_name(db: Session, user_id: Optional[int]) -> str:
+    """占用者姓名（409 文案用）。查不到回退成「他人」——绝不暴露内部 id。"""
+    if user_id is None:
+        return "他人"
+    u = db.query(User).filter(User.id == int(user_id)).first()
+    name = (getattr(u, "name", None) or getattr(u, "username", None) or "").strip()
+    return name or "他人"
+
+
+def claim_work_order(db: Session, actor: User, wo_id: int, *,
+                     expected_version: Optional[int] = None) -> WorkOrder:
+    """抢单：把`pending_dispatch` 工单指派给**当前登录人**自己。
+
+    与 `dispatch`（指派给他人，权限位 wo.dispatch）的区别：
+
+    ==========  ==========================  ==============================
+    维度        dispatch                    claim（本函数）
+    ==========  ==========================  ==============================
+    权限位      wo.dispatch（仅调度/管理员）wo.execute（所有作业人员）
+    assignee    传参指定他人                强制 = actor.id，传不了
+    可见性      调度台内部使用              全域开放，谁先谁得
+    ==========  ==========================  ==============================
+
+    为什么不用 apply_action(action="dispatch")：dispatch 的 assignee_id 来自
+    请求体，客户端可传任意他人 id —— 抢单必须由服务端从 actor 推导，否则就是越权指派。
+
+    并发安全（两条保险都不能省）：
+    1) `_apply_version_guard` —— 版本不符抛 409（CAS 标准做法）；
+    2) 显式检查 status/assignee_id —— 若调用方不传 version（离线链路允许跳过
+       版本校验），仅有 CAS 仍可能两请求同时读到 pending_dispatch 而双写成功。
+    """
+    wo = _load(db, wo_id)
+    # 顺序铁律：权限 -> 版本 -> 状态机（与 apply_action 保持一致，别改）
+    _check_permission(actor, "wo.execute")
+    _apply_version_guard(wo, expected_version)
+
+    if wo.status != ST_PENDING_DISPATCH or wo.assignee_id is not None:
+        taken = _assignee_name(db, wo.assignee_id)
+        raise ApiError(409, CODE_VERSION_CONFLICT,
+                       f"工单 {wo.code} 已被{taken}接走，无法重复接单")
+
+    wo.assignee_id = actor.id
+    wo.status = ST_ASSIGNED
+    wo.version = int(wo.version) + 1
+    insert_event(db, work_order_id=wo.id, event_type=EV_DISPATCHED,
+                 from_status=ST_PENDING_DISPATCH, to_status=ST_ASSIGNED,
+                 actor_id=actor.id,
+                 payload={"assignee_id": actor.id, "claim": True},
+                 client_op_id=None)
+    db.commit()
+    db.refresh(wo)
+    return wo
 
 
 def apply_action(db: Session, actor: User, wo_id: int, action: str, *,

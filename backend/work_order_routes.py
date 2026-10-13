@@ -32,7 +32,9 @@ from work_order_schemas import (
     SyncResponse, WorkOrder, WorkOrderCreate, WorkOrderDetail, WorkOrderEvent,
     WorkOrderPage,
 )
-from work_order_service import apply_action, create_work_order, get_detail, list_page
+from work_order_service import (
+    apply_action, claim_work_order, create_work_order, get_detail, list_page,
+)
 from work_order_sync_service import sync_ops
 
 router = APIRouter(tags=["work-orders"])
@@ -110,6 +112,22 @@ def dispatch(wo_id: int, payload: DispatchRequest,
              actor: User = Depends(require_permission(PERM_DISPATCH))):
     return apply_action(db, actor, wo_id, "dispatch", payload=payload.model_dump(),
                         expected_version=payload.version)
+
+
+@router.post("/work-orders/{wo_id}/claim", response_model=WorkOrder,
+             summary="抢单（pending_dispatch → assigned，指派给自己）")
+def claim(wo_id: int, payload: Optional[StartRequest] = None,
+          db: Session = Depends(get_db),
+          actor: User = Depends(require_permission(PERM_EXECUTE))):
+    """抢单：谁接了就是谁的（全域开放，权限位是wo.execute 而非 wo.dispatch）。
+
+    复用 `StartRequest` 作为入参（只需 version 乐观锁，可选 note）——
+    刻意**不要求 assignee_id**：接单人是服务端从登录态推导的，客户端传了也不认。
+
+    409 = 已被别人接走，detail 内含占用者姓名，前端据此灰显「已被 X 接走」。
+    """
+    return claim_work_order(db, actor, wo_id,
+                            expected_version=payload.version if payload else None)
 
 
 @router.post("/work-orders/{wo_id}/start", response_model=WorkOrder,

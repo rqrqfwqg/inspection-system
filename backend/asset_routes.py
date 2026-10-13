@@ -4444,42 +4444,6 @@ def unbind_device_from_room(room_code: str, device_code: str,
             "room": _room_brief(room), "count": len(_room_bound_codes(db, room))}
 
 
-@router.post("/rooms/{room_code}/inventory/start")
-def start_room_inventory(room_code: str, data: RoomInventoryComplete,
-                         db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
-    """开始盘点：房间置 `doing`（幂等 upsert，不清已有扫码数）。
-
-    为什么需要它：4 态里的 `doing` 之前**没有任何端点能写入**，前端只能靠本机
-    存储模拟，换设备就丢。置 doing 后 overview 的 `doing_rooms` 才是真实值。
-
-    幂等语义：已是 doing 不刷新 started_at（保留首次开单时间）；
-    已 completed/abnormal 的房间**允许重新开单**（现场复盘场景），会重置 started_at。
-    """
-    room = _get_room_or_404(db, room_code)
-    count = len(_room_bound_codes(db, room))
-    now = datetime.now(timezone.utc)
-
-    rec = (db.query(RoomInventoryRecord)
-           .filter(RoomInventoryRecord.room_code == room.code).first())
-    if rec is None:
-        rec = RoomInventoryRecord(room_code=room.code, created_at=now)
-        db.add(rec)
-        rec.started_at = now
-    elif rec.status != "doing":
-        rec.started_at = now
-
-    rec.status = "doing"
-    rec.device_count = count
-    rec.operator = (data.operator or "").strip()[:64]
-    rec.source = ((data.source or "miniprogram").strip()[:32]) or "miniprogram"
-    rec.updated_at = now
-    db.commit()
-    db.refresh(rec)
-
-    return {"success": True, "room": _room_brief(room), "count": count,
-            "inspected": _inventory_record_brief(rec)}
-
-
 @router.post("/rooms/{room_code}/inventory/complete")
 def complete_room_inventory(room_code: str, data: RoomInventoryComplete,
                             db: Session = Depends(get_db), _: User = Depends(_get_current_user)):

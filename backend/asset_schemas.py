@@ -324,10 +324,19 @@ class RoomInventoryComplete(BaseModel):
 
     device_count 不作为入参：由服务端按「所在机房」绑定口径实时统计后快照，
     避免客户端口径与设备清单漂移；0 台设备时为 empty_confirmed 空房确认。
+
+    abnormal / abnormal_reason（2026-10-13 接通 4 态）：
+    - `abnormal=false`（默认）→ status 落 completed，行为与接入前完全一致；
+    - `abnormal=true`  → status 落 **abnormal**，且 `abnormal_reason` **必填**。
+      约定与打卡域 `remark_required` 一致：异常必须写明原因，否则事后无法统计。
+    - `scanned_count` 为本次实际扫码数（可空=不上报，后端保持原值不动）。
     """
     operator: str = ""
     remark: str = ""
     source: str = "miniprogram"
+    abnormal: bool = False
+    abnormal_reason: str = ""
+    scanned_count: int = -1        # -1 = 不上报（区别于「上报 0 台」）
 
 
 # ==================== 机身编号现场补录（批次③ T02 · §4.2/§4.4） ====================
