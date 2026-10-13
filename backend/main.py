@@ -29,6 +29,8 @@ from asset_link_routes import router as asset_link_router
 # 运维执行域（一期）：工单 + 备件联邦镜像（同库新表，隔离于资产台账）
 from work_order_routes import router as work_order_router
 from parts_routes import router as parts_router
+# 巡查打卡域：线路 + 节点 + 打卡（复用 work_orders 表，线路id 存 meta.route_id）
+from patrol_routes import router as patrol_router
 from ops_errors import register_error_handlers
 from ops_rbac import permissions_for
 from dependencies import get_current_user, require_admin, auth_disabled
@@ -118,6 +120,7 @@ api_router.include_router(asset_ledger_router)  # /ops/api/assets/asset-ledger..
 api_router.include_router(asset_link_router)    # /ops/api/assets/link...（可视化×数据表联动）
 api_router.include_router(work_order_router)    # /ops/api/work-orders...（工单 + 附件）
 api_router.include_router(parts_router)         # /ops/api/parts | /ops/api/inventory（命名空间别名）
+api_router.include_router(patrol_router)   # /ops/api/routes | /stats/patrol | 工单 PUT/DELETE/打卡
 
 # ==================== 健康检查 ====================
 
