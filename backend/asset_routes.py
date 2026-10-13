@@ -4209,14 +4209,22 @@ def _inventory_record_brief(rec) -> Optional[Dict[str, Any]]:
     """盘点完成记录 → 前端展示块；未盘点返回 None（前端据此显示「未盘点」）。"""
     if rec is None:
         return None
+    _st = rec.status or "completed"
+    if _st not in ("doing", "completed", "abnormal"):
+        _st = "completed"
     return {
         "inspected": True,
-        "status": rec.status or "completed",
+        "status": _st,
         "device_count": rec.device_count or 0,
+        "scanned_count": int(rec.scanned_count or 0),
+        "abnormal": bool(rec.abnormal),
+        "abnormal_reason": rec.abnormal_reason or "",
+        "diff_count": int(rec.diff_count or 0),
         "empty_confirmed": bool(rec.empty_confirmed),
         "operator": rec.operator or "",
         "remark": rec.remark or "",
         "source": rec.source or "",
+        "started_at": rec.started_at.isoformat() if rec.started_at else None,
         "completed_at": rec.completed_at.isoformat() if rec.completed_at else None,
     }
 
@@ -4300,10 +4308,22 @@ def rooms_inventory_overview(building: Optional[str] = None,
         if building and r.building != building:
             continue
         rec = rec_map.get(r.code)
-        out.append({**_room_brief(r), "device_count": len(counts.get(r.code, set())),
+        _exp = len(counts.get(r.code, set()))
+        # 4 态（2026-10-13 盘点重做）：无记录=pending；有记录按 status 走 doing/completed/abnormal
+        _st = (rec.status or "pending") if rec is not None else "pending"
+        if _st not in ("doing", "completed", "abnormal"):
+            _st = "completed" if rec is not None else "pending"
+        out.append({**_room_brief(r), "device_count": _exp,
                     "inspected": rec is not None,
+                    "inv_status": _st,
+                    "scanned_count": int(rec.scanned_count or 0) if rec else 0,
+                    "abnormal": bool(rec.abnormal) if rec else False,
+                    "abnormal_reason": (rec.abnormal_reason or "") if rec else "",
+                    "diff_count": max(0, _exp - int(rec.scanned_count or 0)) if (rec is not None and _st == "doing") else 0,
                     "inspected_at": (rec.completed_at.isoformat()
                                      if rec and rec.completed_at else None),
+                    "started_at": (rec.started_at.isoformat()
+                                   if rec and rec.started_at else None),
                     "inspector": (rec.operator if rec else "") or "",
                     "empty_confirmed": bool(rec.empty_confirmed) if rec else False})
     out.sort(key=lambda x: (-x["device_count"], x["building"], x["floor"], x["code"]))
@@ -4314,6 +4334,11 @@ def rooms_inventory_overview(building: Optional[str] = None,
         "inspected_rooms": sum(1 for x in out if x["inspected"]),
         "empty_inspected_rooms": sum(1 for x in out
                                      if x["inspected"] and x["device_count"] == 0),
+        # 4 态分布（与 GET /inventory/report 同口径，report 逐房间算，这里复用已算好的 out）
+        "pending_rooms": sum(1 for x in out if x["inv_status"] == "pending"),
+        "doing_rooms": sum(1 for x in out if x["inv_status"] == "doing"),
+        "completed_rooms": sum(1 for x in out if x["inv_status"] == "completed"),
+        "abnormal_rooms": sum(1 for x in out if x["inv_status"] == "abnormal"),
         "rooms": out,
     }
 
@@ -4419,14 +4444,16 @@ def unbind_device_from_room(room_code: str, device_code: str,
             "room": _room_brief(room), "count": len(_room_bound_codes(db, room))}
 
 
-@router.post("/rooms/{room_code}/inventory/complete")
-def complete_room_inventory(room_code: str, data: RoomInventoryComplete,
-                            db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
-    """标记房间「已盘点」（幂等 upsert，空房间同样可提交）。
+@router.post("/rooms/{room_code}/inventory/start")
+def start_room_inventory(room_code: str, data: RoomInventoryComplete,
+                         db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """开始盘点：房间置 `doing`（幂等 upsert，不清已有扫码数）。
 
-    - device_count 由服务端按「所在机房」绑定口径实时统计后**快照**，口径与设备清单一致；
-    - 0 台设备 → empty_confirmed=true，语义是「现场确认该房间无设备」，不阻断提交；
-    - 重复提交为更新（completed_at 刷新），支持同一房间反复盘点。
+    为什么需要它：4 态里的 `doing` 之前**没有任何端点能写入**，前端只能靠本机
+    存储模拟，换设备就丢。置 doing 后 overview 的 `doing_rooms` 才是真实值。
+
+    幂等语义：已是 doing 不刷新 started_at（保留首次开单时间）；
+    已 completed/abnormal 的房间**允许重新开单**（现场复盘场景），会重置 started_at。
     """
     room = _get_room_or_404(db, room_code)
     count = len(_room_bound_codes(db, room))
@@ -4437,10 +4464,55 @@ def complete_room_inventory(room_code: str, data: RoomInventoryComplete,
     if rec is None:
         rec = RoomInventoryRecord(room_code=room.code, created_at=now)
         db.add(rec)
+        rec.started_at = now
+    elif rec.status != "doing":
+        rec.started_at = now
 
-    rec.status = "completed"
+    rec.status = "doing"
+    rec.device_count = count
+    rec.operator = (data.operator or "").strip()[:64]
+    rec.source = ((data.source or "miniprogram").strip()[:32]) or "miniprogram"
+    rec.updated_at = now
+    db.commit()
+    db.refresh(rec)
+
+    return {"success": True, "room": _room_brief(room), "count": count,
+            "inspected": _inventory_record_brief(rec)}
+
+
+@router.post("/rooms/{room_code}/inventory/complete")
+def complete_room_inventory(room_code: str, data: RoomInventoryComplete,
+                            db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """标记房间「已盘点」（幂等 upsert，空房间同样可提交）。
+
+    - device_count 由服务端按「所在机房」绑定口径实时统计后**快照**，口径与设备清单一致；
+    - 0 台设备 → empty_confirmed=true，语义是「现场确认该房间无设备」，不阻断提交；
+    - 重复提交为更新（completed_at 刷新），支持同一房间反复盘点。
+    - abnormal=true → status 落 abnormal（异常终态），且 abnormal_reason **必填**。
+    """
+    room = _get_room_or_404(db, room_code)
+    count = len(_room_bound_codes(db, room))
+    now = datetime.now(timezone.utc)
+
+    abnormal = bool(data.abnormal)
+    reason = (data.abnormal_reason or "").strip()[:200]
+    if abnormal and not reason:
+        # 与打卡域 remark_required 同一约定：标异常必须写原因，否则事后无从统计
+        raise bad_request("标记盘点异常时必须填写异常原因")
+
+    rec = (db.query(RoomInventoryRecord)
+           .filter(RoomInventoryRecord.room_code == room.code).first())
+    if rec is None:
+        rec = RoomInventoryRecord(room_code=room.code, created_at=now)
+        db.add(rec)
+
+    rec.status = "abnormal" if abnormal else "completed"
     rec.device_count = count
     rec.empty_confirmed = (count == 0)
+    rec.abnormal = abnormal
+    rec.abnormal_reason = reason if abnormal else ""
+    if data.scanned_count is not None and data.scanned_count >= 0:
+        rec.scanned_count = int(data.scanned_count)
     rec.operator = (data.operator or "").strip()[:64]
     rec.remark = (data.remark or "").strip()[:500]
     rec.source = ((data.source or "miniprogram").strip()[:32]) or "miniprogram"
