@@ -31,6 +31,8 @@ from work_order_routes import router as work_order_router
 from parts_routes import router as parts_router
 # 巡查打卡域：线路 + 节点 + 打卡（复用 work_orders 表，线路id 存 meta.route_id）
 from patrol_routes import router as patrol_router
+# 盘点重做：4 态状态机 + 差异检测 + 盘点报告（独立模块，只读复用 asset_routes 内部工具）
+from inventory_routes import router as inventory_router
 from ops_errors import register_error_handlers
 from ops_rbac import permissions_for
 from dependencies import get_current_user, require_admin, auth_disabled
@@ -121,6 +123,7 @@ api_router.include_router(asset_link_router)    # /ops/api/assets/link...（可�
 api_router.include_router(work_order_router)    # /ops/api/work-orders...（工单 + 附件）
 api_router.include_router(parts_router)         # /ops/api/parts | /ops/api/inventory（命名空间别名）
 api_router.include_router(patrol_router)   # /ops/api/routes | /stats/patrol | 工单 PUT/DELETE/打卡
+api_router.include_router(inventory_router)  # /ops/api/rooms/{code}/inventory/{start,scan,submit} | /inventory/report
 
 # ==================== 健康检查 ====================
 

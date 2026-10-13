@@ -393,13 +393,22 @@ class RoomInventoryRecord(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     room_code = Column(String, unique=True, nullable=False, index=True)  # 真实 room.code
-    status = Column(String, default="completed")        # completed（预留 pending/partial）
+    # 盘点状态机（2026-10-13 起 4 态，原来只有 completed）：
+    #   pending   未盘   doing 进行中（已开单，扫了一部分）
+    #   completed 已完成 abnormal 有异常（扫不够/设备冲突且已填说明）
+    status = Column(String, default="completed")
     device_count = Column(Integer, default=0)           # 完成时该房间已绑定设备数快照
     empty_confirmed = Column(Boolean, default=False)    # 是否「现场确认本房间无设备」
     operator = Column(String, default="")               # 盘点人（免鉴权模式由端上报）
     source = Column(String, default="miniprogram")      # miniprogram / web
     remark = Column(String, default="")
     completed_at = Column(DateTime, default=datetime.now(timezone.utc))
+    # ── 盘点重做新增列（ALTER TABLE 已先行建好，列已存在则 create_all 不会动）──
+    scanned_count = Column(Integer, default=0)          # 本次实际扫码数
+    abnormal = Column(Boolean, default=False)           # 是否异常终态
+    abnormal_reason = Column(String, default="")        # 异常说明（abnormal=1 时必填）
+    started_at = Column(DateTime, nullable=True)        # 开单时间（doing 态起点）
+    diff_count = Column(Integer, default=0)             # 差异数（应扫 vs 实扫 差）
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
