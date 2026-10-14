@@ -402,7 +402,7 @@ const canAdd = computed(() => props.filters.length < MAX)
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-3);
+  padding: var(--space-2);
   min-width: 0;
 }
 
@@ -458,7 +458,7 @@ const canAdd = computed(() => props.filters.length < MAX)
 .rf__list {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-1);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -468,9 +468,9 @@ const canAdd = computed(() => props.filters.length < MAX)
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1) var(--space-2);
   min-width: 0;
-  padding: var(--space-2);
+  padding: var(--space-1) var(--space-2);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
   background: var(--surface-2);
@@ -512,9 +512,19 @@ const canAdd = computed(() => props.filters.length < MAX)
   min-width: 110px;
 }
 
+/*
+  值下拉本体。
+  🔴 父容器 `.rf__valuewrap` 是 `flex-direction: column`，本元素是它的子项——
+     在 column 容器里 `flex-basis` 作用在**高度**上，不是宽度。
+     原先这里写 `flex: 1 1 260px`（本意是「占满剩余宽度」），
+     实际效果是**高度被撑到 260px** 且 flex-grow 继续拉伸，
+     于是每个条件行都长出一大块空白（实测每行约 260px 高，只放得下两个小控件）。
+     宽度在 column 容器里属于交叉轴，用 `width: 100%` 控制；高度交给内容。
+*/
 .rf__value {
-  flex: 1 1 260px;
-  min-width: 180px;
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
 }
 
 /* 多选 tag：值可能很长（实测 161 字符），截断 + title 兜底，避免撑爆整行 */
@@ -532,7 +542,7 @@ const canAdd = computed(() => props.filters.length < MAX)
 .rf__valuewrap {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: 2px;
   flex: 1 1 260px;
   min-width: 180px;
 }
