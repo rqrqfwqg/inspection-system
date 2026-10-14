@@ -6,7 +6,7 @@
  * 避免 React 版里「基础信息表 + 资料记录表」两套列渲染各写一遍。
  *
  * 防压扁 / 溢出纪律（UIUX §6.4 / §6.6）：
- *  - 列宽**只用 min-width**（EP 按比例分配）；唯一允许写 `width` 的是复选框列与操作列；
+ *  - 列宽**只用 min-width**（EP 按比例分配）；唯一允许写 `width` 的是复选框列、序号列与操作列；
  *  - 横滚只发生在本地 `.data-table-wrap` 容器，绝不写「整表最小宽度」（AS-7 / AC-06）；
  *  - 动态列默认 `show-overflow-tooltip`，编号类字段走 `.code-break` 强制断行不省略（编号少一位就查不到）；
  *  - 单元格取值一律走 `@/lib/format#fmtValue`（全站唯一格式化口径），空值恒呈现为「—」。
@@ -120,10 +120,18 @@ watch(
   },
 )
 
-/** 列定义：字段定义优先；无字段定义时回落到首条记录的 data 键（后端字段名未冻结，原样展示） */
+/**
+ * 列定义：字段定义优先；无字段定义时回落到首条记录的 data 键（后端字段名未冻结，原样展示）。
+ * 🔴 `seq`（序号）不是数据属性，是纯展示字段（2026-10-14 用户明确口径）：行号由本组件
+ *    首列自动生成，故这里显式剔除 —— 否则会「首列自动序号 + 数据列又一个序号」两列重号。
+ */
 const columns = computed(() => {
-  if (props.fields.length > 0) return props.fields.map((f) => ({ key: f.key, label: f.label }))
-  return Object.keys(props.records[0]?.data ?? {}).map((key) => ({ key, label: key }))
+  if (props.fields.length > 0) {
+    return props.fields.filter((f) => f.key !== 'seq').map((f) => ({ key: f.key, label: f.label }))
+  }
+  return Object.keys(props.records[0]?.data ?? {})
+    .filter((key) => key !== 'seq')
+    .map((key) => ({ key, label: key }))
 })
 
 const hasActions = computed(
@@ -169,6 +177,12 @@ function onRowClick(row: RecordItem) {
         @selection-change="onSelectionChange"
         @row-click="onRowClick"
       >
+        <!-- 序号：纯展示列（非数据属性，所有表一致）—— 行号 = 当前列表中的位置，
+             分页续拉 / 服务端搜索下随当前页集连续编号，不落库、不导出 -->
+        <el-table-column label="序号" width="56" align="center" class-name="drt__col-seq">
+          <template #default="{ $index }">{{ $index + 1 }}</template>
+        </el-table-column>
+
         <el-table-column v-if="selectable" type="selection" width="44" :selectable="() => true" />
 
         <el-table-column v-if="canOpenDevice" label="关联键" min-width="170">
@@ -363,6 +377,12 @@ function onRowClick(row: RecordItem) {
 
 .drt :deep(.el-table__cell) {
   vertical-align: middle;
+}
+
+/* 序号列：纯展示，弱化处理 + 等宽数字（避免 10/11 行宽度跳动） */
+.drt :deep(.drt__col-seq .cell) {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .drt :deep(.drt__row--clickable) {

@@ -3495,6 +3495,8 @@ def seed_assets(db: Session):
     #  - 真实列在前（保证导入 1:1 映射）；其后补充「市场同类子系统标准台账字段」（设备名称/厂家/型号/
     #    投运日期/责任人/备注等），现场可按需补全，体现“可现场继续完善”。
     #  - 关联键（is_relation_key）取各台账的主编号列，导入时自动成为 Record.device_code。
+#  - 🔴 不定义 `seq`（序号）字段：序号是纯展示属性（表格行号），由前端首列自动生成；
+#    建成数据字段会出现「自动序号 + 数据序号」两列重号（2026-10-14 用户明确，所有表一致）。
 
     # 供配电系统 · 电柜清单（源自《GTC和停车楼电柜清单-统计汇总.xlsx》- 原始数据）
     add_table("power", "power_cabinets", "电柜清单", [
@@ -3521,7 +3523,6 @@ def seed_assets(db: Session):
     # 机房/房间主数据（源自《机房信息汇总.xlsx》，被电柜与 BA 设备引用；跨系统复用）
     add_table("power", "room_master", "机房信息汇总", [
         ("room_code", "机房编号", "device_ref", [], True, True),
-        ("seq", "序号", "number", [], False, False),
         ("building", "楼栋", "select", ["GTC", "东停车楼", "西停车楼", "南停车楼"], False, False),
         ("floor", "楼层", "text", [], False, False),
         ("room_name", "机房名称", "text", [], False, False),
@@ -3538,7 +3539,6 @@ def seed_assets(db: Session):
     add_table("hvac", "ba_hvac", "暖通BA点表", [
         ("device_code", "设备编号", "device_ref", [], True, True),
         ("category", "来源类别", "select", ["VRV空调", "一体化空调", "排风机", "市政排风"], False, False),
-        ("seq", "序号", "number", [], False, False),
         ("group", "组别", "text", [], False, False),
         ("floor", "层", "text", [], False, False),
         ("room", "房间", "text", [], False, False),
@@ -3557,7 +3557,6 @@ def seed_assets(db: Session):
     # BA 系统 · 潜污泵（water，源自 潜污泵）
     add_table("water", "ba_submersible_pump", "潜污泵", [
         ("device_code", "设备编号", "device_ref", [], True, True),
-        ("seq", "序号", "number", [], False, False),
         ("group", "组别", "text", [], False, False),
         ("floor", "层", "text", [], False, False),
         ("auto_manual", "手自动", "select", ["自动", "手动", "关机"], False, False),
@@ -3572,11 +3571,10 @@ def seed_assets(db: Session):
 
     # BA 系统 · 弱电气体监测点表（weak，2026-09-15 由 一氧化碳检测/管廊气体监测 两表合一）
     # 独立成表，不并入 weak_devices：后者是资产台账字段（品牌型号/位置/使用部门…），
-    # 本表是 BA 监控点位字段（序号/组别/阈值/状态），跨层合会污染台账层次。
+    # 本表是 BA 监控点位字段（组别/阈值/状态），跨层合会污染台账层次。
     add_table("weak", "ba_gas_monitor", "气体监测BA点表", [
         ("device_code", "设备编号", "device_ref", [], True, True),
         ("category", "来源类别", "select", ["一氧化碳检测", "管廊气体监测"], False, False),
-        ("seq", "序号", "number", [], False, False),
         ("group", "组别", "text", [], False, False),
         ("floor", "层", "text", [], False, False),
         ("status", "状态", "select", ["在线", "离线", "设备不在线", "正常", "故障"], False, False),
@@ -3591,7 +3589,6 @@ def seed_assets(db: Session):
     # BA 系统 · 问题清单（weak，源自 问题清单；device_code 取被报修的 BA 设备编号，实现“设备→问题”聚合）
     add_table("weak", "ba_issue_list", "BA问题清单", [
         ("device_code", "设备编号", "device_ref", [], True, True),
-        ("seq", "序号", "number", [], False, False),
         ("subsystem", "所属系统", "text", [], False, False),
         ("group_area", "组别/区域", "text", [], False, False),
         ("location", "位置", "text", [], False, False),
