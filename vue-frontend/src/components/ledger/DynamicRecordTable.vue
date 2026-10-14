@@ -10,6 +10,12 @@
  *  - 横滚只发生在本地 `.data-table-wrap` 容器，绝不写「整表最小宽度」（AS-7 / AC-06）；
  *  - 动态列默认 `show-overflow-tooltip`，编号类字段走 `.code-break` 强制断行不省略（编号少一位就查不到）；
  *  - 单元格取值一律走 `@/lib/format#fmtValue`（全站唯一格式化口径），空值恒呈现为「—」。
+ *
+ * 列序可拖（2026-10-14 用户要求「手动调整表格的字段位置，横向拖动」）：
+ *  - 数据列（字段列）的表头可按住横向拖动换序；序号 / 复选框 / 关联键 / 操作列不参与拖动；
+ *  - 顺序按表持久化在 localStorage（键 = `orderKey`，缺省退化为表名 title），
+ *    字段集变化（增列）时：已存顺序中仍存在的键保持原位，新字段按默认序补尾部；
+ *  - 只影响显示顺序，不写后端、不改字段定义的 sort_order。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
@@ -23,6 +29,8 @@ const props = withDefaults(
     title: string
     records: RecordItem[]
     fields: FieldDef[]
+    /** 列序持久化的键（缺省退化为 title；同表名跨子系统时可由调用方传 tableId 消歧） */
+    orderKey?: string
     /** 多选（批量转移用） */
     selectable?: boolean
     selectedIds?: number[]
@@ -134,6 +142,118 @@ const columns = computed(() => {
     .map((key) => ({ key, label: key }))
 })
 
+/* ============================ 列序：表头横向拖动换序 ============================ */
+/** localStorage 键前缀（v1：格式变更时升版本号作废旧数据） */
+const ORDER_STORAGE_PREFIX = 'drt.colorder.v1.'
+
+const orderKey = computed(() => props.orderKey || props.title || '')
+
+/** 当前生效的列序（字段 key 的有序列表；与 columns 的默认序对齐初始化） */
+const order = ref<string[]>([])
+/** 正在被拖动的字段 key / 拖放悬停的目标字段 key（表头高亮用） */
+const dragKey = ref('')
+const overKey = ref('')
+
+/**
+ * 读取持久化列序并与当前字段集合并：
+ *  - 已存键中仍存在的保持原位；字段集变了（新增列）时新键按默认序补尾部；
+ *  - localStorage 不可用（隐私模式等）或解析失败 → 静默回落默认序，绝不弹错。
+ */
+function loadOrder(keys: string[]): string[] {
+  if (!orderKey.value) return keys
+  try {
+    const raw = localStorage.getItem(ORDER_STORAGE_PREFIX + orderKey.value)
+    if (!raw) return keys
+    const saved = JSON.parse(raw)
+    if (!Array.isArray(saved)) return keys
+    const kept = saved.filter((k): k is string => typeof k === 'string' && keys.includes(k))
+    return [...kept, ...keys.filter((k) => !kept.includes(k))]
+  } catch {
+    return keys
+  }
+}
+
+function persistOrder(next: string[]) {
+  if (!orderKey.value) return
+  try {
+    localStorage.setItem(ORDER_STORAGE_PREFIX + orderKey.value, JSON.stringify(next))
+  } catch {
+    /* 存储被禁 / 配额满：仅本次会话生效，不阻断拖动本身 */
+  }
+}
+
+/** 默认列序（字段 key 列表）：表切换 / 字段集变化时重算 */
+const baseKeys = computed(() => columns.value.map((c) => c.key))
+
+watch([orderKey, baseKeys], ([, keys]) => {
+  order.value = loadOrder(keys)
+}, { immediate: true })
+
+/** 实际渲染的列：按 order 重排（order 未覆盖的键按默认序兜底补尾部） */
+const visibleColumns = computed(() => {
+  const byKey = new Map(columns.value.map((c) => [c.key, c]))
+  const out = order.value.map((k) => byKey.get(k)).filter((c) => c !== undefined)
+  for (const c of columns.value) {
+    if (!order.value.includes(c.key)) out.push(c)
+  }
+  return out
+})
+
+/** 列头/列身的拖动态样式类（只高亮表头，故 CSS 里限定 th） */
+function colClass(key: string): string {
+  if (key === dragKey.value) return 'drt__col-src'
+  if (key === overKey.value) return 'drt__col-over'
+  return ''
+}
+
+function clearDragState() {
+  dragKey.value = ''
+  overKey.value = ''
+}
+
+/** 把 from 列移动到 to 列的位置（HTML5 DnD：dragstart 记来源，drop 时换序） */
+function moveColumn(from: string, to: string) {
+  if (!from || !to || from === to) return
+  const next = [...order.value]
+  const fi = next.indexOf(from)
+  const ti = next.indexOf(to)
+  if (fi === -1 || ti === -1) return
+  next.splice(fi, 1)
+  next.splice(ti, 0, from)
+  order.value = next
+  persistOrder(next)
+}
+
+function onDragStart(e: DragEvent, key: string) {
+  dragKey.value = key
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', key)
+  }
+}
+
+function onDragOver(e: DragEvent, key: string) {
+  if (!dragKey.value || dragKey.value === key) return
+  // 必须 preventDefault，否则浏览器不触发 drop
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  overKey.value = key
+}
+
+function onDragLeave(key: string) {
+  if (overKey.value === key) overKey.value = ''
+}
+
+function onDrop(e: DragEvent, key: string) {
+  e.preventDefault()
+  moveColumn(dragKey.value, key)
+  clearDragState()
+}
+
+function onDragEnd() {
+  clearDragState()
+}
+
 const hasActions = computed(
   () => props.canEdit || props.canDelete || props.canTransfer || props.canCrossRefs,
 )
@@ -201,12 +321,26 @@ function onRowClick(row: RecordItem) {
         </el-table-column>
 
         <el-table-column
-          v-for="col in columns"
+          v-for="col in visibleColumns"
           :key="col.key"
           :label="col.label"
           :min-width="columnWidth(col.key)"
+          :class-name="colClass(col.key)"
           show-overflow-tooltip
         >
+          <!-- 表头即可拖动手柄：按住横向拖动换序（顺序按表持久化，见脚本区列序说明） -->
+          <template #header>
+            <span
+              class="drt__col-drag"
+              draggable="true"
+              :title="`拖动调整「${col.label}」列的位置`"
+              @dragstart="onDragStart($event, col.key)"
+              @dragover="onDragOver($event, col.key)"
+              @dragleave="onDragLeave(col.key)"
+              @drop="onDrop($event, col.key)"
+              @dragend="onDragEnd"
+            >{{ col.label }}</span>
+          </template>
           <template #default="{ row }">
             <span :class="isCodeLike(col.key) ? 'mono break-code' : ''">{{ fmtValue(row.data?.[col.key]) }}</span>
           </template>
@@ -383,6 +517,27 @@ function onRowClick(row: RecordItem) {
 .drt :deep(.drt__col-seq .cell) {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
+}
+
+/* 列序拖动：表头文本即手柄；拖动中源列半透、悬停目标列左侧亮线 */
+.drt__col-drag {
+  display: block;
+  overflow: hidden;
+  cursor: grab;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+.drt__col-drag:active {
+  cursor: grabbing;
+}
+
+.drt :deep(th.drt__col-src) {
+  opacity: 0.55;
+}
+
+.drt :deep(th.drt__col-over) {
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .drt :deep(.drt__row--clickable) {
