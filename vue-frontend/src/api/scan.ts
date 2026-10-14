@@ -27,6 +27,8 @@ import type {
   BindDeviceResult,
   BindDeviceOutcome,
   UnbindDeviceResult,
+  RoomDeviceMergeDryRun,
+  RoomDeviceMergeResult,
 } from '@/types/scan'
 
 const BASE = '/assets'
@@ -198,6 +200,36 @@ export async function scanBindDeviceToRoom(
     return { conflict: true, room_code: roomCode2, message: detail || '该设备已归属其他机房' }
   }
   throw new Error(detail || `绑定失败 (${resp.status})`)
+}
+
+/**
+ * POST /assets/rooms/{roomCode}/devices/merge —— 同一房间内合并两台设备（减少台账同类项）。
+ *
+ * dryRun=true 只预演不写库，供弹窗在用户确认前把影响面摊开看；
+ * 预演与执行是后端同一个函数，数字必然一致。
+ * 用原生 fetch 是为了把 409（跨房间，须先改挂）与 400（参数/同编号）原样抛给弹窗提示，
+ * 不吞成「合并失败」这种无用文案。
+ */
+export async function scanMergeRoomDevices(
+  roomCode: string,
+  payload: { keep_code: string; merge_code: string; remark?: string; dry_run?: boolean },
+): Promise<RoomDeviceMergeResult | RoomDeviceMergeDryRun> {
+  const resp = await fetch(
+    `${API_BASE}${BASE}/rooms/${encodeURIComponent(roomCode)}/devices/merge`,
+    {
+      method: 'POST',
+      headers: authHeaders(true),
+      body: JSON.stringify({
+        keep_code: payload.keep_code,
+        merge_code: payload.merge_code,
+        remark: payload.remark ?? '',
+        dry_run: payload.dry_run ?? false,
+      }),
+    },
+  )
+  const data = await resp.json().catch(() => ({} as Record<string, unknown>))
+  if (resp.ok) return data as RoomDeviceMergeResult | RoomDeviceMergeDryRun
+  throw new Error(String((data as { detail?: unknown })?.detail ?? `合并失败 (${resp.status})`))
 }
 
 /**

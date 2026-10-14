@@ -1,5 +1,5 @@
 """分系统资料管理 · Pydantic Schemas"""
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Optional, List, Any, Dict, Literal
 
 
@@ -305,6 +305,36 @@ class RoomDeviceBind(BaseModel):
     """
     device_code: str
     move: bool = False
+
+
+class RoomDeviceMerge(BaseModel):
+    """同房间内两台设备合并为一台（减少台账同类项）。
+
+    语义：`keep_code` 为主设备（合并后保留），`merge_code` 为被合并掉的旧编号。
+    两台设备**必须已在同一房间**，否则 409——跨房间合并会静默改变另一间的归属，
+    属于现场误操作，必须让用户先改挂再合并。
+
+    dry_run=True 只预演不改数据：返回将要改写的记录数 / 别名动作，
+    供弹窗在确认前把影响面摊给用户看（预演与执行走同一函数，数字必然一致）。
+    """
+    keep_code: str
+    merge_code: str
+    dry_run: bool = False
+    # 现场备注：为什么把这两台认成同一台（写进 device_aliases.remark，便于回溯）
+    remark: str = ""
+
+
+class RoomDeviceMergePlan(BaseModel):
+    """合并预演结果（前端弹窗展示「将要发生什么」）。"""
+    room_code: str
+    keep: Dict[str, Any]
+    merge: Dict[str, Any]
+    relation_key: Optional[str] = None
+    records_to_rewrite: int = 0
+    record_ids: List[int] = Field(default_factory=list)
+    relations_to_move: int = 0
+    alias_exists: bool = False
+    already_merged: bool = False
 
 
 # ==================== 设备现场照片（扫码补录 P0） ====================

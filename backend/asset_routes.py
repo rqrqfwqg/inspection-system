@@ -35,7 +35,7 @@ from asset_schemas import (
     RelationTypeResponse,
     BulkRecordCreate, BulkRecordItem,
     SearchResult, DevicePhotoResponse,
-    RoomDeviceBind, RoomInventoryComplete,
+    RoomDeviceBind, RoomInventoryComplete, RoomDeviceMerge,
     TransferMappingItem, TransferMappingResponse, RecordTransferRequest,
 )
 # 鉴权统一收口到 dependencies（消除与 main.py 的重复实现）
@@ -43,7 +43,10 @@ from dependencies import get_current_user as _get_current_user, require_admin as
 # 数据导入引擎：把上传的 Excel 解析并落库（自包含，避免循环依赖）
 from import_engine import import_workbook, detect_template, TEMPLATE_INFO
 # 设备编号别名归一内核：写路径统一收口，防止已合并的旧编号被重新写回
-from device_alias_normalizer import resolve_device_code, get_normalizer, reset_normalizer
+from device_alias_normalizer import (
+    resolve_device_code, get_normalizer, reset_normalizer,
+    rewrite_relation_key_value, plan_relation_key_rewrite,
+)
 # 数据表记录的结构化条件筛选：JSON 条件 → SQL 谓词（字段名白名单 + 值绑定，绝不拼 SQL）
 from record_filters import (
     parse_filters, parse_logic, build_filter_clause, build_search_clause,
@@ -4439,6 +4442,206 @@ def unbind_device_from_room(room_code: str, device_code: str,
 
     return {"success": True, "removed": removed, "device_code": code,
             "room": _room_brief(room), "count": len(_room_bound_codes(db, room))}
+
+
+# =====================================================================
+# 同房间设备合并（减少台账同类项）
+# ---------------------------------------------------------------------
+# 场景：现场盘点发现同一间房里两台设备其实是同一台，只是有两个编号
+#      （如移交编号 / 新编号 / 标签号各一个），台账因此多出一条同类项。
+# 动作：keep_code 为主设备，merge_code 并入它，写一条 device_aliases(source='merge')。
+#
+# 三条红线（与 device_alias_normalizer 的不变式一致）：
+#  ① **绝不删数据**：只改编号归属，不删记录、不删固定资产行；旧编号靠别名继续可查。
+#  ② **必须同房间**：跨房间合并会静默改变另一间房的归属，属现场误操作 → 409，
+#     让用户先把设备改挂到同一房间再合并。
+#  ③ **JSON 关联键必须同步改写**：否则下次导入/编辑同一条记录时旧编号被写回、
+#     旧设备"复活"、台账总数反弹。预演与执行共用 plan_relation_key_rewrite，
+#     保证弹窗里看到的数字 = 实际发生的结果。
+# =====================================================================
+
+def _merge_relation_key(db: Session) -> Optional[str]:
+    """取关联键字段名（`is_relation_key=1`）；一张表只能有一个，取第一个。"""
+    fd = (db.query(FieldDef)
+          .filter(FieldDef.is_relation_key.is_(True))
+          .order_by(FieldDef.id.asc()).first())
+    return fd.key if fd else None
+
+
+def _merge_plan(db: Session, room: Room, keep_code: str, merge_code: str) -> Dict[str, Any]:
+    """合并预演：算出将要发生的全部改动（dry_run 与正式执行共用，保证数字一致）。"""
+    rel_key = _merge_relation_key(db)
+    rows = [(r.id, r.data, r.table_id) for r in
+            db.query(Record).filter(Record.device_code == merge_code).all()]
+    plan = plan_relation_key_rewrite(rows, rel_key, merge_code, keep_code)
+
+    # 旧编号身上除「所在机房」外的其它关系边，一并改指向主设备（否则旧编号孤立）
+    other_edges = (db.query(DeviceRelation)
+                   .filter(DeviceRelation.from_code == merge_code,
+                           DeviceRelation.relation_type != _INV_LOCATE_LABEL)
+                   .count())
+    alias = (db.query(DeviceAlias)
+             .filter(DeviceAlias.alias_code == merge_code).first())
+    already = bool(alias and alias.canonical_code == keep_code)
+
+    info = {r["device_code"]: r for r in _inventory_device_rows(db, {keep_code, merge_code})}
+    return {
+        "room_code": room.code,
+        "keep": info.get(keep_code, {"device_code": keep_code}),
+        "merge": info.get(merge_code, {"device_code": merge_code}),
+        "relation_key": rel_key,
+        "records_to_rewrite": plan["count"],
+        "record_ids": plan["record_ids"],
+        "relations_to_move": other_edges,
+        "alias_exists": bool(alias),
+        "already_merged": already,
+    }
+
+
+@router.post("/rooms/{room_code}/devices/merge")
+def merge_room_devices(room_code: str, data: RoomDeviceMerge,
+                       db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """同一房间内合并两台设备（keep_code 保留，merge_code 并入）。
+
+    - `dry_run=true`：只返回将要发生的改动，不写库（前端弹窗确认前用）
+    - 幂等：merge_code 已是 keep_code 的别名时直接返回 already_merged，不重复写
+    - 事务：别名 / 记录 / 关系边的改动在**同一个事务**里，任一步失败整体回滚
+    """
+    room = _get_room_or_404(db, room_code)
+
+    keep_raw = (data.keep_code or "").strip()
+    merge_raw = (data.merge_code or "").strip()
+    if not keep_raw or not merge_raw:
+        raise HTTPException(status_code=400, detail="请同时指定保留设备与被合并设备编号")
+    if keep_raw == merge_raw:
+        raise HTTPException(status_code=400, detail="两个编号相同，无需合并")
+
+    # 归一：允许用别名/移交编号指定，落库一律用规范编号
+    keep_code = resolve_device_code(db, keep_raw)
+    merge_code = resolve_device_code(db, merge_raw)
+    if keep_code == merge_code:
+        # 归一后两者相同，只可能是「merge_raw 已是 keep_raw 的别名」= 之前已合并过。
+        # 🔴 这里必须判成幂等成功而不是 400：用户重复点合并、或换个旧编号再点一次，
+        #    都应该得到「已合并」这个明确答复，而不是一句令人困惑的「无需合并」报错。
+        al = (db.query(DeviceAlias)
+              .filter(DeviceAlias.alias_code == merge_raw).first())
+        if al is not None and al.canonical_code == keep_code:
+            return {"success": True, "already_merged": True,
+                    "canonical_code": keep_code, "merged_code": merge_raw,
+                    "device": (_inventory_device_rows(db, {keep_code}) or
+                               [{"device_code": keep_code}])[0],
+                    "room": _room_brief(room),
+                    "count": len(_room_bound_codes(db, room))}
+        raise HTTPException(
+            status_code=400,
+            detail=f"两个编号指向同一台设备（{keep_code}），无需合并")
+
+    # 存在性：两台都要能查到（仅台账资料里存在的设备也算）
+    keep_dev = _resolve_device_by_code_or_alias(db, keep_code)
+    merge_dev = _resolve_device_by_code_or_alias(db, merge_code)
+    if keep_dev is None and merge_dev is None:
+        raise HTTPException(status_code=404, detail=f"未找到设备：{keep_code} / {merge_code}")
+
+    # 红线②：必须同房间
+    bound = _room_bound_codes(db, room)
+    keep_room = _device_bound_room_code(db, keep_code)
+    merge_room = _device_bound_room_code(db, merge_code)
+    for code, r in ((keep_code, keep_room), (merge_code, merge_room)):
+        if r and r != room.code:
+            other = db.query(Room).filter(Room.code == r).first()
+            raise HTTPException(
+                status_code=409,
+                detail=f"设备 {code} 当前归属机房 {r}"
+                       f"（{other.name if other else ''}），请先改挂到 {room.code} 再合并")
+    for code in (keep_code, merge_code):
+        if code not in bound:
+            raise HTTPException(
+                status_code=400, detail=f"设备 {code} 不在本房间 {room.code} 的绑定清单里")
+
+    plan = _merge_plan(db, room, keep_code, merge_code)
+    if data.dry_run:
+        return {"dry_run": True, "plan": plan}
+
+    # 幂等：已经是 keep 的别名就不重做（重复点合并不会产生第二条别名）
+    if plan["already_merged"]:
+        db.commit()
+        return {"success": True, "already_merged": True, "plan": plan,
+                "room": _room_brief(room), "count": len(_room_bound_codes(db, room))}
+
+    # ---- 1) 写别名：merge_code → keep_code（alias_code 唯一，撞车则先删旧映射）
+    old_alias = (db.query(DeviceAlias)
+                 .filter(DeviceAlias.alias_code == merge_code).first())
+    if old_alias is not None:
+        db.delete(old_alias)
+    db.add(DeviceAlias(
+        canonical_code=keep_code,
+        alias_code=merge_code,
+        source="merge",
+        remark=(data.remark or "").strip()[:200],
+    ))
+    db.flush()
+
+    # ---- 2) 记录改挂：列 + JSON 关联键（两者都改，否则旧编号会被写回复活）
+    rel_key = plan["relation_key"]
+    recs = db.query(Record).filter(Record.device_code == merge_code).all()
+    rewritten = 0
+    for rec in recs:
+        rec.device_code = keep_code
+        if rel_key:
+            new_data, changed = rewrite_relation_key_value(rec.data, rel_key, merge_code, keep_code)
+            if changed:
+                rec.data = new_data
+                rewritten += 1
+
+    # ---- 3) 关系边：旧编号的非位置边改指向主设备；位置边删掉（主设备已有本房间位置边）
+    moved_edges = (db.query(DeviceRelation)
+                   .filter(DeviceRelation.from_code == merge_code,
+                           DeviceRelation.relation_type != _INV_LOCATE_LABEL)
+                   .all())
+    for rel in moved_edges:
+        rel.from_code = keep_code
+    db.query(DeviceRelation).filter(
+        DeviceRelation.from_code == merge_code,
+        DeviceRelation.relation_type == _INV_LOCATE_LABEL,
+    ).delete(synchronize_session=False)
+    # 反向边（别人 → 旧编号）也改指向主设备，避免出现指向已合并编号的悬边
+    for rel in db.query(DeviceRelation).filter(DeviceRelation.to_code == merge_code).all():
+        rel.to_code = keep_code
+
+    # ---- 4) 主设备补齐台账登记（keep 只有台账资料、merge 有 devices 行时并过来）
+    keep_row = keep_dev or db.query(Device).filter(Device.device_code == keep_code).first()
+    merge_row = merge_dev or db.query(Device).filter(Device.device_code == merge_code).first()
+    if keep_row is None and merge_row is not None:
+        merge_row.device_code = keep_code
+        db.flush()
+    elif keep_row is not None:
+        if keep_row.room_id is None:
+            keep_row.room_id = room.id
+            keep_row.building = room.building
+            keep_row.floor = room.floor
+        keep_row.updated_at = datetime.now(timezone.utc)
+        if merge_row is not None and merge_row is not keep_row:
+            # 主设备缺子系统时继承旧设备，避免合并后子系统变空
+            if keep_row.subsystem_id is None and merge_row.subsystem_id is not None:
+                keep_row.subsystem_id = merge_row.subsystem_id
+            db.delete(merge_row)
+
+    db.commit()
+    # 合并改了别名表 → 归一器缓存必须失效，否则本次合并的旧编号仍解析成旧值
+    reset_normalizer()
+
+    info = _inventory_device_rows(db, {keep_code})
+    return {
+        "success": True,
+        "already_merged": False,
+        "canonical_code": keep_code,
+        "merged_code": merge_code,
+        "records_rewritten": rewritten,
+        "relations_moved": len(moved_edges),
+        "device": info[0] if info else {"device_code": keep_code},
+        "room": _room_brief(room),
+        "count": len(_room_bound_codes(db, room)),
+    }
 
 
 @router.post("/rooms/{room_code}/inventory/complete")

@@ -180,6 +180,49 @@ export interface RoomDevicesResult {
   devices: InventoryDeviceRow[]
 }
 
+/**
+ * 合并预演结果（同房间设备合并 · 弹窗展示「将要发生什么」）。
+ * 与正式执行走**同一个**后端函数，所以这里的数字 = 点确认后的实际结果。
+ */
+export interface RoomDeviceMergePlan {
+  room_code: string
+  /** 保留的主设备 */
+  keep: InventoryDeviceRow
+  /** 被并入的旧设备 */
+  merge: InventoryDeviceRow
+  /** 资料表里作为「记录归属依据」的关联键字段名 */
+  relation_key: string | null
+  /** 将被改挂到主设备的资料记录条数 */
+  records_to_rewrite: number
+  record_ids: number[]
+  /** 旧编号身上将被改指向主设备的关系边数 */
+  relations_to_move: number
+  /** 该旧编号已有别名映射（可能是指向别的设备） */
+  alias_exists: boolean
+  /** 已经合并过了（本次是空操作） */
+  already_merged: boolean
+}
+
+/** POST /assets/rooms/{code}/devices/merge —— dry_run=true 的响应 */
+export interface RoomDeviceMergeDryRun {
+  dry_run: true
+  plan: RoomDeviceMergePlan
+}
+
+/** POST /assets/rooms/{code}/devices/merge —— 正式执行响应 */
+export interface RoomDeviceMergeResult {
+  success: boolean
+  /** 之前已合并过，本次空操作 */
+  already_merged: boolean
+  canonical_code: string
+  merged_code: string
+  records_rewritten?: number
+  relations_moved?: number
+  device: InventoryDeviceRow
+  room: RoomBrief
+  count: number
+}
+
 /** 盘点进度行（房间 + 已绑定设备数） */
 export interface RoomInventoryRow extends RoomBrief {
   device_count: number

@@ -12,11 +12,15 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { CircleCheckFilled, CircleCloseFilled, Refresh, Search } from '@element-plus/icons-vue'
+import { CircleCheckFilled, CircleCloseFilled, Connection, Refresh, Search } from '@element-plus/icons-vue'
 import PageHead from '@/components/common/PageHead.vue'
 import RoomPicker from '@/components/scan/RoomPicker.vue'
 import RoomDeviceList from '@/components/scan/RoomDeviceList.vue'
 import ScanInput from '@/components/scan/ScanInput.vue'
+import DeviceMergeDialog from '@/components/scan/DeviceMergeDialog.vue'
+import DeviceDetailDrawer from '@/components/device/DeviceDetailDrawer.vue'
+import { getAssetLedgerDetail } from '@/api/assetLedger'
+import type { AssetLedgerDetail } from '@/types/assetLedger'
 import {
   scanBindDeviceToRoom, scanInventoryOverview, scanRoomDevices, scanRooms, scanUnbindDeviceFromRoom,
 } from '@/api/scan'
@@ -197,6 +201,102 @@ async function removeDevice(code: string) {
     ElMessage({ type: 'error', message: `解绑失败：${e instanceof Error ? e.message : ''}`, duration: 4000 })
   }
 }
+
+// ---------- 合并同类设备（减少台账同类项）----------
+/**
+ * 合并需要明确「两台里哪台留、哪台并入」——方向搞反会把主设备变成旧编号，
+ * 是最难挽回的一类错误，所以必须让用户先点出保留方，再在弹窗里核对另一台。
+ */
+const mergeOpen = ref(false)
+const mergeKeep = ref<InventoryDeviceRow | null>(null)
+const mergeFrom = ref<InventoryDeviceRow | null>(null)
+
+/** 待选第二台：排除保留方自己，避免用户选成自己和自己合并 */
+const mergeCandidates = computed(() => devices.value.filter((d) => d.device_code !== mergeKeep.value?.device_code))
+
+function startMerge(code: string) {
+  const keep = devices.value.find((d) => d.device_code === code)
+  if (!keep) return
+  if (devices.value.length < 2) {
+    ElMessage({ type: 'warning', message: '本房间只有一台设备，无需合并' })
+    return
+  }
+  mergeKeep.value = keep
+  mergeFrom.value = null
+  mergeOpen.value = true
+}
+
+/** 选中「并入方」→ 关掉选择框、打开合并确认框（确认框自己管预演与写库） */
+function pickMergeFrom(code: string) {
+  const target = devices.value.find((d) => d.device_code === code)
+  if (!target) return
+  mergeFrom.value = target
+  mergeOpen.value = false
+}
+
+/**
+ * 选择框关闭。
+ * 🔴 只有「用户主动取消」才清空保留方：选中并入方时我们也会把选择框关掉，
+ *    若在这里无条件清 mergeKeep，合并确认框的「保留（主设备）」一侧会变成空白，
+ *    用户看到的是「确认把某设备并入某个看不见的设备」——最危险的形态。
+ */
+function onPickClosed() {
+  if (!mergeFrom.value) mergeKeep.value = null
+}
+
+function onMergeDone() {
+  mergeOpen.value = false
+  mergeKeep.value = null
+  mergeFrom.value = null
+  // 合并后本房间清单与数量都会变，重新拉一次以服务端为准
+  if (current.value) void pickRoom(current.value)
+}
+
+// ---------- 设备详情（复用设备台账的抽屉，保证同一设备两处看到的内容一致）----------
+const detailCode = ref('')
+const detail = ref<AssetLedgerDetail | null>(null)
+const detailLoading = ref(false)
+const detailError = ref('')
+let detailSeq = 0
+
+async function loadDetail(code: string) {
+  detailError.value = ''
+  if (!code) {
+    detailSeq += 1
+    detail.value = null
+    detailLoading.value = false
+    return
+  }
+  const my = ++detailSeq
+  detailLoading.value = true
+  try {
+    const d = await getAssetLedgerDetail(code)
+    if (my === detailSeq) detail.value = d
+  } catch (e) {
+    if (my === detailSeq) {
+      detail.value = null
+      detailError.value = e instanceof Error ? e.message : '未知错误'
+    }
+  } finally {
+    if (my === detailSeq) detailLoading.value = false
+  }
+}
+
+function openDetail(code: string) {
+  if (!code) return
+  detailCode.value = code
+  void loadDetail(code)
+}
+
+function closeDetail() {
+  detailCode.value = ''
+  detail.value = null
+  detailError.value = ''
+}
+
+function retryDetail() {
+  void loadDetail(detailCode.value)
+}
 </script>
 
 <template>
@@ -298,9 +398,74 @@ async function removeDevice(code: string) {
 
       <section class="panel">
         <h3 class="inv__panel-title">本房间已绑定设备（{{ count }}）</h3>
-        <RoomDeviceList :devices="devices" :loading="loadingRoom" @remove="removeDevice" />
+        <p class="inv__panel-tip">
+          点设备行看详情；两台其实是同一台设备时，用
+          <el-icon :size="12"><Connection /></el-icon> 合并掉重复项。
+        </p>
+        <RoomDeviceList
+          :devices="devices"
+          :loading="loadingRoom"
+          @remove="removeDevice"
+          @detail="openDetail"
+          @merge="startMerge"
+        />
       </section>
     </template>
+
+    <!-- 选第二台：先点「保留方」，再在这里点「并入方」，方向不会搞反 -->
+    <el-dialog
+      v-model="mergeOpen"
+      title="选择要并入的设备"
+      width="520px"
+      :close-on-click-modal="false"
+      append-to-body
+      @close="onPickClosed"
+    >
+      <p class="inv__pick-lead">
+        保留 <b class="mono">{{ mergeKeep?.device_code }}</b>
+        <span class="inv__pick-dim">{{ mergeKeep?.name }}</span>
+      </p>
+      <p class="inv__pick-lead">并入下面其中一台：</p>
+      <el-radio-group :model-value="mergeFrom?.device_code ?? ''" class="inv__pick-list">
+        <el-radio
+          v-for="d in mergeCandidates"
+          :key="d.device_code"
+          :value="d.device_code"
+          class="inv__pick-item"
+          @change="pickMergeFrom(d.device_code)"
+        >
+          <span class="mono break-code">{{ d.device_code }}</span>
+          <span class="inv__pick-name">{{ d.name }}</span>
+        </el-radio>
+      </el-radio-group>
+      <p v-if="!mergeCandidates.length" class="inv__pick-dim">本房间没有其它设备可合并。</p>
+      <template #footer>
+        <el-button @click="mergeOpen = false">取消</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 合并确认：并排展示两台 + 预演影响面，确认后才写库 -->
+    <DeviceMergeDialog
+      v-if="mergeFrom"
+      :model-value="true"
+      :room="current!"
+      :keep="mergeKeep"
+      :merge="mergeFrom"
+      @update:model-value="(v: boolean) => { if (!v) mergeFrom = null }"
+      @done="onMergeDone"
+    />
+
+    <!-- 设备详情：复用设备台账抽屉 -->
+    <DeviceDetailDrawer
+      :model-value="!!detailCode"
+      :code="detailCode"
+      :detail="detail"
+      :loading="detailLoading"
+      :error="detailError"
+      @update:model-value="(v: boolean) => { if (!v) closeDetail() }"
+      @open-code="openDetail"
+      @retry="retryDetail"
+    />
   </div>
 </template>
 
@@ -318,6 +483,14 @@ const LOG_LABEL: Record<string, string> = {
 .inv__filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-2); padding: var(--space-3); }
 .inv__filters :deep(.el-select) { width: 100%; }
 .inv__panel-title { margin: 0 0 var(--space-3); font-size: var(--text-base); font-weight: var(--weight-emphasize); color: var(--fg); }
+.inv__panel-tip { margin: calc(-1 * var(--space-2)) 0 var(--space-2); display: flex; align-items: center; gap: 2px; font-size: var(--text-xs); color: var(--muted); }
+.inv__panel-tip .el-icon { flex: 0 0 auto; width: 12px; height: 12px; font-size: 12px; }
+.inv__pick-lead { margin: 0 0 var(--space-2); font-size: var(--text-sm); color: var(--fg-2); }
+.inv__pick-dim { margin-left: var(--space-2); font-size: var(--text-xs); color: var(--muted); }
+.inv__pick-list { display: flex; flex-direction: column; gap: var(--space-1); max-height: 40vh; overflow-y: auto; }
+.inv__pick-item { display: flex !important; align-items: center; gap: var(--space-2); height: auto; min-height: 32px; margin: 0; padding: var(--space-1) var(--space-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); }
+.inv__pick-item :deep(.el-radio__label) { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.inv__pick-name { font-size: var(--text-xs); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inv__current { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2); }
 .inv__current-tags { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 .inv__current-code { font-size: var(--text-lg); color: var(--fg); }
