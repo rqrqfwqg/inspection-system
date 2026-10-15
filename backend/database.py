@@ -30,6 +30,13 @@ def init_db():
             conn.execute(sa_text("ALTER TABLE users ADD COLUMN username VARCHAR"))
     except Exception:
         pass
+    # 防御性迁移：device_aliases.merge_meta（撤销合并快照，2026-10-15）。
+    # 存量库走此 ALTER（列已存在则忽略）；全新库由 create_all 直接带上。
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE device_aliases ADD COLUMN merge_meta JSON"))
+    except Exception:
+        pass
 
 class User(Base):
     __tablename__ = "users"
@@ -228,6 +235,11 @@ class DeviceAlias(Base):
     alias_code = Column(String, unique=True, index=True, nullable=False)  # 别名（唯一）
     source = Column(String, default="")        # archive_old / fixed_transfer / fixed_asset / fixed_bim / fixed_tag / ba_device
     remark = Column(Text, default="")
+    # 合并快照（source='merge' 专用，2026-10-15 撤销合并功能引入）：
+    # 记录合并时改动的全部痕迹（改挂的记录ID / 移动的边ID / 被删的 devices 行 /
+    # 被覆盖的旧别名），撤销合并按它精确逆向恢复。
+    # 🔴 快照机制上线前的历史 merge 行此列为 NULL → 撤销接口必须拒绝（无痕可依）。
+    merge_meta = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
 
 class ImportBatch(Base):
@@ -393,22 +405,13 @@ class RoomInventoryRecord(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     room_code = Column(String, unique=True, nullable=False, index=True)  # 真实 room.code
-    # 盘点状态机（2026-10-13 起 4 态，原来只有 completed）：
-    #   pending   未盘   doing 进行中（已开单，扫了一部分）
-    #   completed 已完成 abnormal 有异常（扫不够/设备冲突且已填说明）
-    status = Column(String, default="completed")
+    status = Column(String, default="completed")        # completed（预留 pending/partial）
     device_count = Column(Integer, default=0)           # 完成时该房间已绑定设备数快照
     empty_confirmed = Column(Boolean, default=False)    # 是否「现场确认本房间无设备」
     operator = Column(String, default="")               # 盘点人（免鉴权模式由端上报）
     source = Column(String, default="miniprogram")      # miniprogram / web
     remark = Column(String, default="")
     completed_at = Column(DateTime, default=datetime.now(timezone.utc))
-    # ── 盘点重做新增列（ALTER TABLE 已先行建好，列已存在则 create_all 不会动）──
-    scanned_count = Column(Integer, default=0)          # 本次实际扫码数
-    abnormal = Column(Boolean, default=False)           # 是否异常终态
-    abnormal_reason = Column(String, default="")        # 异常说明（abnormal=1 时必填）
-    started_at = Column(DateTime, nullable=True)        # 开单时间（doing 态起点）
-    diff_count = Column(Integer, default=0)             # 差异数（应扫 vs 实扫 差）
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 

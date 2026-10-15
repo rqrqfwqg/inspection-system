@@ -13,22 +13,23 @@
 import http from './http'
 import { API_BASE } from '@/config'
 import type {
-  ScanDevice,
-  ScanSearchResult,
-  DevicePhotoItem,
-  ScanRoom,
-  ScanSubsystem,
-  QrDeviceRow,
-  ScanRelationType,
-  PowerChainResult,
-  CreateRelationPayload,
-  RoomInventoryOverview,
-  RoomDevicesResult,
-  BindDeviceResult,
   BindDeviceOutcome,
-  UnbindDeviceResult,
+  BindDeviceResult,
+  CreateRelationPayload,
+  DevicePhotoItem,
+  PowerChainResult,
+  QrDeviceRow,
   RoomDeviceMergeDryRun,
   RoomDeviceMergeResult,
+  RoomDeviceUnmergeResult,
+  RoomDevicesResult,
+  RoomInventoryOverview,
+  ScanDevice,
+  ScanRelationType,
+  ScanRoom,
+  ScanSearchResult,
+  ScanSubsystem,
+  UnbindDeviceResult,
 } from '@/types/scan'
 
 const BASE = '/assets'
@@ -230,6 +231,22 @@ export async function scanMergeRoomDevices(
   const data = await resp.json().catch(() => ({} as Record<string, unknown>))
   if (resp.ok) return data as RoomDeviceMergeResult | RoomDeviceMergeDryRun
   throw new Error(String((data as { detail?: unknown })?.detail ?? `合并失败 (${resp.status})`))
+}
+
+/**
+ * POST /assets/devices/unmerge —— 管理员撤销合并。
+ * 按合并时的 merge_meta 快照精确逆向：记录/关系边改回、devices 行重建、别名删除。
+ * 无快照的历史合并 → 409；没有合并记录 → 404；非管理员 → 403。
+ */
+export async function scanUnmergeDevice(mergeCode: string): Promise<RoomDeviceUnmergeResult> {
+  const resp = await fetch(`${API_BASE}${BASE}/devices/unmerge`, {
+    method: 'POST',
+    headers: authHeaders(true),
+    body: JSON.stringify({ merge_code: mergeCode }),
+  })
+  const data = await resp.json().catch(() => ({} as Record<string, unknown>))
+  if (resp.ok) return data as RoomDeviceUnmergeResult
+  throw new Error(String((data as { detail?: unknown })?.detail ?? `撤销合并失败 (${resp.status})`))
 }
 
 /**

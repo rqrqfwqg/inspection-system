@@ -19,6 +19,7 @@ import RoomDeviceList from '@/components/scan/RoomDeviceList.vue'
 import ScanInput from '@/components/scan/ScanInput.vue'
 import DeviceMergeDialog from '@/components/scan/DeviceMergeDialog.vue'
 import DeviceDetailDrawer from '@/components/device/DeviceDetailDrawer.vue'
+import { useIsAdmin } from '@/composables/useIsAdmin'
 import { getAssetLedgerDetail } from '@/api/assetLedger'
 import type { AssetLedgerDetail } from '@/types/assetLedger'
 import {
@@ -253,6 +254,11 @@ function onMergeDone() {
 }
 
 // ---------- 设备详情（复用设备台账的抽屉，保证同一设备两处看到的内容一致）----------
+const { isAdmin } = useIsAdmin()
+
+/** 网页端没有扫码枪/摄像头场景，扫码添加设备整块隐藏（2026-10-15 用户要求）；
+ *  小程序端负责现场扫码。要恢复网页扫码，把本开关改回 true 即可。 */
+const SHOW_SCAN_INPUT = false
 const detailCode = ref('')
 const detail = ref<AssetLedgerDetail | null>(null)
 const detailLoading = ref(false)
@@ -296,6 +302,12 @@ function closeDetail() {
 
 function retryDetail() {
   void loadDetail(detailCode.value)
+}
+
+/** 撤销合并成功后：详情与房间设备清单都要刷新（编号归属已还原） */
+async function onUnmerged() {
+  if (detailCode.value) void loadDetail(detailCode.value)
+  if (current.value) await pickRoom(current.value)
 }
 </script>
 
@@ -355,13 +367,13 @@ function retryDetail() {
           <p class="inv__current-loc">{{ current.building }} {{ current.floor }}</p>
           <p class="inv__current-count">
             已绑定设备 <b class="tnum">{{ count }}</b> 台
-            <span class="inv__current-scan">本次已扫 {{ scannedTimes }} 次</span>
+            <span v-if="SHOW_SCAN_INPUT" class="inv__current-scan">本次已扫 {{ scannedTimes }} 次</span>
           </p>
         </div>
         <el-button class="inv__back" @click="leaveRoom">换房间</el-button>
       </section>
 
-      <section class="panel inv__scan">
+      <section v-if="SHOW_SCAN_INPUT" class="panel inv__scan">
         <h3 class="inv__panel-title">扫码添加设备</h3>
         <ScanInput :on-scan="onScan" :disabled="loadingRoom" />
 
@@ -462,9 +474,11 @@ function retryDetail() {
       :detail="detail"
       :loading="detailLoading"
       :error="detailError"
+      :can-override="isAdmin"
       @update:model-value="(v: boolean) => { if (!v) closeDetail() }"
       @open-code="openDetail"
       @retry="retryDetail"
+      @unmerged="onUnmerged"
     />
   </div>
 </template>

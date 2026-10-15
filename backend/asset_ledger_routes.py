@@ -39,7 +39,7 @@ import time
 from datetime import datetime, date
 
 from database import (
-    get_db, User, Device, Subsystem, DataTable, Record, DeviceRelation,
+    get_db, User, Device, Subsystem, DataTable, Record, DeviceRelation, DeviceAlias,
     FixedAsset, DeviceArchive, DeviceSerialObservation, DeviceGeoObservation,
     InventoryStatusOverride,
 )
@@ -722,6 +722,34 @@ def asset_ledger_summary(q: Optional[str] = None, subsystem_id: Optional[int] = 
     }
 
 
+def _merge_info(db: Session, code: str) -> Dict[str, Any]:
+    """查某编号的合并痕迹（吸收的旧编号 / 被并入的主设备）。"""
+    absorbed = []
+    for a in (db.query(DeviceAlias)
+              .filter(DeviceAlias.canonical_code == code,
+                      DeviceAlias.source == "merge")
+              .order_by(DeviceAlias.id.desc()).all()):
+        absorbed.append({
+            "alias_code": a.alias_code,
+            "remark": a.remark or "",
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+            "has_snapshot": bool(a.merge_meta),
+        })
+    merged_into = None
+    a = (db.query(DeviceAlias)
+         .filter(DeviceAlias.alias_code == code,
+                 DeviceAlias.source == "merge")
+         .first())
+    if a is not None:
+        merged_into = {
+            "canonical_code": a.canonical_code,
+            "remark": a.remark or "",
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+            "has_snapshot": bool(a.merge_meta),
+        }
+    return {"absorbed": absorbed, "merged_into": merged_into}
+
+
 @router.get("/asset-ledger/detail")
 def asset_ledger_detail(code: str, db: Session = Depends(get_db),
                         _: User = Depends(_get_current_user)):
@@ -814,6 +842,11 @@ def asset_ledger_detail(code: str, db: Session = Depends(get_db),
         "records": records_out,
         "record_count": len(records_out),
         "relations": relations_out,
+        # 合并痕迹（撤销合并功能的展示依据）：
+        #   absorbed    = 本设备吸收过的旧编号（本设备是主设备）→ 每条可撤销
+        #   merged_into = 本编号已被并入谁 → 显示归属 + 可撤销
+        #   has_snapshot=False 的历史合并在撤销接口会被 409 拒绝，前端据此禁用按钮。
+        "merge_info": _merge_info(db, code),
     }
 
 

@@ -261,6 +261,30 @@ export interface AssetLedgerDetail {
   inventory_status?: InventoryStatus
   inventory_overridden?: boolean
   inventory_override_reason?: string | null
+  /* ── 合并痕迹：吸收的旧编号 / 被并入的主设备（管理员撤销入口数据源）── */
+  merge_info?: AssetLedgerMergeInfo
+}
+
+/** 一条被本设备吸收的旧编号（device_aliases source='merge'） */
+export interface AssetLedgerMergeAbsorbed {
+  alias_code: string
+  remark: string
+  created_at: string | null
+  /** 有无撤销快照（快照机制上线前的历史合并无法自动撤销） */
+  has_snapshot: boolean
+}
+
+/** 本编号被并入的主设备（本编号是别名侧） */
+export interface AssetLedgerMergedInto {
+  canonical_code: string
+  remark: string
+  created_at: string | null
+  has_snapshot: boolean
+}
+
+export interface AssetLedgerMergeInfo {
+  absorbed: AssetLedgerMergeAbsorbed[]
+  merged_into: AssetLedgerMergedInto | null
 }
 
 /** 台账反查（/assets/asset-ledger/resolve，走后端权威匹配内核） */

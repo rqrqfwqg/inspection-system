@@ -137,6 +137,18 @@ def main():
     check("旧编号位置边已清理", old_loc == 0, str(old_loc))
     db.close()
 
+    db = DB()
+    al_meta = db.query(DeviceAlias).filter(DeviceAlias.alias_code == "OLD-001").first()
+    check("合并写入快照 merge_meta", al_meta is not None and bool(al_meta.merge_meta),
+          str(al_meta.merge_meta if al_meta else None))
+    mm = al_meta.merge_meta if al_meta else {}
+    check("快照含房间/记录/边痕迹",
+          mm.get("room_code") == "GTC-1F-R01" and mm.get("record_ids") and mm.get("moved_edge_ids"),
+          str({k: mm.get(k) for k in ("room_code", "record_ids", "moved_edge_ids")}))
+    check("快照记录 devices 行处理方式", mm.get("device_mode") in ("deleted", "renamed", "none"),
+          str(mm.get("device_mode")))
+    db.close()
+
     print("\n=== 2. 跨房间合并必须拒绝（红线②）===")
     res = client.post("/assets/rooms/GTC-1F-R01/devices/merge",
                       json={"keep_code": "KEEP-001", "merge_code": "OLD-002"})
@@ -154,46 +166,95 @@ def main():
     check("别名未重复写入", n == 1, str(n))
     db.close()
 
-    print("\n=== 3b. 一台设备只能合并一次（红线④）===")
-    # 此时 KEEP-001 已在第1节吸收过 OLD-001（canonical 侧有 source='merge' 行）
+    print("\n=== 3b. 合并新设备 → 旧合并自动释放（2026-10-15 需求）===")
+    # 3b-1 keep 侧：KEEP-001 已吸收 OLD-001；再把 SAME-001 并入 KEEP-001 时，
+    #      旧合并（OLD-001→KEEP-001）按快照自动释放，不再 409。
     db = DB()
-    sub = db.query(Subsystem).first()
-    db.add(Device(device_code="SAME-001", name="房间1第三台", subsystem_id=sub.id))
+    sub_id = db.query(Subsystem).first().id
+    db.add(Device(device_code="SAME-001", name="房间1第三台", subsystem_id=sub_id))
     db.add(DeviceRelation(from_code="SAME-001", to_code="GTC-1F-R01",
-                          relation_type=LOCATE, subsystem_id=sub.id))
+                          relation_type=LOCATE, subsystem_id=sub_id))
     db.commit()
     db.close()
 
     res = client.post("/assets/rooms/GTC-1F-R01/devices/merge",
-                      json={"keep_code": "KEEP-001", "merge_code": "SAME-001", "dry_run": True})
-    check("已参与合并的主设备：预演即 409", res.status_code == 409,
-          f"{res.status_code} {res.text[:120]}")
-
-    res = client.post("/assets/rooms/GTC-1F-R01/devices/merge",
-                      json={"keep_code": "SAME-001", "merge_code": "KEEP-001"})
-    check("已参与合并的设备作被合并方：409", res.status_code == 409,
-          f"{res.status_code} {res.text[:120]}")
-
-    res = client.post("/assets/rooms/GTC-1F-R01/devices/merge",
-                      json={"keep_code": "SAME-001", "merge_code": "OLD-001"})
-    check("已合并的旧编号再并入第三台：409", res.status_code == 409,
-          f"{res.status_code} {res.text[:120]}")
-
-    # 对照组：没参与过合并的设备不受锁影响，仍可正常合并
+                      json={"keep_code": "KEEP-001", "merge_code": "SAME-001"})
+    check("keep 已吸收过别人：再合并返回 200（自动释放旧合并）",
+          res.status_code == 200, f"{res.status_code} {res.text[:180]}")
+    body = res.json() if res.status_code == 200 else {}
+    rel = (body.get("auto_release") or [{}])[0]
+    check("响应带 auto_release 明细（还原到 OLD-001）",
+          len(body.get("auto_release") or []) == 1 and rel.get("restored_code") == "OLD-001",
+          res.text[:220])
     db = DB()
-    sub = db.query(Subsystem).first()
-    db.add(Device(device_code="FRESH-001", name="房间1第四台", subsystem_id=sub.id))
+    check("旧合并已释放：OLD-001 merge 别名已删",
+          db.query(DeviceAlias).filter(DeviceAlias.alias_code == "OLD-001").count() == 0)
+    check("旧合并已释放：OLD-001 devices 行恢复",
+          db.query(Device).filter(Device.device_code == "OLD-001").count() == 1)
+    rec1 = [r for r in db.query(Record).all() if (r.data or {}).get(REL_KEY) == "OLD-001"]
+    check("旧合并已释放：记录+JSON关联键改回 OLD-001",
+          len(rec1) >= 1 and all(r.device_code == "OLD-001" for r in rec1),
+          str([(r.id, r.device_code) for r in rec1]))
+    loc1 = db.query(DeviceRelation).filter(
+        DeviceRelation.from_code == "OLD-001",
+        DeviceRelation.relation_type == LOCATE).count()
+    check("旧合并已释放：OLD-001 位置边恢复", loc1 == 1, str(loc1))
+    db.close()
+
+    # 3b-2 merge 侧 + 一次调用释放两条旧合并：先把 OLD-001 并入 FRESH-001（无冲突正常合并），
+    #      再把 OLD-001 改并入 KEEP-001 → 同时释放 FRESH-001 名下的旧合并与
+    #      KEEP-001 名下的旧合并（SAME-001）。
+    db = DB()
+    db.add(Device(device_code="FRESH-001", name="房间1第四台", subsystem_id=sub_id))
     db.add(DeviceRelation(from_code="FRESH-001", to_code="GTC-1F-R01",
-                          relation_type=LOCATE, subsystem_id=sub.id))
+                          relation_type=LOCATE, subsystem_id=sub_id))
     db.commit()
     db.close()
     res = client.post("/assets/rooms/GTC-1F-R01/devices/merge",
-                      json={"keep_code": "SAME-001", "merge_code": "FRESH-001"})
-    check("未参与过合并的设备仍可正常合并",
-          res.status_code == 200 and res.json().get("success") is True,
+                      json={"keep_code": "FRESH-001", "merge_code": "OLD-001"})
+    check("无冲突合并不受影响（FRESH-001 吸收 OLD-001）",
+          res.status_code == 200, f"{res.status_code} {res.text[:150]}")
+
+    res = client.post("/assets/rooms/GTC-1F-R01/devices/merge",
+                      json={"keep_code": "KEEP-001", "merge_code": "OLD-001"})
+    check("两侧都有旧合并：200 且一次性释放两条",
+          res.status_code == 200 and len(res.json().get("auto_release") or []) == 2,
+          f"{res.status_code} {res.text[:220]}")
+    db = DB()
+    check("FRESH-001 释放后独立（无 merge 别名）",
+          db.query(DeviceAlias).filter(DeviceAlias.alias_code == "FRESH-001").count() == 0)
+    check("SAME-001 释放后独立（无 merge 别名）",
+          db.query(DeviceAlias).filter(DeviceAlias.alias_code == "SAME-001").count() == 0)
+    check("OLD-001 最终并入 KEEP-001",
+          db.query(DeviceAlias).filter(DeviceAlias.alias_code == "OLD-001",
+                                       DeviceAlias.canonical_code == "KEEP-001").count() == 1)
+    db.close()
+
+    # 3b-3 快照机制上线前的历史合并：无 merge_meta，无法自动释放 → 仍 409
+    db = DB()
+    db.add(DeviceAlias(canonical_code="KEEP-002", alias_code="LEGACY-002",
+                       source="merge", merge_meta=None))
+    db.commit()
+    db.close()
+    res = client.post("/assets/rooms/GTC-2F-R02/devices/merge",
+                      json={"keep_code": "KEEP-002", "merge_code": "OLD-002"})
+    check("无快照历史合并挡道：409 拒绝", res.status_code == 409,
           f"{res.status_code} {res.text[:150]}")
+    db = DB()
+    db.query(DeviceAlias).filter(DeviceAlias.alias_code == "LEGACY-002").delete()
+    db.commit()
+    db.close()
+    check("拒绝后不破坏数据（2F 仍两台）",
+          codes_in_room("GTC-2F-R02") == {"KEEP-002", "OLD-002"},
+          str(codes_in_room("GTC-2F-R02")))
 
     print("\n=== 4. dry_run 预演与执行一致（红线③）===")
+    # 2F 的 OLD-002 补一条资料记录：让第4节预演/改写、6b 撤销后的记录恢复都有据可查
+    db = DB()
+    db.add(Record(table_id=dt_id, device_code="OLD-002",
+                  data={REL_KEY: "OLD-002", "note": "2F现场补录"}))
+    db.commit()
+    db.close()
     res = client.post("/assets/rooms/GTC-2F-R02/devices/merge",
                       json={"keep_code": "KEEP-002", "merge_code": "OLD-002",
                             "dry_run": True})
@@ -232,6 +293,61 @@ def main():
           res.status_code == 200 and
           res.json().get("device", {}).get("device_code") == "KEEP-001",
           res.text[:200])
+
+    print("\n=== 6b. 撤销合并：按快照精确逆向（仅管理员）===")
+    # 第4节把 KEEP-002/OLD-002 合并了；撤销它
+    res = client.post("/assets/devices/unmerge", json={"merge_code": "OLD-002"})
+    check("撤销返回 200", res.status_code == 200, f"{res.status_code} {res.text[:200]}")
+    body = res.json() if res.status_code == 200 else {}
+    check("恢复统计带记录数", body.get("records_restored", 0) >= 0)
+    check("处理方式与快照一致", body.get("device_mode") in ("deleted", "renamed", "none"),
+          str(body.get("device_mode")))
+
+    db = DB()
+    gone = db.query(DeviceAlias).filter(DeviceAlias.alias_code == "OLD-002").first()
+    check("merge 别名已删除", gone is None)
+    rec2 = db.query(Record).filter(Record.id != None).all()  # noqa: E711
+    rec2 = [r for r in rec2 if (r.data or {}).get(REL_KEY) == "OLD-002"]
+    check("快照记录已改回旧编号+关联键", len(rec2) >= 1 and all(r.device_code == "OLD-002" for r in rec2),
+          str([(r.id, r.device_code) for r in rec2]))
+    loc2 = db.query(DeviceRelation).filter(
+        DeviceRelation.from_code == "OLD-002",
+        DeviceRelation.relation_type == LOCATE).count()
+    check("旧编号位置边已恢复", loc2 == 1, str(loc2))
+    dev2 = db.query(Device).filter(Device.device_code == "OLD-002").first()
+    check("devices 行已恢复（deleted 模式重建）",
+          (body.get("device_mode") != "deleted") or dev2 is not None,
+          f"mode={body.get('device_mode')} row={'有' if dev2 else '无'}")
+    db.close()
+
+    res = client.post("/assets/rooms/GTC-2F-R02/devices",
+                      json={"device_code": "OLD-002"})
+    check("撤销后本房间设备数回到 2", res.status_code == 200 and res.json().get("count") == 2,
+          res.text[:150])
+
+    # 撤销后锁解除：可以再次合并
+    res = client.post("/assets/rooms/GTC-2F-R02/devices/merge",
+                      json={"keep_code": "KEEP-002", "merge_code": "OLD-002", "dry_run": True})
+    check("撤销后可再次合并（预演通过）", res.status_code == 200,
+          f"{res.status_code} {res.text[:120]}")
+
+    # 重复撤销：别名已不在 → 404
+    res = client.post("/assets/devices/unmerge", json={"merge_code": "OLD-002"})
+    check("重复撤销返回 404", res.status_code == 404, str(res.status_code))
+
+    # 无快照的历史合并 → 409 拒绝
+    db = DB()
+    db.add(DeviceAlias(canonical_code="KEEP-001", alias_code="LEGACY-001",
+                       source="merge", merge_meta=None))
+    db.commit()
+    db.close()
+    res = client.post("/assets/devices/unmerge", json={"merge_code": "LEGACY-001"})
+    check("无快照的历史合并拒绝撤销", res.status_code == 409,
+          f"{res.status_code} {res.text[:150]}")
+    db = DB()
+    n_legacy = db.query(DeviceAlias).filter(DeviceAlias.alias_code == "LEGACY-001").count()
+    check("拒绝时不破坏数据", n_legacy == 1)
+    db.close()
 
     print("\n=== 7. 参数校验 ===")
     res = client.post("/assets/rooms/GTC-1F-R01/devices/merge",

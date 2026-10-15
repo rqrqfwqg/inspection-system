@@ -203,10 +203,22 @@ export interface RoomDeviceMergePlan {
   already_merged: boolean
 }
 
+/** 一次「自动释放旧合并」的恢复统计（合并新设备触发旧合并按快照拆回） */
+export interface RoomDeviceMergeRelease {
+  canonical_code: string
+  restored_code: string
+  records_restored: number
+  records_skipped: number
+  edges_restored: number
+  device_mode: string
+}
+
 /** POST /assets/rooms/{code}/devices/merge —— dry_run=true 的响应 */
 export interface RoomDeviceMergeDryRun {
   dry_run: true
   plan: RoomDeviceMergePlan
+  /** 预演中检测到旧合并，正式执行将先按快照释放这些合并 */
+  auto_release?: RoomDeviceMergeRelease[]
 }
 
 /** POST /assets/rooms/{code}/devices/merge —— 正式执行响应 */
@@ -214,6 +226,8 @@ export interface RoomDeviceMergeResult {
   success: boolean
   /** 之前已合并过，本次空操作 */
   already_merged: boolean
+  /** 本次执行前自动释放掉的旧合并（按快照拆回） */
+  auto_release?: RoomDeviceMergeRelease[]
   canonical_code: string
   merged_code: string
   records_rewritten?: number
@@ -221,6 +235,17 @@ export interface RoomDeviceMergeResult {
   device: InventoryDeviceRow
   room: RoomBrief
   count: number
+}
+
+/** POST /assets/devices/unmerge —— 管理员撤销合并（按快照精确逆向） */
+export interface RoomDeviceUnmergeResult {
+  success: boolean
+  canonical_code: string
+  restored_code: string
+  records_restored: number
+  records_skipped: number
+  edges_restored: number
+  device_mode: string
 }
 
 /** 盘点进度行（房间 + 已绑定设备数） */

@@ -7,12 +7,14 @@
  * - 长编号走 .break-code（禁止省略号），金额与表格同口径（fmtMoney）
  */
 import { computed, ref, watch } from 'vue'
-import { ArrowDown, ArrowRight, CircleClose, Refresh, WarningFilled } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { ArrowDown, ArrowRight, CircleClose, Connection, Refresh, WarningFilled } from '@element-plus/icons-vue'
 import {
   LEDGER_SOURCE_LABELS, fmtInt, fmtMoney, fmtValue, hasDisplayValue, isCodeLike, ledgerFieldLabel,
   type AssetLedgerDetail, type AssetLedgerRecordItem,
 } from '@/types/assetLedger'
 import { deleteInventoryStatus } from '@/api/inventoryStatusApi'
+import { scanUnmergeDevice } from '@/api/scan'
 
 interface Props {
   modelValue: boolean
@@ -33,6 +35,7 @@ const emit = defineEmits<{
   (e: 'open-code', code: string): void
   (e: 'retry'): void
   (e: 'override-removed'): void
+  (e: 'unmerged'): void
 }>()
 
 const removing = ref(false)
@@ -49,6 +52,38 @@ async function removeOverride() {
     removeError.value = e instanceof Error ? e.message : '撤销覆盖失败，请重试'
   } finally {
     removing.value = false
+  }
+}
+
+/** 合并痕迹（后端 detail.merge_info）：吸收的旧编号 + 被并入的主设备 */
+const mergeInfo = computed(() => props.detail?.merge_info ?? null)
+
+const undoing = ref<string>('')
+const undoError = ref('')
+
+/** 管理员撤销合并：mergeCode 是要拆回的旧编号（= 被 absorb 的别名 / 本编号自身） */
+async function undoMerge(mergeCode: string) {
+  if (!mergeCode || (undoing.value !== '')) return
+  try {
+    await ElMessageBox.confirm(
+      `撤销后，编号 ${mergeCode} 的记录、关系边与设备行将按合并时的快照原样还原。确定撤销？`,
+      '撤销合并',
+      { confirmButtonText: '撤销合并', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  undoing.value = mergeCode
+  undoError.value = ''
+  try {
+    const r = await scanUnmergeDevice(mergeCode)
+    ElMessage.success(
+      `已撤销：${r.restored_code} 拆回，还原记录 ${r.records_restored} 条、关系边 ${r.edges_restored} 条`)
+    emit('unmerged')
+  } catch (e) {
+    undoError.value = e instanceof Error ? e.message : '撤销合并失败，请重试'
+  } finally {
+    undoing.value = ''
   }
 }
 
@@ -185,6 +220,43 @@ const keepOpen = (v: boolean) => { emit('update:modelValue', v) }
           </p>
         </div>
 
+        <section v-if="mergeInfo && (mergeInfo.absorbed.length || mergeInfo.merged_into)" class="dsec dmerge">
+          <h4 class="dsec__title">合并痕迹</h4>
+          <ul v-if="mergeInfo.absorbed.length" class="dmerge__list">
+            <li v-for="a in mergeInfo.absorbed" :key="a.alias_code" class="dmerge__item">
+              <el-tag size="small" type="warning" effect="light">已吸收</el-tag>
+              <button type="button" class="link-btn mono break-code" @click="emit('open-code', a.alias_code)">{{ a.alias_code }}</button>
+              <span v-if="a.remark" class="dmerge__remark ellipsis">{{ a.remark }}</span>
+              <el-button
+                v-if="canOverride"
+                size="small" type="danger" plain
+                :disabled="!a.has_snapshot || undoing !== ''"
+                :loading="undoing === a.alias_code"
+                @click="undoMerge(a.alias_code)"
+              >
+                <el-icon :size="14"><Connection /></el-icon><span>{{ a.has_snapshot ? '撤销' : '无快照' }}</span>
+              </el-button>
+            </li>
+          </ul>
+          <div v-if="mergeInfo.merged_into" class="dmerge__item">
+            <el-tag size="small" type="info" effect="light">已并入</el-tag>
+            <span>本编号已并入</span>
+            <button type="button" class="link-btn mono break-code" @click="emit('open-code', mergeInfo.merged_into.canonical_code)">{{ mergeInfo.merged_into.canonical_code }}</button>
+            <el-button
+              v-if="canOverride"
+              size="small" type="danger" plain
+              :disabled="!mergeInfo.merged_into.has_snapshot || undoing !== ''"
+              :loading="undoing === code"
+              @click="undoMerge(code)"
+            >
+              <el-icon :size="14"><Connection /></el-icon><span>{{ mergeInfo.merged_into.has_snapshot ? '拆回' : '无快照' }}</span>
+            </el-button>
+          </div>
+          <p v-if="undoError" class="dover__err" role="alert">
+            <el-icon :size="16"><WarningFilled /></el-icon><span>{{ undoError }}</span>
+          </p>
+        </section>
+
         <section v-for="s in sections" :key="s.title" class="dsec">
           <h4 class="dsec__title">{{ s.title }}</h4>
           <el-descriptions :column="1" size="small" border :label-width="96">
@@ -263,6 +335,12 @@ const keepOpen = (v: boolean) => { emit('update:modelValue', v) }
 .link-btn { flex: 1 1 auto; min-width: 0; padding: 0; border: none; background: none; color: var(--accent); font-size: var(--text-xs); cursor: pointer; text-align: left; }
 .link-btn:hover { text-decoration: underline; }
 .link-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-sm); }
+
+.dmerge__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.dmerge__item { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; padding: var(--space-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); font-size: var(--text-xs); color: var(--fg-2); }
+.dmerge__item .link-btn { font-size: var(--text-xs); }
+.dmerge__remark { flex: 1 1 auto; min-width: 0; color: var(--muted); }
+.dmerge .el-button { flex: 0 0 auto; margin-left: auto; }
 
 .dstate { display: flex; flex-direction: column; align-items: center; text-align: center; padding: var(--space-5) var(--space-3); }
 .dstate__icon { color: var(--muted); }

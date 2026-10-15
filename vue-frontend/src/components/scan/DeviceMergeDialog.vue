@@ -19,7 +19,11 @@ import { ElMessage } from 'element-plus'
 import { CircleCheckFilled, WarningFilled } from '@element-plus/icons-vue'
 import { scanMergeRoomDevices } from '@/api/scan'
 import type {
-  InventoryDeviceRow, RoomBrief, RoomDeviceMergeDryRun, RoomDeviceMergePlan,
+  InventoryDeviceRow,
+  RoomBrief,
+  RoomDeviceMergeDryRun,
+  RoomDeviceMergePlan,
+  RoomDeviceMergeRelease,
 } from '@/types/scan'
 
 const props = defineProps<{
@@ -37,6 +41,8 @@ const emit = defineEmits<{
 }>()
 
 const plan = ref<RoomDeviceMergePlan | null>(null)
+/** 预演检测到的旧合并（正式执行会先按快照自动释放） */
+const autoRelease = ref<RoomDeviceMergeRelease[]>([])
 const loading = ref(false)
 const submitting = ref(false)
 const error = ref('')
@@ -49,6 +55,7 @@ const visible = computed({
 
 function reset() {
   plan.value = null
+  autoRelease.value = []
   loading.value = false
   submitting.value = false
   error.value = ''
@@ -69,6 +76,7 @@ watch(
         dry_run: true,
       })
       plan.value = (res as RoomDeviceMergeDryRun).plan ?? null
+      autoRelease.value = (res as RoomDeviceMergeDryRun).auto_release ?? []
     } catch (e) {
       error.value = e instanceof Error ? e.message : '预演失败'
     } finally {
@@ -159,6 +167,15 @@ function facts(d: InventoryDeviceRow | null): string[] {
         </li>
         <li>旧编号 <b class="mono">{{ merge?.device_code }}</b> 保留为别名，现场仍可用它扫码查到主设备</li>
       </ul>
+      <div v-if="autoRelease.length" class="mgd__release" role="alert">
+        <p class="mgd__release-title">将自动撤销以下旧合并（按快照原样还原）：</p>
+        <ul class="mgd__release-list">
+          <li v-for="r in autoRelease" :key="r.restored_code">
+            <code class="mono">{{ r.restored_code }}</code> 从 <code class="mono">{{ r.canonical_code }}</code> 拆回
+            <span class="mgd__dim">（还原记录 {{ r.records_restored }} 条 · 关系边 {{ r.edges_restored }} 条）</span>
+          </li>
+        </ul>
+      </div>
       <p v-if="plan.already_merged" class="mgd__warn">
         该旧编号已有别名映射{{ plan.already_merged ? '（且已指向主设备）' : '' }}，本次合并会覆盖原映射。
       </p>
@@ -203,6 +220,9 @@ function facts(d: InventoryDeviceRow | null): string[] {
 .mgd__fact { margin: var(--space-1) 0 0; font-size: var(--text-xs); color: var(--muted); }
 .mgd__arrow { align-self: center; padding-top: 22px; font-size: var(--text-xs); color: var(--muted); white-space: nowrap; }
 .mgd__hint { margin: var(--space-3) 0 0; font-size: var(--text-xs); color: var(--muted); }
+.mgd__release { margin: var(--space-3) 0 0; padding: var(--space-2) var(--space-3); border: 1px solid var(--danger, #f56c6c); border-radius: var(--radius-md); background: var(--surface-2); }
+.mgd__release-title { margin: 0 0 var(--space-1); font-size: var(--text-xs); font-weight: var(--weight-emphasize); color: var(--danger, #f56c6c); }
+.mgd__release-list { margin: 0; padding-left: var(--space-4); font-size: var(--text-xs); color: var(--fg-2); line-height: 1.9; }
 .mgd__plan { margin: var(--space-3) 0 0; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-soft); border-radius: var(--radius-md); background: var(--surface-2); }
 .mgd__plan-title { margin: 0 0 var(--space-1); font-size: var(--text-xs); font-weight: var(--weight-emphasize); color: var(--fg-2); }
 .mgd__plan-list { margin: 0; padding-left: var(--space-4); font-size: var(--text-xs); color: var(--fg-2); line-height: 1.9; }

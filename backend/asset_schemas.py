@@ -324,6 +324,11 @@ class RoomDeviceMerge(BaseModel):
     remark: str = ""
 
 
+class RoomDeviceUnmerge(BaseModel):
+    """撤销合并（🔴 仅管理员）：把旧编号从主设备名下拆回。"""
+    merge_code: str
+
+
 class RoomDeviceMergePlan(BaseModel):
     """合并预演结果（前端弹窗展示「将要发生什么」）。"""
     room_code: str
