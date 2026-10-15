@@ -6,15 +6,17 @@
  * 避免 React 版里「基础信息表 + 资料记录表」两套列渲染各写一遍。
  *
  * 防压扁 / 溢出纪律（UIUX §6.4 / §6.6）：
- *  - 列宽**只用 min-width**（EP 按比例分配）；唯一允许写 `width` 的是复选框列、序号列与操作列；
+ *  - 列宽默认只用 min-width（EP 按比例分配）；允许写固定 `width` 的列：序号列、复选框列、操作列，以及固定左侧的关联键 / 设备编号列；
  *  - 横滚只发生在本地 `.data-table-wrap` 容器，绝不写「整表最小宽度」（AS-7 / AC-06）；
  *  - 动态列默认 `show-overflow-tooltip`，编号类字段走 `.code-break` 强制断行不省略（编号少一位就查不到）；
  *  - 单元格取值一律走 `@/lib/format#fmtValue`（全站唯一格式化口径），空值恒呈现为「—」。
  *
  * 列序可拖（2026-10-14 用户要求「手动调整表格的字段位置，横向拖动」）：
- *  - 数据列（字段列）的表头可按住横向拖动换序；序号 / 复选框 / 关联键 / 操作列不参与拖动；
+ *  - 数据列（字段列）的表头可按住横向拖动换序；序号 / 复选框 / 操作列不参与拖动；
+ *  - 关联键（设备编号）列恒固定左侧、置顶、不可拖动，确保设备编号永远可见（用户拖动后仍能一眼找到）；
  *  - 顺序按表持久化在 localStorage（键 = `orderKey`，缺省退化为表名 title），
  *    字段集变化（增列）时：已存顺序中仍存在的键保持原位，新字段按默认序补尾部；
+ *  - 「重置列序」按钮可一键清除本地顺序恢复默认；
  *  - 只影响显示顺序，不写后端、不改字段定义的 sort_order。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -22,6 +24,7 @@ import {
   ArrowDown, Connection, Delete, Edit, Grid, Switch, TopRight,
 } from '@element-plus/icons-vue'
 import { fmtValue, isCodeLike } from '@/lib/format'
+import { ElMessage } from 'element-plus'
 import type { FieldDef, RecordItem } from '@/types/asset'
 
 const props = withDefaults(
@@ -135,11 +138,13 @@ watch(
  */
 const columns = computed(() => {
   if (props.fields.length > 0) {
-    return props.fields.filter((f) => f.key !== 'seq').map((f) => ({ key: f.key, label: f.label }))
+    return props.fields
+      .filter((f) => f.key !== 'seq')
+      .map((f) => ({ key: f.key, label: f.label, isRelation: !!f.is_relation_key }))
   }
   return Object.keys(props.records[0]?.data ?? {})
     .filter((key) => key !== 'seq')
-    .map((key) => ({ key, label: key }))
+    .map((key) => ({ key, label: key, isRelation: false }))
 })
 
 /* ============================ 列序：表头横向拖动换序 ============================ */
@@ -189,14 +194,17 @@ watch([orderKey, baseKeys], ([, keys]) => {
   order.value = loadOrder(keys)
 }, { immediate: true })
 
-/** 实际渲染的列：按 order 重排（order 未覆盖的键按默认序兜底补尾部） */
+/** 实际渲染的列：关联键（设备编号）列恒置顶并固定左侧，其余按 order 重排（未覆盖的兜底补尾部） */
 const visibleColumns = computed(() => {
   const byKey = new Map(columns.value.map((c) => [c.key, c]))
-  const out = order.value.map((k) => byKey.get(k)).filter((c) => c !== undefined)
+  const ordered = order.value.map((k) => byKey.get(k)).filter((c) => c !== undefined)
+  const inOrder = new Set(order.value)
+  const relations = ordered.filter((c) => c.isRelation)
+  const rest = ordered.filter((c) => !c.isRelation)
   for (const c of columns.value) {
-    if (!order.value.includes(c.key)) out.push(c)
+    if (!inOrder.has(c.key)) rest.push(c)
   }
-  return out
+  return [...relations, ...rest]
 })
 
 /** 列头/列身的拖动态样式类（只高亮表头，故 CSS 里限定 th） */
@@ -209,6 +217,18 @@ function colClass(key: string): string {
 function clearDragState() {
   dragKey.value = ''
   overKey.value = ''
+}
+
+/** 重置本表列序：清除本地持久化，恢复默认排列（用户拖动后想还原时用） */
+function resetOrder() {
+  if (!orderKey.value) return
+  try {
+    localStorage.removeItem(ORDER_STORAGE_PREFIX + orderKey.value)
+  } catch {
+    /* 忽略存储异常 */
+  }
+  order.value = [...baseKeys.value]
+  ElMessage.success('已重置本表列顺序')
 }
 
 /** 把 from 列移动到 to 列的位置（HTML5 DnD：dragstart 记来源，drop 时换序） */
@@ -286,6 +306,10 @@ function onRowClick(row: RecordItem) {
         <el-icon :size="16"><TopRight /></el-icon>
         <span>数据表管理</span>
       </el-button>
+      <el-button v-if="orderKey" size="small" title="清除本地保存的列顺序，恢复默认排列" @click="resetOrder">
+        <el-icon :size="16"><RefreshLeft /></el-icon>
+        <span>重置列序</span>
+      </el-button>
     </header>
 
     <div class="data-table-wrap drt__wrap">
@@ -299,13 +323,13 @@ function onRowClick(row: RecordItem) {
       >
         <!-- 序号：纯展示列（非数据属性，所有表一致）—— 行号 = 当前列表中的位置，
              分页续拉 / 服务端搜索下随当前页集连续编号，不落库、不导出 -->
-        <el-table-column label="序号" width="56" align="center" class-name="drt__col-seq">
+        <el-table-column label="序号" width="56" align="center" fixed="left" class-name="drt__col-seq">
           <template #default="{ $index }">{{ $index + 1 }}</template>
         </el-table-column>
 
         <el-table-column v-if="selectable" type="selection" width="44" :selectable="() => true" />
 
-        <el-table-column v-if="canOpenDevice" label="关联键" min-width="170">
+        <el-table-column v-if="canOpenDevice" label="关联键" width="170" fixed="left">
           <template #default="{ row }">
             <button
               v-if="row.device_code"
@@ -324,7 +348,9 @@ function onRowClick(row: RecordItem) {
           v-for="col in visibleColumns"
           :key="col.key"
           :label="col.label"
-          :min-width="columnWidth(col.key)"
+          :min-width="col.isRelation ? undefined : columnWidth(col.key)"
+          :width="col.isRelation ? columnWidth(col.key) : undefined"
+          :fixed="col.isRelation ? 'left' : undefined"
           :class-name="colClass(col.key)"
           show-overflow-tooltip
         >
