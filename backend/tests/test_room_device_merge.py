@@ -154,6 +154,45 @@ def main():
     check("别名未重复写入", n == 1, str(n))
     db.close()
 
+    print("\n=== 3b. 一台设备只能合并一次（红线④）===")
+    # 此时 KEEP-001 已在第1节吸收过 OLD-001（canonical 侧有 source='merge' 行）
+    db = DB()
+    sub = db.query(Subsystem).first()
+    db.add(Device(device_code="SAME-001", name="房间1第三台", subsystem_id=sub.id))
+    db.add(DeviceRelation(from_code="SAME-001", to_code="GTC-1F-R01",
+                          relation_type=LOCATE, subsystem_id=sub.id))
+    db.commit()
+    db.close()
+
+    res = client.post("/assets/rooms/GTC-1F-R01/devices/merge",
+                      json={"keep_code": "KEEP-001", "merge_code": "SAME-001", "dry_run": True})
+    check("已参与合并的主设备：预演即 409", res.status_code == 409,
+          f"{res.status_code} {res.text[:120]}")
+
+    res = client.post("/assets/rooms/GTC-1F-R01/devices/merge",
+                      json={"keep_code": "SAME-001", "merge_code": "KEEP-001"})
+    check("已参与合并的设备作被合并方：409", res.status_code == 409,
+          f"{res.status_code} {res.text[:120]}")
+
+    res = client.post("/assets/rooms/GTC-1F-R01/devices/merge",
+                      json={"keep_code": "SAME-001", "merge_code": "OLD-001"})
+    check("已合并的旧编号再并入第三台：409", res.status_code == 409,
+          f"{res.status_code} {res.text[:120]}")
+
+    # 对照组：没参与过合并的设备不受锁影响，仍可正常合并
+    db = DB()
+    sub = db.query(Subsystem).first()
+    db.add(Device(device_code="FRESH-001", name="房间1第四台", subsystem_id=sub.id))
+    db.add(DeviceRelation(from_code="FRESH-001", to_code="GTC-1F-R01",
+                          relation_type=LOCATE, subsystem_id=sub.id))
+    db.commit()
+    db.close()
+    res = client.post("/assets/rooms/GTC-1F-R01/devices/merge",
+                      json={"keep_code": "SAME-001", "merge_code": "FRESH-001"})
+    check("未参与过合并的设备仍可正常合并",
+          res.status_code == 200 and res.json().get("success") is True,
+          f"{res.status_code} {res.text[:150]}")
+
     print("\n=== 4. dry_run 预演与执行一致（红线③）===")
     res = client.post("/assets/rooms/GTC-2F-R02/devices/merge",
                       json={"keep_code": "KEEP-002", "merge_code": "OLD-002",

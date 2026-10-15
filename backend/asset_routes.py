@@ -4558,6 +4558,24 @@ def merge_room_devices(room_code: str, data: RoomDeviceMerge,
             raise HTTPException(
                 status_code=400, detail=f"设备 {code} 不在本房间 {room.code} 的绑定清单里")
 
+    # 红线④：一台设备只能合并一次（用户明确要求）。
+    # 归一后 keep_code / merge_code 都是规范编号；若任一编号已出现在
+    # source='merge' 别名的 canonical 侧，说明它参与过一次合并：
+    #   - 主设备吸收过别人：再吸收/再被合并会让别名链与数据归属越缠越乱；
+    #   - 被合并方已并入别人：它的记录已全部挂在原主设备名下，再并入第三台
+    #     等于把原主设备的数据抢走。一律 409，dry_run 与执行共用这道闸，
+    #     所以弹窗预演阶段就会报出来，不会等到点确认才失败。
+    # （fixed_asset / fixed_bim 等来源的别名不在拦截范围——那不是合并痕迹。）
+    merged_once = (db.query(DeviceAlias)
+                   .filter(DeviceAlias.source == "merge",
+                           DeviceAlias.canonical_code.in_([keep_code, merge_code]))
+                   .first())
+    if merged_once is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"设备 {merged_once.canonical_code} 已参与过合并（一台设备只能合并一次），"
+                   f"不能再作为合并对象。如确需调整请联系管理员处理别名数据。")
+
     plan = _merge_plan(db, room, keep_code, merge_code)
     if data.dry_run:
         return {"dry_run": True, "plan": plan}
