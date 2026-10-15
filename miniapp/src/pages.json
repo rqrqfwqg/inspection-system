@@ -1,0 +1,144 @@
+{
+  "pages": [
+    {
+      "path": "pages/login/Login",
+      "style": {
+        "navigationBarTitleText": "登录",
+        "navigationStyle": "custom"
+      }
+    },
+    {
+      "path": "pages/home/Home",
+      "style": {
+        "navigationBarTitleText": "首页"
+      }
+    },
+    {
+      "path": "pages/asset/AssetHub",
+      "style": {
+        "navigationBarTitleText": "资产"
+      }
+    },
+    {
+      "path": "pages/asset/DeviceDetail",
+      "style": {
+        "navigationBarTitleText": "设备详情"
+      }
+    },
+    {
+      "path": "pages/asset/RoomDetail",
+      "style": {
+        "navigationBarTitleText": "房间详情"
+      }
+    },
+    {
+      "path": "pages/asset/DeviceCreate",
+      "style": {
+        "navigationBarTitleText": "新增设备"
+      }
+    },
+    {
+      "path": "pages/inventory/Inventory",
+      "style": {
+        "navigationBarTitleText": "盘点"
+      }
+    },
+    {
+      "path": "pages/inventory/Report",
+      "style": {
+        "navigationBarTitleText": "盘点报告"
+      }
+    },
+    {
+      "path": "pages/workorder/WorkOrderList",
+      "style": {
+        "navigationBarTitleText": "巡查工单",
+        "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/workorder/WorkOrderDetail",
+      "style": {
+        "navigationBarTitleText": "工单详情"
+      }
+    },
+    {
+      "path": "pages/workorder/WorkOrderEdit",
+      "style": {
+        "navigationBarTitleText": "新建工单"
+      }
+    },
+    {
+      "path": "pages/route/RouteList",
+      "style": {
+        "navigationBarTitleText": "巡查线路"
+      }
+    },
+    {
+      "path": "pages/route/RouteDetail",
+      "style": {
+        "navigationBarTitleText": "线路详情"
+      }
+    },
+    {
+      "path": "pages/route/RouteEdit",
+      "style": {
+        "navigationBarTitleText": "新建线路"
+      }
+    },
+    {
+      "path": "pages/print/DeviceLabelPrint",
+      "style": {
+        "navigationBarTitleText": "批量打印二维码"
+      }
+    },
+    {
+      "path": "pages/print/ScanBind",
+      "style": {
+        "navigationBarTitleText": "扫码定位绑定"
+      }
+    },
+    {
+      "path": "pages/profile/Profile",
+      "style": {
+        "navigationBarTitleText": "我的"
+      }
+    },
+    {
+      "path": "pages/datatable/TableRecords",
+      "style": {
+        "navigationBarTitleText": "数据表"
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "设备资产巡检",
+    "navigationBarBackgroundColor": "#ffffff",
+    "backgroundColor": "#f7f8fa"
+  },
+  "tabBar": {
+    "color": "#969799",
+    "selectedColor": "#1989fa",
+    "backgroundColor": "#ffffff",
+    "borderStyle": "black",
+    "list": [
+      {
+        "pagePath": "pages/home/Home",
+        "text": "首页"
+      },
+      {
+        "pagePath": "pages/asset/AssetHub",
+        "text": "资产"
+      },
+      {
+        "pagePath": "pages/inventory/Inventory",
+        "text": "盘点"
+      },
+      {
+        "pagePath": "pages/profile/Profile",
+        "text": "我的"
+      }
+    ]
+  }
+}

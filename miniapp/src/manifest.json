@@ -1,0 +1,28 @@
+{
+  "name": "设备资产巡检",
+  "appid": "wx604295833b86aa20",
+  "description": "项目管理部设备资产巡检系统：机房盘点、设备定位绑定、批量二维码打印、台账查询",
+  "versionName": "1.8.0",
+  "versionCode": "108",
+  "transformPx": false,
+  "vueVersion": "3",
+  "locale": "zh-Hans",
+  "mp-weixin": {
+    "appid": "wx604295833b86aa20",
+    "setting": {
+      "urlCheck": false,
+      "es6": true,
+      "postcss": true,
+      "minified": true,
+      "bigPackageSizeSupport": true
+    },
+    "usingComponents": true,
+    "requiredPrivateInfos": ["getLocation", "chooseLocation"],
+    "permission": {
+      "scope.userLocation": {
+        "desc": "用于设备盘点定位、选点标注设备位置与核对巡检位置"
+      }
+    },
+    "lazyCodeLoading": "requiredComponents"
+  }
+}
