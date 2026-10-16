@@ -1146,3 +1146,111 @@ def list_geo_observations(device_code: Optional[str] = None, limit: int = 20,
                        DeviceGeoObservation.id.desc())
             .limit(n).all())
     return [GeoObservationResponse.model_validate(r) for r in rows]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 【新增】已盘点设备分页接口（2026-10-16）
+# 解决资产页「一次性逐房间扇出拉全量」导致卡死/极慢的问题：
+#   复用进程内 60s 缓存的 _load_all，筛出 inventory_status=='confirmed'
+#   （即其绑定房间有 completed 盘点记录）的设备，支持关键字/子系统过滤 +
+#   内存分页 + 子系统计数，前端再分批渲染。一次请求返回当前页 + 总数 + 分类。
+# ═══════════════════════════════════════════════════════════════════
+@router.get("/inspected-devices")
+def inspected_devices(
+    page: int = 1,
+    page_size: int = 50,
+    subsystem_name: Optional[str] = None,
+    keyword: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """已盘点设备（分页）。
+
+    口径与资产页「仅显示已盘点资产」完全一致：设备所属房间在
+    room_inventory_records 有 completed 记录（inventory_status=='confirmed'）。
+
+    参数：
+      page / page_size  内存分页（page_size 上限 200）
+      subsystem_name   按子系统名过滤（空=全部）
+      keyword          模糊匹配 device_code / name / asset_name / brand_model / location
+
+    返回：
+      items        当前页设备列表
+      total        过滤后总条数
+      page/page_size
+      categories   按子系统名的计数（基于「关键字过滤后、子系统过滤前」的集合，
+                   保证 chip 数字与点击该类别后的结果口径一致）
+    """
+    rows = _load_all(db)
+    confirmed = [r for r in rows if (r.get("inventory_status") or "") == "confirmed"]
+
+    kw = (keyword or "").strip().lower()
+    if kw:
+        confirmed = [
+            r for r in confirmed
+            if kw in (r.get("device_code") or "").lower()
+            or kw in (r.get("name") or "").lower()
+            or kw in (r.get("asset_name") or "").lower()
+            or kw in (r.get("brand_model") or "").lower()
+            or kw in (r.get("location") or "").lower()
+        ]
+
+    # 子系统计数（基于关键字过滤后的集合，再按子系统分组）
+    cat_counts: Dict[str, int] = {}
+    for r in confirmed:
+        sn = (r.get("subsystem_name") or "").strip() or "未分类"
+        cat_counts[sn] = cat_counts.get(sn, 0) + 1
+    categories = [
+        {"subsystem_name": k, "count": v}
+        for k, v in sorted(cat_counts.items(), key=lambda x: (-x[1], x[0]))
+    ]
+
+    # 子系统过滤（在其余过滤都做完之后，保证 categories 不含当前选中的类别）
+    if subsystem_name:
+        sn_filter = subsystem_name.strip()
+        confirmed = [
+            r for r in confirmed
+            if ((r.get("subsystem_name") or "").strip() or "未分类") == sn_filter
+        ]
+
+    # 分页
+    try:
+        page = max(1, int(page))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = max(1, min(int(page_size), 200))
+    except (TypeError, ValueError):
+        page_size = 50
+    total = len(confirmed)
+    start = (page - 1) * page_size
+    page_rows = confirmed[start : start + page_size]
+
+    items = []
+    for r in page_rows:
+        items.append({
+            "device_code": r.get("device_code") or "",
+            "name": r.get("name") or r.get("device_name") or r.get("device_code") or "",
+            "device_name": r.get("device_name") or "",
+            "subsystem_id": r.get("subsystem_id"),
+            "subsystem_name": (r.get("subsystem_name") or "").strip() or "未分类",
+            "brand_model": r.get("brand_model") or "",
+            "location": r.get("location") or "",
+            "building": r.get("building") or "",
+            "floor": r.get("floor") or "",
+            "area": r.get("area") or "",
+            "room_code": r.get("room_code") or "",
+            "inventory_room_code": r.get("inventory_room_code") or "",
+            "inventory_confirmed_at": r.get("inventory_confirmed_at"),
+            "inventory_confirmed_by": r.get("inventory_confirmed_by") or "",
+            "is_active": r.get("is_active", True),
+            "source": r.get("source") or "",
+            "source_kind": r.get("source_kind") or "",
+        })
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "categories": categories,
+    }
