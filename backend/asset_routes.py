@@ -949,6 +949,9 @@ def create_device(data: DeviceCreate, db: Session = Depends(get_db), current_use
     if db.query(Device).filter(Device.device_code == data.device_code).first():
         raise HTTPException(status_code=400, detail=f"设备编号 {data.device_code} 已存在")
     obj = Device(**data.model_dump())
+    # 未标注一律落「非维保设备」（扫码盘点后才升为维保设备）
+    if not getattr(obj, "device_attr", None):
+        obj.device_attr = "非维保设备"
     db.add(obj)
     db.flush()   # 先取 id，供双写记录引用（不 commit，保证两写同生共死）
     _write_site_created_record(db, obj, current_user.name)
@@ -4403,11 +4406,16 @@ def bind_device_to_room(room_code: str, data: RoomDeviceBind,
     # 回填 devices 位置字段（与 update_device 的 room_id 级联约定一致）
     if dev is None:
         dev = db.query(Device).filter(Device.device_code == code).first()
+    attr_upgraded = False
     if dev is not None:
         dev.room_id = room.id
         dev.building = room.building
         dev.floor = room.floor
         dev.updated_at = datetime.now(timezone.utc)
+        # 扫码盘点过 → 设备属性自动升级为「维保设备」
+        if (dev.device_attr or "") != "维保设备":
+            dev.device_attr = "维保设备"
+            attr_upgraded = True
     db.commit()
 
     info = _inventory_device_rows(db, {code})
@@ -4693,6 +4701,7 @@ def merge_room_devices(room_code: str, data: RoomDeviceMerge,
                     "floor": merge_row.floor,
                     "location_desc": merge_row.location_desc,
                     "is_active": merge_row.is_active,
+                    "device_attr": merge_row.device_attr,
                 }
                 db.delete(merge_row)
 
@@ -4797,6 +4806,7 @@ def _release_merge(db: Session, alias: DeviceAlias) -> Dict[str, Any]:
                 floor=snap.get("floor") or "",
                 location_desc=snap.get("location_desc") or "",
                 is_active=snap.get("is_active", True),
+                device_attr=snap.get("device_attr") or "非维保设备",
             ))
     # 继承给主设备的子系统归还（继承的前提是 keep 原本没有子系统）
     if meta.get("subsystem_inherited"):
