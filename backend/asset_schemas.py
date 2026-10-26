@@ -42,6 +42,7 @@ class DeviceBase(BaseModel):
     floor: str = ""
     location_desc: str = ""
     parent_device_id: Optional[int] = None
+    device_attr: Optional[str] = None
     is_active: bool = True
 
     @field_validator("building", "floor", "location_desc", mode="before")
@@ -62,6 +63,7 @@ class DeviceUpdate(BaseModel):
     floor: Optional[str] = None
     location_desc: Optional[str] = None
     parent_device_id: Optional[int] = None
+    device_attr: Optional[str] = None
     is_active: Optional[bool] = None
 
 class DeviceResponse(DeviceBase):
@@ -155,9 +157,11 @@ class RecordUpdate(BaseModel):
 class RecordResponse(BaseModel):
     id: int
     table_id: int
-    device_code: str
+    # harden_nullable_record_keys：脚本直插 records 时 device_code/created_by 可能为 NULL，
+    # 一旦有 NULL 就会让整张表的记录列表 500（不是只坏那一行）。
+    device_code: Optional[str] = None
     data: Dict[str, Any]
-    created_by: str
+    created_by: Optional[str] = None
     created_at: Any
     updated_at: Any
     # 便于前端展示

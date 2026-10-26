@@ -37,6 +37,18 @@ def init_db():
             conn.execute(sa_text("ALTER TABLE device_aliases ADD COLUMN merge_meta JSON"))
     except Exception:
         pass
+    # 防御性迁移：inspection_checkins 超范围判定字段（2026-10-23）。
+    # distance_m=本次与目标定位基准的球面距离（米）；out_of_range=是否超出设定打卡范围。
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE inspection_checkins ADD COLUMN distance_m REAL"))
+    except Exception:
+        pass
+    try:
+        with engine.begin() as conn:
+            conn.execute(sa_text("ALTER TABLE inspection_checkins ADD COLUMN out_of_range BOOLEAN NOT NULL DEFAULT 0"))
+    except Exception:
+        pass
 
 class User(Base):
     __tablename__ = "users"
@@ -97,6 +109,7 @@ class Device(Base):
     location_desc = Column(String, default="")          # 位置描述
     parent_device_id = Column(Integer, nullable=True)   # 设备层级（如回路→配电柜）
     # ===== 资产模块扩展列（ALTER 一次性迁移；全部可空，不破坏旧数据）=====
+    device_attr = Column(String, default="")                    # 设备属性（维表设备/委外等，来自 GTC 维表 Excel 标注）
     transfer_no = Column(String, index=True, default="")        # 固定资产移交编号
     asset_code = Column(String, index=True, default="")         # 资产代码
     category_id = Column(Integer, ForeignKey("equipment_categories.id"), nullable=True)  # 设备分类
@@ -412,6 +425,13 @@ class RoomInventoryRecord(Base):
     source = Column(String, default="miniprogram")      # miniprogram / web
     remark = Column(String, default="")
     completed_at = Column(DateTime, default=datetime.now(timezone.utc))
+    # ---- 盘点重做新增列（与 asset_routes 4 态逻辑对齐，表已 ALTER 存在）----
+    scanned_count = Column(Integer, default=0)          # 本次实际扫码数
+    abnormal = Column(Boolean, default=False)           # 是否异常终态
+    abnormal_reason = Column(String, default="")        # 异常说明（abnormal=1 时必填）
+    started_at = Column(DateTime, nullable=True)        # 开单时间（doing 态起点）
+    diff_count = Column(Integer, default=0)             # 差异数（应扫 vs 实扫 差）
+
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
