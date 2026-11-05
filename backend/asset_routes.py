@@ -37,6 +37,7 @@ from asset_schemas import (
     SearchResult, DevicePhotoResponse,
     RoomDeviceBind, RoomInventoryComplete, RoomDeviceMerge, RoomDeviceUnmerge,
     TransferMappingItem, TransferMappingResponse, RecordTransferRequest,
+    DeviceAiSuggestRequest,
 )
 # 鉴权统一收口到 dependencies（消除与 main.py 的重复实现）
 from dependencies import get_current_user as _get_current_user, require_admin as _require_admin
@@ -58,6 +59,13 @@ from record_filter_stats import compute_filter_stats
 from record_field_values import (
     list_field_values, reset_cache as reset_field_value_cache,
     FieldValueError,
+)
+
+# 新建设备「AI 补全」：编号由规则生成，模型只做字段推断（编号绝不由模型生成）
+from asset_ai_suggest import (
+    build_suggestion as _ai_build_suggestion,
+    SuggestBadInput as _AISuggestBadInput,
+    SuggestRateLimited as _AISuggestRateLimited,
 )
 
 router = APIRouter(prefix="/assets", tags=["assets"])
@@ -1031,6 +1039,33 @@ def next_temp_device_code(area: Optional[str] = None,
 
 # 补录编号要改写的全部关联列（顺序：先子表、后主表；SQLite 默认不强制外键，顺序仍按安全侧排）。
 # ⛔ fixed_assets 绝不在此列：固定资产源表编号以对方为准，改它等于篡改固定资产账。
+@router.post("/devices/ai-suggest")
+async def ai_suggest_device(
+    data: DeviceAiSuggestRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(_get_current_user),
+):
+    """新建设备「AI 补全」：按已填的中文位置/设备名给出编号与可推断字段的建议。
+
+    红线（用户口径）：
+    - **设备编号绝不由大模型生成**，一律由拼音首字母规则 + 尾数唯一性校验产出
+      （`<地名缩写>-<设备名缩写>-<两位尾数>`，同前缀下从 01 递增，占用则跳过）；
+    - 模型输出**全部白名单校验**（子系统必须真实存在、机房必须在候选内、楼栋楼层必须在
+      库中取值集合内），不通过就丢弃该字段并列入 `missing`，绝不把模型原话塞进字段；
+    - 推断不出 → 进 `missing` 并带人话原因，**不填默认值**；
+    - 模型超时/报错 → 降级纯规则，仍返回 200（不让用户卡在转圈）；
+    - 同一用户 1 分钟最多 6 次，超限 429。
+
+    本接口**只产生建议、不落库**：采用与否由用户在建议面板里逐字段决定。
+    """
+    try:
+        return await _ai_build_suggestion(db, data, current_user)
+    except _AISuggestRateLimited as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    except _AISuggestBadInput as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 _REBIND_TARGETS: List[Dict[str, str]] = [
     {"table": "records",                    "column": "device_code"},
     {"table": "device_archives",            "column": "device_code"},

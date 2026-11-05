@@ -13,3 +13,5 @@ openpyxl>=3.1.0
 # 仅用于 scripts/smoke_test_p0.py 的 TestClient 冒烟测试（开发/QA 依赖，非运行时必需）
 httpx>=0.27.0
 
+# 新建设备「AI 补全」拼音首字母缩写（纯 Python 无编译依赖）；缺失时代码自动降级为 DEV 兜底
+pypinyin>=0.55.0

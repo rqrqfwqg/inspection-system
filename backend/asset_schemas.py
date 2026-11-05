@@ -532,3 +532,19 @@ class InventoryStatusOverrideIn(BaseModel):
             raise ValueError("reason 必填且不可为空（含纯空白）")
         return str(v).strip()
 
+
+
+# ==================== 新建设备「AI 补全」建议（规则编号 + 模型字段推断） ====================
+
+class DeviceAiSuggestRequest(BaseModel):
+    """POST /assets/devices/ai-suggest 请求体：字段全可空，但 name + location_desc 至少一个非空。
+
+    device_code 只在**为空**时才建议 —— 已有编号说明用户照着铭牌填了，规则编号不该覆盖它。
+    """
+    device_code: Optional[str] = None
+    name: Optional[str] = None
+    location_desc: Optional[str] = None
+    building: Optional[str] = None
+    floor: Optional[str] = None
+    room_id: Optional[int] = None
+    subsystem_id: Optional[int] = None
