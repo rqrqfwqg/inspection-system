@@ -156,6 +156,67 @@ export function assetRooms(building?: string): Promise<AssetRoom[]> {
   return assetRequest<AssetRoom[]>(`/rooms${q}`)
 }
 
+/**
+ * GET /assets/rooms/meta —— 楼栋 / 楼层 / 房型**轻量字典**（只聚合，实测 2.2KB）。
+ *
+ * 为什么不继续用上面的 assetRooms()：全量 938 间是 222KB，小程序弱网下经常超时，
+ * 而「新建设备」只要楼栋/楼层两个下拉的候选，不需要房间明细。
+ */
+export interface AssetRoomsMetaFloor {
+  name: string
+  count: number
+}
+export interface AssetRoomsMetaBuilding {
+  name: string
+  count: number
+  /** 后端已按下沉→地上顺序排好，前端不要再 sort（中文楼层名排序会乱） */
+  floors: AssetRoomsMetaFloor[]
+}
+export interface AssetRoomsMeta {
+  total: number
+  buildings: AssetRoomsMetaBuilding[]
+  room_types: string[]
+}
+export function assetRoomsMeta(): Promise<AssetRoomsMeta> {
+  return assetRequest<AssetRoomsMeta>('/assets/rooms/meta')
+}
+
+/** 房间分页列表的一行（含 id，供表单 room_id 直接使用） */
+export interface AssetRoomPageItem {
+  id: number
+  code: string
+  name: string
+  building: string
+  floor: string
+  room_type?: string
+  /** 形如「6号仓·一楼·配电间」 */
+  address: string
+}
+export interface AssetRoomPage {
+  total: number
+  limit: number
+  offset: number
+  items: AssetRoomPageItem[]
+}
+
+/**
+ * GET /assets/rooms —— 房间**分页**列表（机房搜索选择器用）。
+ *
+ * 与 /assets/rooms/search 的分工：本接口带 total + offset，供搜索层「加载更多」；
+ * keyword 同时匹配 name / code / building / floor（后端已做小写归一）。
+ */
+export function assetRoomPage(
+  params: { building?: string; floor?: string; keyword?: string; limit?: number; offset?: number } = {},
+): Promise<AssetRoomPage> {
+  const parts: string[] = []
+  if (params.building) parts.push(`building=${encodeURIComponent(params.building)}`)
+  if (params.floor) parts.push(`floor=${encodeURIComponent(params.floor)}`)
+  if (params.keyword) parts.push(`keyword=${encodeURIComponent(params.keyword)}`)
+  parts.push(`limit=${Math.max(1, Math.min(Number(params.limit) || 50, 200))}`)
+  parts.push(`offset=${Math.max(0, Number(params.offset) || 0)}`)
+  return assetRequest<AssetRoomPage>(`/assets/rooms?${parts.join('&')}`)
+}
+
 /** GET /assets/rooms/inventory/overview —— 各房间已绑定设备数（盘点进度） */
 export function assetInventoryOverview(building?: string): Promise<RoomInventoryOverview> {
   const q = building ? `?building=${encodeURIComponent(building)}` : ''
@@ -744,7 +805,7 @@ export function assetInspectedDevices(params: {
  * 也能在数据表管理里选表选设备」统一走本接口。
  */
 export function assetDataTables(): Promise<AssetDataTable[]> {
-  return assetRequest<AssetDataTable[]>('/tables')
+  return assetRequest<AssetDataTable[]>('/assets/tables')
 }
 
 /**
@@ -762,5 +823,5 @@ export function assetTableRecords(
   if (params.skip) q.push(`skip=${params.skip}`)
   if (params.q) q.push(`q=${encodeURIComponent(params.q)}`)
   if (params.device_code) q.push(`device_code=${encodeURIComponent(params.device_code)}`)
-  return assetRequest<AssetTableRecord[]>(`/tables/${tid}/records${q.length ? '?' + q.join('&') : ''}`)
+  return assetRequest<AssetTableRecord[]>(`/assets/tables/${tid}/records${q.length ? '?' + q.join('&') : ''}`)
 }

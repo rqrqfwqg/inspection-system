@@ -998,21 +998,21 @@ function goPrint() {
 .rel-count { font-size: 24rpx; color: $tm-text-muted; }
 .rel-add { font-size: 26rpx; color: $tm-primary; font-weight: 600; }
 .rel-empty { text-align: center; color: $tm-text-muted; font-size: 26rpx; padding: 24rpx 0; }
-.rel-item { display: flex; align-items: center; gap: 16rpx; padding: 18rpx 0;
+.rel-item { display: flex; flex-wrap: wrap; align-items: center; gap: 16rpx; padding: 18rpx 0;
   border-bottom: 1rpx solid $tm-border-light; }
-.rel-main { flex: 1; display: flex; align-items: center; gap: 12rpx; flex-wrap: wrap; }
+.rel-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12rpx; flex-wrap: wrap; order: 1; }
 .rel-dir { font-size: 22rpx; color: #fff; padding: 2rpx 12rpx; border-radius: 6rpx; }
 .rel-dir.out { background: #2f7cf6; }
 .rel-dir.in { background: #f0883e; }
-.rel-code { font-size: 28rpx; color: $tm-text; font-weight: 600; word-break: break-all; }
+.rel-code { font-size: 28rpx; color: $tm-text; font-weight: 600; word-break: break-word; }
 .rel-type { font-size: 22rpx; color: $tm-text-secondary; background: $tm-bg;
   padding: 2rpx 10rpx; border-radius: 6rpx; }
-.rel-sub { flex-basis: 100%; display: flex; gap: 12rpx; align-items: center; }
-.rel-name { font-size: 22rpx; color: $tm-text-muted; }
-.rel-src { font-size: 20rpx; padding: 1rpx 10rpx; border-radius: 6rpx; }
+.rel-sub { flex: 0 0 100%; padding-left: 0; display: flex; gap: 12rpx; align-items: center; order: 3; }
+.rel-name { flex: 1; min-width: 0; font-size: 22rpx; color: $tm-text-muted; }
+.rel-src { flex-shrink: 0; white-space: nowrap; font-size: 20rpx; padding: 1rpx 10rpx; border-radius: 6rpx; }
 .rel-src.auto { color: #2f7cf6; background: #eaf2ff; }
 .rel-src.manual { color: #f0883e; background: #fff1e6; }
-.rel-del { font-size: 24rpx; color: #e54848; flex-shrink: 0; padding-left: 12rpx; }
+.rel-del { font-size: 24rpx; color: #e54848; flex-shrink: 0; padding-left: 12rpx; order: 2; }
 .sheet-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 50;
   display: flex; align-items: flex-end; }
 .sheet { width: 100%; background: $tm-card-bg; border-radius: 24rpx 24rpx 0 0; padding: 32rpx 24rpx

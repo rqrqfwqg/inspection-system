@@ -57,6 +57,11 @@
           <text class="arrow">›</text>
         </view>
       </picker>
+      <!-- 子系统加载失败：独立提示 + 可点重试，不再和房间数据被一句话一起吞掉 -->
+      <view class="retry-bar" v-if="subErr">
+        <text class="retry-t">{{ subErr }}</text>
+        <text class="retry-x" @tap="loadSubsystems">重试</text>
+      </view>
 
       <!-- 楼栋（模糊搜索 + 选择确认） -->
       <view class="fld col">
@@ -84,6 +89,14 @@
         </view>
         <text class="sug-tip" v-if="bldOpen && bldQuery && !bldFiltered.length">无匹配楼栋，将以上述文字作为楼栋名</text>
       </view>
+      <!-- 房间字典（楼栋/楼层候选）加载失败：明确提示 + 可点重试 -->
+      <view class="retry-bar" v-if="roomsErr">
+        <text class="retry-t">{{ roomsErr }}，楼栋/楼层候选可能不全</text>
+        <text class="retry-x" @tap="loadRoomMeta">重试</text>
+      </view>
+      <view class="retry-bar" v-else-if="roomsLoading && !roomMeta">
+        <text class="retry-t">正在加载楼栋/楼层…</text>
+      </view>
       <picker mode="selector" :range="floorLabels" :value="floorIndex" @change="onFloor">
         <view class="fld" :class="{ muted: !form.building }">
           <text class="lbl" :class="{ 'has-tag': !!aiTag('floor') }">所属楼层<text
@@ -96,7 +109,20 @@
         </view>
       </picker>
 
-      <!-- 机房（依赖楼栋 + 楼层；级联筛选） -->
+      <!-- 机房：主路径 = 搜索式选择（不依赖楼栋/楼层，现场直接搜「配电」即可命中） -->
+      <view class="fld" @tap="openRoomSearch">
+        <text class="lbl" :class="{ 'has-tag': !!aiTag('room_id') }">机房<text
+          class="ai-tag"
+          :class="{ edited: aiTag('room_id') === 'AI·已改' }"
+          v-if="aiTag('room_id')"
+        >{{ aiTag('room_id') }}</text></text>
+        <text class="inp val">{{ roomLabel }}</text>
+        <text class="pick-btn">{{ form.room_id == null ? '搜索选择' : '重选' }}</text>
+        <text class="arrow">›</text>
+      </view>
+      <view class="sub-hint">点上面一行搜「配电」「GTC 一楼」等关键字，选中后自动回填楼栋与楼层</view>
+
+      <!-- 可选路径：按楼栋 → 楼层 → 机房级联选择（保留原有行为，未被搜索取代） -->
       <picker
         mode="selector"
         :range="roomLabels"
@@ -105,15 +131,12 @@
         @change="onRoom"
       >
         <view class="fld" :class="{ muted: !form.building || !form.floor }">
-          <text class="lbl" :class="{ 'has-tag': !!aiTag('room_id') }">机房<text
-            class="ai-tag"
-            :class="{ edited: aiTag('room_id') === 'AI·已改' }"
-            v-if="aiTag('room_id')"
-          >{{ aiTag('room_id') }}</text></text>
-          <text class="inp val">{{ roomLabel }}</text>
+          <text class="lbl">按楼栋楼层级联选</text>
+          <text class="inp val">{{ cascadeRoomLabel }}</text>
           <text class="arrow">›</text>
         </view>
       </picker>
+      <view class="sub-hint" v-if="cascadeErr">{{ cascadeErr }}，请用上方搜索选择机房</view>
 
       <!-- 位置描述 -->
       <view class="fld col">
@@ -128,6 +151,25 @@
           placeholder-class="ph"
           v-model="form.location_desc"
         />
+      </view>
+
+      <!-- 同房间已有设备：照着已有设备建，不靠 AI 也能填对系统与位置 -->
+      <view class="peers" v-if="form.room_id != null">
+        <view class="peers-hd">
+          <text class="peers-t">该房间已有 {{ peerTotal }} 台设备{{ peerMoreHint }}</text>
+          <text class="peers-retry" v-if="peerErr" @tap.stop="loadPeers">点此重试</text>
+        </view>
+        <view class="peers-err" v-if="peerErr">{{ peerErr }}</view>
+        <view class="peers-loading" v-else-if="peerLoading">正在加载该房间设备…</view>
+        <view class="peers-empty" v-else-if="!peers.length">该房间暂无已登记设备，可直接建档</view>
+        <view class="peer" v-for="p in peers" :key="p.device_code" @tap="usePeer(p)">
+          <view class="peer-l">
+            <text class="peer-n">{{ p.name || '未命名设备' }}</text>
+            <text class="peer-c">{{ p.device_code }}<text v-if="p.subsystem_name"> · {{ p.subsystem_name }}</text></text>
+          </view>
+          <text class="peer-act">参考</text>
+        </view>
+        <view class="peers-tip" v-if="peers.length">点「参考」只复制所属系统与位置，设备编号不会被复制</view>
       </view>
 
       <!-- AI 补全：手动点才跑（不做离开输入框自动执行），结果只进建议面板，采用后才写表单 -->
@@ -206,21 +248,64 @@
         </view>
       </view>
     </view>
+    <!-- 机房搜索选择层（主路径：输入关键字直接选，不依赖楼栋/楼层） -->
+    <view v-if="roomOpen" class="sheet-mask" @tap="closeRoomSearch">
+      <view class="sheet" @tap.stop>
+        <view class="sheet-title">选择机房</view>
+        <view class="rs-bar">
+          <input
+            class="rs-inp"
+            placeholder="如：配电 / GTC 一楼 / CK6-1F-PDJ"
+            placeholder-class="ph"
+            :value="roomKw"
+            confirm-type="search"
+            @input="onRoomKwInput"
+            @confirm="searchRooms()"
+          />
+          <text class="rs-do" @tap="searchRooms()">搜索</text>
+        </view>
+        <view class="rs-filter" v-if="roomFilterBuilding || roomFilterFloor">
+          <text class="rs-filter-t">按当前位置过滤：{{ [roomFilterBuilding, roomFilterFloor].filter(Boolean).join(' · ') }}</text>
+          <text class="rs-filter-x" @tap="clearRoomFilter">清除过滤</text>
+        </view>
+        <scroll-view scroll-y class="rs-body">
+          <view class="ai-warn" v-if="roomErr">{{ roomErr }}（点上方「搜索」重试）</view>
+          <view class="peers-loading" v-else-if="roomLoading">搜索中…</view>
+          <view class="peers-empty" v-else-if="!roomHits.length">
+            {{ roomKw ? '没有匹配的机房，换个关键字试试' : '输入关键字开始搜索' }}
+          </view>
+          <view class="rs-item" v-for="it in roomHits" :key="it.code" @tap="pickRoom(it)">
+            <text class="rs-addr">{{ it.address }}</text>
+            <text class="rs-meta">{{ it.code }}<text v-if="it.room_type"> · {{ it.room_type }}</text></text>
+          </view>
+          <view class="rs-more" v-if="roomHasMore && !roomLoading" @tap="searchRooms(true)">
+            加载更多（共 {{ roomTotal }} 条）
+          </view>
+        </scroll-view>
+        <view class="ai-foot">
+          <view class="sheet-cancel" @tap="closeRoomSearch">关闭</view>
+        </view>
+      </view>
+    </view>
   </view>
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, computed } from 'vue'
+import { reactive, ref, computed, watch } from 'vue'
 import { onLoad } from '@dcloudio/uni-app'
 import {
   assetCreateDevice,
   assetSubsystems,
   assetRooms,
+  assetRoomsMeta,
+  assetRoomPage,
+  assetRoomDevices,
   parseScanPayload,
   assetSearchDevice,
   assetTempCode,
   assetAiSuggest,
 } from '@/api/asset'
+import type { AssetRoomPageItem, AssetRoomsMeta } from '@/api/asset'
 import type {
   AssetSubsystem,
   AssetRoom,
@@ -248,6 +333,62 @@ const form = reactive({
 
 const subsystems = ref<AssetSubsystem[]>([])
 const rooms = ref<AssetRoom[]>([])
+/** 房间全量（222KB）是否已拉过 / 正在拉 —— 懒加载标记，首屏不拉 */
+const roomsFullLoaded = ref(false)
+const roomsFullLoading = ref(false)
+
+// ===== 基础数据：子系统 / 房间字典（楼栋楼层）各自独立加载 =====
+// 为什么不共用一个 try/catch：原先 Promise.all 任一失败 → 两样都没了，
+// 页面只弹一句「基础数据加载失败」，现场根本没法判断是系统列表挂了还是房间挂了。
+const subLoading = ref(false)
+const subErr = ref('')
+const roomsLoading = ref(false)
+const roomsErr = ref('')
+/** 楼栋/楼层/房型轻量字典（/assets/rooms/meta，实测 2.2KB） */
+const roomMeta = ref<AssetRoomsMeta | null>(null)
+/**
+ * 房间全量的加载错误（仅级联路径需要）。
+ * 这一份是 222KB 的 /rooms，只用于「按楼栋楼层级联」与按 room_id 反查展示名，
+ * 失败不影响主流程（搜索式选机房走 /assets/rooms，不依赖它），故单独提示、不弹 toast。
+ */
+const cascadeErr = ref('')
+
+// ===== 机房搜索选择（主路径）=====
+const roomOpen = ref(false)
+const roomKw = ref('')
+const roomHits = ref<AssetRoomPageItem[]>([])
+const roomTotal = ref(0)
+const roomLoading = ref(false)
+const roomErr = ref('')
+const roomFilterBuilding = ref('')
+const roomFilterFloor = ref('')
+const roomHasMore = computed(() => roomHits.value.length < roomTotal.value)
+/** 搜索选中的机房名（搜索结果的房间可能不在 222KB 全量里，故单独记一份展示名） */
+const pickedRoomLabel = ref('')
+/** room_id → code 的快照，供拉「同房间已有设备」用（搜索结果不保证在 rooms 全量里） */
+const roomCodeById = ref<Record<number, string>>({})
+
+// ===== 同房间已有设备 =====
+interface RoomPeerDevice {
+  device_code: string
+  name?: string
+  subsystem_name?: string | null
+  brand_model?: string
+  is_registered?: boolean
+  is_active?: boolean
+  location_desc?: string
+}
+const peers = ref<RoomPeerDevice[]>([])
+const peerTotal = ref(0)
+const peerLoading = ref(false)
+const peerErr = ref('')
+/** 只取前 20 条：现场一眼扫得完，也不用为「参考」拉几百条 */
+const PEER_LIMIT = 20
+/** 房间设备多于 20 台时的补充说明（写成 computed，避免模板里塞模板字符串） */
+const peerMoreHint = computed(() =>
+  peerTotal.value > peers.value.length ? '（列前 ' + peers.value.length + ' 台）' : '',
+)
+
 const submitting = ref(false)
 const submitErr = ref('')
 const checking = ref(false)
@@ -264,15 +405,33 @@ const tempHint = ref('')
 const dupCode = ref('')
 
 const subLabels = computed(() => ['未指定'].concat(subsystems.value.map((s) => s.name)))
+/**
+ * 楼栋候选：**以 /assets/rooms/meta 为准**（轻量接口，2.2KB），
+ * 不再从 222KB 的 rooms 全量里 reduce。字典没到或失败时退化为全量里出现过的楼栋（保持旧可用性）。
+ */
 const bldLabels = computed(() => {
-  const set = new Set<string>()
-  for (const r of rooms.value) if (r.building) set.add(r.building)
-  return ['未指定'].concat(Array.from(set).sort())
+  const names: string[] = []
+  for (const b of roomMeta.value?.buildings || []) if (b.name) names.push(b.name)
+  if (!names.length) {
+    const set = new Set<string>()
+    for (const r of rooms.value) if (r.building) set.add(r.building)
+    names.push(...Array.from(set).sort())
+  }
+  return ['未指定'].concat(Array.from(new Set(names)))
 })
+/**
+ * 楼层候选：优先用 meta 里该楼栋的 floors（后端已按 地下层→地上层 排好序），
+ * 中文楼层名（一楼/二楼/负一楼）交给前端 sort 会乱序，所以只在兜底分支才排序。
+ */
 const floorLabels = computed(() => {
+  const b = form.building
+  const mb = (roomMeta.value?.buildings || []).find((x) => x.name === b)
+  if (mb && (mb.floors || []).length) {
+    return ['未指定'].concat(mb.floors.map((f) => f.name).filter(Boolean))
+  }
   const set = new Set<string>()
   for (const r of rooms.value) {
-    if (r.building === form.building && r.floor) set.add(r.floor)
+    if (r.building === b && r.floor) set.add(r.floor)
   }
   return ['未指定'].concat(Array.from(set).sort())
 })
@@ -285,11 +444,20 @@ const roomLabels = computed(() => {
   return ['未指定'].concat(matched.map((r) => `${r.name}（${r.code}）`))
 })
 
-/** 当前已选机房展示名（按 room_id 反查） */
+/** 当前已选机房展示名：先按 room_id 在 rooms 全量里反查，查不到用搜索选中时记下的名字 */
 const roomLabel = computed(() => {
   if (form.room_id == null) return '未指定'
   const rm = rooms.value.find((r) => r.id === form.room_id)
-  return rm ? `${rm.name}（${rm.code}）` : '未指定'
+  if (rm) return `${rm.name}（${rm.code}）`
+  return pickedRoomLabel.value || `机房 #${form.room_id}`
+})
+
+/** 级联选择器那一行的展示值（未选楼栋楼层时直接说清为什么点不了） */
+const cascadeRoomLabel = computed(() => {
+  if (!form.building || !form.floor) return '请先选楼栋与楼层'
+  if (form.room_id == null) return '未指定'
+  const i = roomIndex.value
+  return i <= 0 ? '未指定' : roomLabels.value[i] || '未指定'
 })
 
 /** 楼栋模糊搜索：候选 = 去重楼栋列表（剔除「未指定」），按输入关键字子串过滤 */
@@ -306,9 +474,11 @@ function onBldInput(e: any) {
   bldQuery.value = v
   form.building = v
   bldOpen.value = true
+  ensureRooms()
 }
 function onBldFocus() {
   bldOpen.value = true
+  ensureRooms()
 }
 function onBldBlur() {
   // 延迟关闭：确保点击候选项时先触发选中，而非先失焦把列表关掉
@@ -346,20 +516,78 @@ function subNameOf(id: number) {
   return hit ? hit.name : '未指定'
 }
 
-onLoad(async (opt) => {
+// ===== 基础数据加载（三个请求各自独立，互不拖累）=====
+
+/** 所属系统下拉（/assets/subsystems，1.6KB） */
+async function loadSubsystems() {
+  if (subLoading.value) return
+  subLoading.value = true
+  subErr.value = ''
+  try {
+    const subs = await assetSubsystems()
+    subsystems.value = subs || []
+  } catch (e: any) {
+    subErr.value = (e?.message || '').trim() || '所属系统加载失败'
+  } finally {
+    subLoading.value = false
+  }
+}
+
+/** 楼栋/楼层字典（/assets/rooms/meta，实测 2.2KB）—— 楼栋、楼层下拉的唯一数据源 */
+async function loadRoomMeta() {
+  if (roomsLoading.value) return
+  roomsLoading.value = true
+  roomsErr.value = ''
+  try {
+    roomMeta.value = await assetRoomsMeta()
+  } catch (e: any) {
+    roomsErr.value = (e?.message || '').trim() || '房间数据加载失败'
+    roomMeta.value = null
+  } finally {
+    roomsLoading.value = false
+  }
+}
+
+/**
+ * 房间全量（/rooms，222KB）：**只服务「按楼栋楼层级联」这条可选路径**。
+ * 单独 try/catch + 不阻塞首屏：失败只在级联那一行下面提一句，搜索式选机房照常可用。
+ */
+async function loadRooms() {
+  if (roomsFullLoaded.value || roomsFullLoading.value) return
+  roomsFullLoading.value = true
+  cascadeErr.value = ''
+  try {
+    const rs = await assetRooms()
+    rooms.value = rs || []
+    roomsFullLoaded.value = true
+  } catch (e: any) {
+    rooms.value = []
+    cascadeErr.value = (e?.message || '').trim() || '级联选择的房间数据未加载'
+  } finally {
+    roomsFullLoading.value = false
+  }
+}
+
+/**
+ * 房间全量『按需加载』入口：首屏不拉，只在上面的入口真正要按楼栋楼层级联、
+ * 或需要按 room_id 反查楼栋楼层时才拉一次（已拉过直接跳过，并发也只会打一次）。
+ */
+function ensureRooms() {
+  if (roomsFullLoaded.value || roomsFullLoading.value) return
+  loadRooms()
+}
+
+onLoad((opt) => {
   // 支持从别处带编号进来（如扫码后直接建档）
   const pre = (opt as any)?.code ? decodeURIComponent(String((opt as any).code)) : ''
   if (pre) {
     form.device_code = pre
     lockedCode.value = true
   }
-  try {
-    const [subs, rs] = await Promise.all([assetSubsystems(), assetRooms()])
-    subsystems.value = subs || []
-    rooms.value = rs || []
-  } catch (e: any) {
-    showToast(e?.message || '基础数据加载失败', 'none')
-  }
+  // 首屏只拉两份轻量字典（子系统 1.6KB + 房间 meta 2.2KB）。
+  // 222KB 的 /rooms 全量改成按需懒加载（ensureRooms），首屏不再背这个大包。
+  loadSubsystems()
+  loadRoomMeta()
 })
 
 function onSub(e: any) {
@@ -371,6 +599,7 @@ function onFloor(e: any) {
   form.floor = i === 0 ? '' : floorLabels.value[i]
   // 楼层变了，机房候选随之变化，已选机房失效
   form.room_id = null
+  ensureRooms()
 }
 /** 机房下拉：range 第 0 项为「未指定」→ null，其余按 roomLabels 偏移反查 room.id */
 function onRoom(e: any) {
@@ -384,6 +613,158 @@ function roomIdOf(index: number): number | null {
   )
   return matched[index - 1]?.id ?? null
 }
+
+// ===== 机房搜索式选择（主路径）=====
+
+/** 打开搜索层：带上当前已填的楼栋/楼层作为可选过滤条件（不清空用户已填的位置） */
+function openRoomSearch() {
+  roomOpen.value = true
+  roomErr.value = ''
+  roomFilterBuilding.value = form.building || ''
+  roomFilterFloor.value = form.floor || ''
+  if (!roomHits.value.length) searchRooms()
+}
+
+function closeRoomSearch() {
+  roomOpen.value = false
+}
+
+function onRoomKwInput(e: any) {
+  roomKw.value = String(e?.detail?.value ?? '')
+}
+
+function clearRoomFilter() {
+  roomFilterBuilding.value = ''
+  roomFilterFloor.value = ''
+  searchRooms()
+}
+
+/**
+ * 搜机房（/assets/rooms，分页）。
+ * more=true 表示「加载更多」：按已加载条数作为 offset 追加，不重复请求。
+ */
+async function searchRooms(more = false) {
+  if (roomLoading.value) return
+  roomLoading.value = true
+  roomErr.value = ''
+  const offset = more ? roomHits.value.length : 0
+  try {
+    const r = await assetRoomPage({
+      keyword: roomKw.value.trim() || undefined,
+      building: roomFilterBuilding.value || undefined,
+      floor: roomFilterFloor.value || undefined,
+      limit: 50,
+      offset,
+    })
+    const items = r?.items || []
+    roomTotal.value = Number(r?.total || 0)
+    roomHits.value = more ? roomHits.value.concat(items) : items
+  } catch (e: any) {
+    // 不许静默空列表：明确说失败原因，并保留「搜索」按钮当重试入口
+    roomErr.value = (e?.message || '').trim() || '机房搜索失败'
+    if (!more) {
+      roomHits.value = []
+      roomTotal.value = 0
+    }
+  } finally {
+    roomLoading.value = false
+  }
+}
+
+/** 选中机房：回填 room_id + 自动回填楼栋/楼层（保证与级联口径一致、提交时位置不缺失） */
+function pickRoom(it: AssetRoomPageItem) {
+  let rid: number | null = typeof it.id === 'number' ? it.id : null
+  if (rid == null) {
+    // 兜底：老接口没给 id 时用全量反查（换后端版本时不至于挂不上机房）
+    rid = rooms.value.find((r) => r.code === it.code)?.id ?? null
+  }
+  form.room_id = rid
+  if (it.building) form.building = it.building
+  if (it.floor) form.floor = it.floor
+  bldQuery.value = form.building
+  pickedRoomLabel.value = `${it.name}（${it.code}）`
+  if (rid != null) roomCodeById.value = { ...roomCodeById.value, [rid]: it.code }
+  ensureRooms()
+  roomOpen.value = false
+}
+
+// ===== 同房间已有设备（照着已有设备建）=====
+
+/** 按 room_id 取 room code：先查搜索快照，再查全量（两条路径都能覆盖） */
+function roomCodeOfId(id: number): string {
+  const snap = roomCodeById.value[id]
+  if (snap) return snap
+  return rooms.value.find((r) => r.id === id)?.code || ''
+}
+
+async function loadPeers() {
+  const rid = form.room_id
+  if (rid == null) {
+    peers.value = []
+    peerTotal.value = 0
+    peerErr.value = ''
+    return
+  }
+  const code = roomCodeOfId(rid)
+  if (!code) {
+    peers.value = []
+    peerTotal.value = 0
+    peerErr.value = '未能确定该机房的编号，已有设备参考暂不可用'
+    return
+  }
+  if (peerLoading.value) return
+  peerLoading.value = true
+  peerErr.value = ''
+  try {
+    const r = await assetRoomDevices(code)
+    const list = ((r?.devices || []) as unknown) as RoomPeerDevice[]
+    peerTotal.value = Number(r?.count ?? list.length)
+    peers.value = list.slice(0, PEER_LIMIT)
+  } catch (e: any) {
+    peers.value = []
+    peerTotal.value = 0
+    peerErr.value = (e?.message || '').trim() || '该房间已有设备加载失败'
+  } finally {
+    peerLoading.value = false
+  }
+}
+
+/**
+ * 参考某台已有设备：**只复制所属系统与位置，绝不复制 device_code**。
+ * 编号全库唯一，复制过来必然撞号（后端 400），现场反而多一步手改。
+ */
+function usePeer(p: RoomPeerDevice) {
+  const subName = String(p.subsystem_name || '').trim()
+  const hit = subName ? subsystems.value.find((s) => s.name === subName) : undefined
+  if (hit) form.subsystem_id = hit.id
+  // 位置一律以当前已选机房为准（保证 building/floor/room_id 三者口径一致）
+  const rm = rooms.value.find((r) => r.id === form.room_id)
+  if (rm) {
+    form.building = rm.building
+    form.floor = rm.floor
+    bldQuery.value = rm.building
+  }
+  const who = p.name ? `「${p.name}」的` : '该设备的'
+  if (subName && !hit) {
+    showToast(`已参考${who}位置，但「${subName}」不在当前系统字典里，请手动选所属系统；编号请自行填写或扫码`, 'none', 2800)
+    return
+  }
+  // 房间全量已懒加载：反查不到机房时不能谎称「已参考位置」，两种情形分开说
+  if (rm) {
+    showToast(`已参考${who}系统与位置，编号请自行填写或扫码`, 'none', 2600)
+  } else {
+    showToast(`已参考${who}所属系统；位置请按当前所选机房确认，编号请自行填写或扫码`, 'none', 2800)
+  }
+}
+
+// room_id 一变（搜索选 / 级联选 / 扫码预填 / AI 采用 / 清空）就同步拉已有设备，
+// 用 watch 统一兜住所有写入点，避免各处漏调。
+watch(() => form.room_id, () => {
+  // 选中机房后顺手把房间全量懒加载一次（AI 采用 / 扫码预填 / 级联都会走这里），
+  // 保证后面按 room_id 反查楼栋楼层、取 room code 时有数据可用。
+  if (form.room_id != null) ensureRooms()
+  loadPeers()
+})
 
 /**
  * 「暂无编号」：向服务端取一个未被占用的临时编号并锁定。
@@ -719,6 +1100,11 @@ function aiTag(f: AiFieldKey): string {
 /** 楼栋/楼层变了 → 已选机房若不属于新位置就清掉（否则会挂错机房） */
 function ensureRoomConsistent() {
   if (form.room_id == null) return
+  // 房间全量还在懒加载路上时先补拉、并跳过本次判定：拿不到数据就清空机房属于误伤
+  if (!roomsFullLoaded.value) {
+    ensureRooms()
+    return
+  }
   const rm = rooms.value.find((x) => x.id === form.room_id)
   if (!rm || rm.building !== form.building || rm.floor !== form.floor) form.room_id = null
 }
@@ -1262,4 +1648,190 @@ function closeAi() {
   font-weight: 600;
 }
 .sheet-ok.disabled { opacity: 0.6; }
+
+/* ===== 基础数据加载失败：独立提示 + 重试（不再一句话吞掉两个请求） ===== */
+.retry-bar {
+  display: flex;
+  align-items: center;
+  padding: 0 0 16rpx;
+}
+.retry-t {
+  flex: 1;
+  font-size: 22rpx;
+  line-height: 32rpx;
+  color: $tm-danger;
+}
+.retry-x {
+  flex-shrink: 0;
+  margin-left: 12rpx;
+  padding: 6rpx 22rpx;
+  font-size: 22rpx;
+  color: $tm-primary;
+  background: $tm-primary-bg;
+  border-radius: 24rpx;
+}
+
+/* ===== 机房：搜索式选择（主路径） ===== */
+.pick-btn {
+  flex-shrink: 0;
+  margin-left: 12rpx;
+  padding: 6rpx 20rpx;
+  font-size: 22rpx;
+  color: $tm-primary;
+  background: $tm-primary-bg;
+  border-radius: 24rpx;
+}
+.sub-hint {
+  padding: 0 0 16rpx;
+  font-size: 21rpx;
+  line-height: 30rpx;
+  color: $tm-text-muted;
+}
+
+/* ===== 同房间已有设备 ===== */
+.peers {
+  padding: 18rpx 0 6rpx;
+  border-top: 1rpx solid $tm-border-light;
+}
+.peers-hd {
+  display: flex;
+  align-items: center;
+  margin-bottom: 10rpx;
+}
+.peers-t {
+  flex: 1;
+  font-size: 24rpx;
+  font-weight: 600;
+  color: $tm-text;
+}
+.peers-retry {
+  flex-shrink: 0;
+  margin-left: 12rpx;
+  font-size: 22rpx;
+  color: $tm-primary;
+}
+.peers-err {
+  padding: 8rpx 0;
+  font-size: 22rpx;
+  line-height: 32rpx;
+  color: $tm-danger;
+}
+.peers-loading,
+.peers-empty {
+  padding: 8rpx 0;
+  font-size: 22rpx;
+  line-height: 32rpx;
+  color: $tm-text-muted;
+}
+.peer {
+  display: flex;
+  align-items: center;
+  padding: 14rpx 16rpx;
+  margin-bottom: 10rpx;
+  background: $tm-bg;
+  border-radius: 12rpx;
+}
+.peer-l {
+  flex: 1;
+  min-width: 0;
+}
+.peer-n {
+  display: block;
+  font-size: 25rpx;
+  color: $tm-text;
+}
+.peer-c {
+  display: block;
+  margin-top: 4rpx;
+  font-size: 21rpx;
+  color: $tm-text-muted;
+}
+.peer-act {
+  flex-shrink: 0;
+  margin-left: 12rpx;
+  padding: 8rpx 22rpx;
+  font-size: 22rpx;
+  color: $tm-primary;
+  background: $tm-card-bg;
+  border: 1rpx solid $tm-primary;
+  border-radius: 24rpx;
+}
+.peers-tip {
+  padding: 2rpx 0 10rpx;
+  font-size: 20rpx;
+  line-height: 28rpx;
+  color: $tm-text-muted;
+}
+
+/* ===== 机房搜索层 ===== */
+.rs-bar {
+  display: flex;
+  align-items: center;
+  margin-bottom: 12rpx;
+}
+.rs-inp {
+  flex: 1;
+  height: 72rpx;
+  padding: 0 20rpx;
+  font-size: 26rpx;
+  color: $tm-text;
+  background: $tm-bg;
+  border-radius: 12rpx;
+}
+.rs-do {
+  flex-shrink: 0;
+  margin-left: 12rpx;
+  padding: 0 26rpx;
+  height: 72rpx;
+  line-height: 72rpx;
+  font-size: 26rpx;
+  color: #fff;
+  background: $tm-primary;
+  border-radius: 12rpx;
+}
+.rs-filter {
+  display: flex;
+  align-items: center;
+  margin-bottom: 12rpx;
+}
+.rs-filter-t {
+  flex: 1;
+  font-size: 21rpx;
+  line-height: 30rpx;
+  color: $tm-text-secondary;
+}
+.rs-filter-x {
+  flex-shrink: 0;
+  margin-left: 12rpx;
+  font-size: 21rpx;
+  color: $tm-primary;
+}
+/* scroll-view 在小程序里必须定高才能滚，只给 max-height 可能滚不动 */
+.rs-body {
+  height: 52vh;
+}
+.rs-item {
+  padding: 16rpx 18rpx;
+  margin-bottom: 10rpx;
+  background: $tm-bg;
+  border-radius: 12rpx;
+}
+.rs-item:active { background: $tm-primary-bg; }
+.rs-addr {
+  display: block;
+  font-size: 26rpx;
+  color: $tm-text;
+}
+.rs-meta {
+  display: block;
+  margin-top: 4rpx;
+  font-size: 21rpx;
+  color: $tm-text-muted;
+}
+.rs-more {
+  padding: 18rpx 0;
+  text-align: center;
+  font-size: 24rpx;
+  color: $tm-primary;
+}
 </style>
