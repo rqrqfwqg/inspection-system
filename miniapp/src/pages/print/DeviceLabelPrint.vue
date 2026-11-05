@@ -35,7 +35,7 @@
     <!-- 导入来源 -->
     <view class="card">
       <view class="imp-bar">
-        <button class="imp-btn" @tap="addManual">＋ 手动添加</button>
+        <button class="imp-btn" @tap="openManualSearch">＋ 添加设备</button>
         <button class="imp-btn" @tap="openImport('room')">从机房导入</button>
         <button class="imp-btn" @tap="openImport('table')">从数据表导入</button>
       </view>
@@ -74,6 +74,57 @@
         </scroll-view>
         <view v-if="sourceLoading" class="imp-loading">加载来源中…</view>
         <button class="imp-cancel" @tap="importPanel = null">取消</button>
+      </view>
+
+      <!-- 添加设备：按名称 / 固定资产编号 / 机身编号 模糊搜索，多选确认 -->
+      <view v-if="manualPanel" class="imp-panel">
+        <view class="imp-title">添加设备（按名称或编号搜索）</view>
+        <view class="imp-search">
+          <input
+            class="imp-search-input"
+            placeholder="设备名称 / 固定资产编号 / 机身编号"
+            placeholder-class="ph"
+            v-model="mkKw"
+            confirm-type="search"
+          />
+        </view>
+        <view class="mk-hint">
+          {{ mkLoading ? '搜索中…' : mkKw.trim() ? '匹配 ' + mkTotal + ' 台，已显示 ' + mkHits.length + ' 台' : '输入名称或编号，至少 1 个字就自动搜索' }}
+        </view>
+        <scroll-view scroll-y class="imp-scroll">
+          <view
+            v-for="h in mkHits"
+            :key="h.device_code"
+            class="imp-opt col"
+            :class="{ checked: mkChecked.has(h.device_code) }"
+            @tap="toggleMk(h.device_code)"
+          >
+            <text class="imp-opt-main">
+              <text class="imp-name">{{ h.name || h.device_name || h.asset_name || '（无名称）' }}</text>
+              <text class="imp-code">{{ h.device_code }}</text>
+              <text class="imp-sub">机身编号：{{ serialOf(h) || '无' }}</text>
+              <text class="imp-sub">{{ h.location || '位置未登记' }}<text v-if="h.subsystem_name"> · {{ h.subsystem_name }}</text></text>
+              <text v-if="list.some((x) => x.code === h.device_code)" class="mk-badge">已在清单</text>
+            </text>
+            <text class="imp-check">{{ mkChecked.has(h.device_code) ? '✓' : '' }}</text>
+          </view>
+          <view v-if="mkErr && !mkHits.length" class="imp-loading" @tap="searchManual(1)">{{ mkErr }}（点此重试）</view>
+          <view v-else-if="mkKw.trim() && !mkLoading && !mkHits.length" class="imp-loading">
+            没搜到匹配的设备；若确认编号无误，可点下方「按此编号直接添加」
+          </view>
+          <view v-if="mkHits.length < mkTotal" class="imp-loading mk-more" @tap="searchManual(mkPage + 1)">
+            加载更多（还剩 {{ mkTotal - mkHits.length }} 台）
+          </view>
+        </scroll-view>
+        <view class="imp-actions">
+          <button class="imp-cancel" @tap="closeManual">取消</button>
+          <button
+            class="imp-cancel mk-raw"
+            v-if="mkKw.trim() && !mkHits.length && !mkLoading"
+            @tap="addRawCode"
+          >按此编号直接添加</button>
+          <button class="imp-confirm" @tap="addCheckedManual">加入清单（{{ mkChecked.size }}）</button>
+        </view>
       </view>
 
       <!-- 候选多选 -->
@@ -191,8 +242,8 @@ import { usePutyPrinter } from '@/composables/usePutyPrinter'
 import { buildDualCodeLabel, buildChineseFontProbe, measureDualCodeLabel } from '@/utils/cpcl'
 import { renderNameBitmap } from '@/utils/labelNameBitmap'
 import { extractSerialNo, splitBrandModel } from '@/utils/deviceLabel'
-import { assetRoomPage, assetRoomDevices, assetDataTables, assetTableRecords } from '@/api/asset'
-import type { AssetTableRecord, RoomDevicesResult, InventoryDeviceRow } from '@/types/asset'
+import { assetRoomPage, assetRoomDevices, assetDataTables, assetTableRecords, assetMatchLedger } from '@/api/asset'
+import type { AssetTableRecord, RoomDevicesResult, InventoryDeviceRow, AssetLedgerItem } from '@/types/asset'
 import QrCode from '@/components/QrCode.vue'
 import { getJSON, set as setStore } from '@/utils/storage'
 import { showToast, showInputModal, showLoading, hideLoading } from '@/utils/feedback'
@@ -293,16 +344,122 @@ async function connectPrinter() {
   }
 }
 
-function addManual() {
-  showInputModal({
-    title: '添加设备',
-    placeholderText: '请输入固定资产编号',
-  }).then((r) => {
-    if (r.confirm && r.content) {
-      const code = r.content.trim()
-      addItem({ code, name: '', brandModel: '', serial: '', subsystem: '', location: '', source: '手动' })
+// ── 添加设备：服务端模糊搜索（设备名称 / 固定资产编号 / 机身编号） ──
+// 后端 /assets/asset-ledger?q= 跨字段匹配（device_code / name / brand_model / serial_no / location…），
+// 机身编号嵌在 brand_model 文本里也能命中；同一关键字命中多台时全部列出，由人确认。
+const manualPanel = ref(false)
+const mkKw = ref('')
+const mkHits = ref<AssetLedgerItem[]>([])
+const mkChecked = ref<Set<string>>(new Set())
+const mkTotal = ref(0)
+const mkPage = ref(1)
+const mkLoading = ref(false)
+const mkErr = ref('')
+let mkSeq = 0
+let mkTimer: ReturnType<typeof setTimeout> | null = null
+
+function openManualSearch() {
+  manualPanel.value = true
+  mkKw.value = ''
+  mkHits.value = []
+  mkChecked.value = new Set()
+  mkTotal.value = 0
+  mkPage.value = 1
+  mkErr.value = ''
+}
+
+function closeManual() {
+  manualPanel.value = false
+  mkChecked.value = new Set()
+  mkErr.value = ''
+}
+
+watch(mkKw, () => {
+  if (mkTimer) clearTimeout(mkTimer)
+  const q = mkKw.value.trim()
+  if (!q) {
+    mkHits.value = []
+    mkTotal.value = 0
+    mkPage.value = 1
+    mkErr.value = ''
+    mkLoading.value = false
+    return
+  }
+  mkTimer = setTimeout(() => void searchManual(1), 350)
+})
+
+async function searchManual(page = 1) {
+  const q = mkKw.value.trim()
+  if (!q) return
+  const seq = ++mkSeq
+  mkLoading.value = true
+  mkErr.value = ''
+  try {
+    const res = await assetMatchLedger(q, 20, page)
+    if (seq !== mkSeq) return
+    mkTotal.value = res.total || 0
+    mkPage.value = res.page || page
+    const items = res.items || []
+    mkHits.value = page <= 1 ? items : mkHits.value.concat(items)
+  } catch {
+    if (seq !== mkSeq) return
+    mkErr.value = '搜索失败'
+    if (page <= 1) {
+      mkHits.value = []
+      mkTotal.value = 0
     }
+  } finally {
+    if (seq === mkSeq) mkLoading.value = false
+  }
+}
+
+function toggleMk(code: string) {
+  const set = new Set(mkChecked.value)
+  if (set.has(code)) set.delete(code)
+  else set.add(code)
+  mkChecked.value = set
+}
+
+/** 机身编号：先按铭牌规则从 brand_model 抠；抠不到再看 serial_no 是否本身就是短代码 */
+function serialOf(it: AssetLedgerItem): string {
+  const hit = extractSerialNo(it.brand_model || '') || extractSerialNo(it.serial_no || '')
+  if (hit) return hit
+  const raw = String(it.serial_no || '').trim()
+  if (!raw || raw.length > 40 || /\s/.test(raw) || !/\d/.test(raw)) return ''
+  return raw
+}
+
+function toPrintItem(it: AssetLedgerItem): PrintItem {
+  return {
+    code: it.device_code,
+    name: it.name || it.device_name || it.asset_name || '',
+    brandModel: it.brand_model || '',
+    serial: serialOf(it),
+    subsystem: it.subsystem_name || '',
+    location: it.location || '',
+    source: it.source === 'ledger_only' ? '台账（未登记设备档）' : '台账搜索',
+  }
+}
+
+function addCheckedManual() {
+  let n = 0
+  mkChecked.value.forEach((code) => {
+    const hit = mkHits.value.find((h) => h.device_code === code)
+    if (!hit) return
+    if (list.value.some((x) => x.code === hit.device_code)) return
+    list.value.push(toPrintItem(hit))
+    n += 1
   })
+  showToast(n ? `已加入 ${n} 台设备` : '所选设备都已在清单中', 'none')
+  if (n) closeManual()
+}
+
+/** 兜底：台账里确实搜不到这台设备时，仍允许按输入的编号打一张（名称/机身编号留白） */
+function addRawCode() {
+  const code = mkKw.value.trim()
+  if (!code) return
+  addItem({ code, name: '', brandModel: '', serial: '', subsystem: '', location: '', source: '手动编号' })
+  closeManual()
 }
 
 function addItem(it: PrintItem) {
@@ -933,5 +1090,25 @@ onShow(() => {
 }
 .ab-print[disabled] {
   background: #c8d6e8;
+}
+/* 添加设备搜索面板 */
+.mk-hint {
+  font-size: 22rpx;
+  color: #8a8f99;
+  padding: 8rpx 4rpx 0;
+}
+.mk-badge {
+  display: inline-block;
+  font-size: 20rpx;
+  color: #1677ff;
+  padding: 1rpx 8rpx;
+  border: 1rpx solid #1677ff;
+  border-radius: 6rpx;
+}
+.mk-more {
+  color: #1677ff;
+}
+.mk-raw {
+  color: #d48806;
 }
 </style>
