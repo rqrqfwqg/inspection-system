@@ -374,9 +374,10 @@ def get_rooms(
     room_type: Optional[str] = None,
     building: Optional[str] = None,
     is_active: Optional[bool] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ):
-    """获取机房列表"""
+    """获取机房列表（需登录；此前漏了依赖，开了鉴权也挡不住）"""
     q = db.query(Room)
     if room_type:
         q = q.filter(Room.room_type == room_type)

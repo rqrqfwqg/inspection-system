@@ -5462,7 +5462,7 @@ def _release_merge(db: Session, alias: DeviceAlias) -> Dict[str, Any]:
 @router.post("/devices/unmerge")
 def unmerge_room_devices(data: RoomDeviceUnmerge,
                          db: Session = Depends(get_db),
-                         _: User = Depends(_require_admin)):
+                         _: User = Depends(_require_admin), _auth: User = Depends(_get_current_user)):
     """撤销合并（🔴 仅管理员）：把 merge_code 从主设备名下拆回去。
 
     按合并时写入的 `merge_meta` 快照**精确逆向**恢复：
