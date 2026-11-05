@@ -18,7 +18,7 @@
     <view class="section-title">选择目标机房</view>
     <view class="card">
       <view class="filter">
-        <input class="filter-input" placeholder="筛选机房名称/编号" placeholder-class="ph" v-model="kw" />
+        <input class="filter-input" placeholder="搜索机房名称 / 编号 / 楼栋" placeholder-class="ph" v-model="kw" />
       </view>
       <scroll-view scroll-y class="room-list">
         <view
@@ -32,7 +32,14 @@
           <text class="room-code">{{ r.code }}</text>
           <text class="room-bld">{{ r.building }} {{ r.floor }}</text>
         </view>
-        <view v-if="!filteredRooms.length" class="room-empty">无匹配机房</view>
+        <view v-if="roomLoading" class="room-empty">加载中…</view>
+        <view v-else-if="roomErr" class="room-empty" @tap="() => searchRooms(kw, true)">
+          {{ roomErr }}（点此重试）
+        </view>
+        <view v-else-if="!filteredRooms.length" class="room-empty">无匹配机房</view>
+        <view v-else-if="roomTotal > filteredRooms.length" class="room-empty">
+          共 {{ roomTotal }} 间，已显示 {{ filteredRooms.length }} 间，输入关键字可继续缩小
+        </view>
       </scroll-view>
     </view>
 
@@ -44,10 +51,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { onShow, onLoad } from '@dcloudio/uni-app'
-import { assetSearchDevice, assetRooms, assetBindDevice, assetCreateGeoObservation, parseScanPayload } from '@/api/asset'
-import type { AssetRoom, AssetSearchResult, BindDeviceOutcome } from '@/types/asset'
+import { assetSearchDevice, assetRoomPage, assetBindDevice, assetCreateGeoObservation, parseScanPayload } from '@/api/asset'
+import type { AssetSearchResult, BindDeviceOutcome } from '@/types/asset'
+import type { AssetRoomPageItem } from '@/api/asset'
 import { useScanner } from '@/composables/useScanner'
 import { getCurrentPoint } from '@/composables/useGeolocation'
 import { useAuthStore } from '@/store/auth'
@@ -58,9 +66,19 @@ const scanner = useScanner({ title: '扫描设备二维码', manualContent: '未
 
 const deviceCode = ref('')
 const deviceName = ref('')
-const rooms = ref<AssetRoom[]>([])
+/**
+ * 🔴 机房候选走**服务端分页搜索**，不再一次拉全量 938 间（原来 222KB，
+ * 而且写在 onShow 里 —— 每次回到本页都重拉一遍）。现在只取前 50 条，
+ * 用户输入关键字时由服务端匹配（房间名/编号/楼栋/楼层都能搜）。
+ */
+const rooms = ref<AssetRoomPageItem[]>([])
+const roomTotal = ref(0)
+const roomLoading = ref(false)
+const roomErr = ref('')
 const kw = ref('')
-const targetRoom = ref<AssetRoom | null>(null)
+let searchSeq = 0
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+const targetRoom = ref<AssetRoomPageItem | null>(null)
 const geo = ref<{ latitude: number; longitude: number; accuracy?: number | null } | null>(null)
 
 const operator = computed(() => auth.user?.real_name || auth.user?.phone || '巡检员')
@@ -70,11 +88,34 @@ const geoText = computed(() => {
   const g = geo.value
   return `${g.latitude.toFixed(6)}, ${g.longitude.toFixed(6)}（精度 ±${g.accuracy ?? '?'} m）`
 })
-const filteredRooms = computed(() => {
-  const q = kw.value.trim().toLowerCase()
-  if (!q) return rooms.value
-  return rooms.value.filter((r) => (r.name + r.code + r.building + r.floor).toLowerCase().includes(q))
-})
+const filteredRooms = computed(() => rooms.value)
+
+/** 服务端搜索机房（带序号防抖与竞态丢弃：慢请求不能盖掉新结果） */
+async function searchRooms(keyword: string, immediate = false): Promise<void> {
+  if (searchTimer) clearTimeout(searchTimer)
+  const run = async () => {
+    const seq = ++searchSeq
+    roomLoading.value = true
+    roomErr.value = ''
+    try {
+      const res = await assetRoomPage({ keyword: keyword.trim() || undefined, limit: 50 })
+      if (seq !== searchSeq) return // 已有更新的请求，丢弃本次结果
+      rooms.value = res.items || []
+      roomTotal.value = res.total || 0
+    } catch (e: any) {
+      if (seq !== searchSeq) return
+      rooms.value = []
+      roomTotal.value = 0
+      roomErr.value = e?.message || '机房列表加载失败，请重试'
+    } finally {
+      if (seq === searchSeq) roomLoading.value = false
+    }
+  }
+  if (immediate) await run()
+  else searchTimer = setTimeout(() => void run(), 320)
+}
+
+watch(kw, (v) => void searchRooms(v))
 
 async function resolveDevice(code: string) {
   deviceName.value = ''
@@ -172,9 +213,8 @@ onLoad((opts: any) => {
 })
 
 onShow(() => {
-  assetRooms()
-    .then((rs) => (rooms.value = rs))
-    .catch(() => showToast('机房列表加载失败', 'none'))
+  // 不再整包拉 938 间房：只按当前关键字取前 50 条（首次即空关键字）
+  void searchRooms(kw.value, true)
   refreshGeo()
 })
 </script>

@@ -37,6 +37,15 @@
       <!-- 机房 / 数据表 选择 -->
       <view v-if="importPanel" class="imp-panel">
         <view class="imp-title">{{ importPanel === 'room' ? '选择机房' : '选择数据表' }}</view>
+        <!-- 🔴 机房走服务端搜索：原来一次拉全量 938 间（222KB），现在按关键字取前 50 条 -->
+        <view v-if="importPanel === 'room'" class="imp-search">
+          <input
+            class="imp-search-input"
+            placeholder="搜索机房名称 / 编号 / 楼栋"
+            placeholder-class="ph"
+            v-model="impKw"
+          />
+        </view>
         <scroll-view scroll-y class="imp-scroll">
           <view
             v-for="s in sources"
@@ -49,6 +58,12 @@
               <text class="imp-code">{{ s.code }}</text>
             </text>
             <text class="imp-sub">{{ s.code }}</text>
+          </view>
+          <view v-if="importPanel === 'room' && !sources.length && !sourceLoading && impErr" class="imp-loading" @tap="searchRoomSources(impKw, true)">
+            {{ impErr }}（点此重试）
+          </view>
+          <view v-else-if="importPanel === 'room' && !sources.length && !sourceLoading" class="imp-loading">
+            无匹配机房，换个关键字试试
           </view>
         </scroll-view>
         <view v-if="sourceLoading" class="imp-loading">加载来源中…</view>
@@ -164,12 +179,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { usePutyPrinter } from '@/composables/usePutyPrinter'
 import { buildDualCodeLabel } from '@/utils/cpcl'
 import { extractSerialNo } from '@/utils/deviceLabel'
-import { assetRooms, assetRoomDevices, assetDataTables, assetTableRecords } from '@/api/asset'
+import { assetRoomPage, assetRoomDevices, assetDataTables, assetTableRecords } from '@/api/asset'
 import type { AssetTableRecord, RoomDevicesResult, InventoryDeviceRow } from '@/types/asset'
 import QrCode from '@/components/QrCode.vue'
 import { getJSON, set as setStore } from '@/utils/storage'
@@ -190,6 +205,42 @@ interface PrintItem {
 const list = ref<PrintItem[]>([])
 const importPanel = ref<null | 'room' | 'table'>(null)
 const sources = ref<{ id: string; name: string; code: string }[]>([])
+/** 机房来源的搜索关键字（服务端匹配，避免一次拉全量 938 间） */
+const impKw = ref('')
+const impErr = ref('')
+let impSeq = 0
+let impTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 按关键字向服务端要机房候选（前 50 条），带防抖与竞态丢弃 */
+async function searchRoomSources(keyword: string, immediate = false): Promise<void> {
+  if (impTimer) clearTimeout(impTimer)
+  const run = async () => {
+    const seq = ++impSeq
+    sourceLoading.value = true
+    impErr.value = ''
+    try {
+      const res = await assetRoomPage({ keyword: keyword.trim() || undefined, limit: 50 })
+      if (seq !== impSeq) return
+      sources.value = (res.items || []).map((r) => ({
+        id: r.code,
+        name: `${r.building || ''}${r.name || ''}`.trim() || r.name,
+        code: r.code,
+      }))
+    } catch (e: any) {
+      if (seq !== impSeq) return
+      sources.value = []
+      impErr.value = e?.message || '机房列表加载失败'
+    } finally {
+      if (seq === impSeq) sourceLoading.value = false
+    }
+  }
+  if (immediate) await run()
+  else impTimer = setTimeout(() => void run(), 320)
+}
+
+watch(impKw, (v) => {
+  if (importPanel.value === 'room') void searchRoomSources(v)
+})
 const candidates = ref<PrintItem[]>([])
 const checked = ref<Set<string>>(new Set())
 const sourceLoading = ref(false)
@@ -271,13 +322,12 @@ async function openImport(kind: 'room' | 'table') {
   checked.value = new Set()
   sourceLoading.value = true
   sources.value = []
+  impKw.value = ''
+  impErr.value = ''
   try {
     if (kind === 'room') {
-      sources.value = (await assetRooms()).map((r) => ({
-        id: r.code,
-        name: `${r.building || ''}${r.name || ''}`.trim() || r.name,
-        code: r.code,
-      }))
+      // 只取前 50 条 + 关键字搜索，不再整包拉 938 间
+      await searchRoomSources('', true)
     } else {
       sources.value = (await assetDataTables()).map((t) => ({ id: String(t.id), name: t.name, code: t.code }))
     }
@@ -503,6 +553,17 @@ onShow(() => {
   margin-top: 16rpx;
   border-top: 1rpx solid $tm-border-light;
   padding-top: 16rpx;
+}
+.imp-search {
+  margin: 8rpx 0 12rpx;
+}
+.imp-search-input {
+  height: 64rpx;
+  background: $tm-bg;
+  border-radius: $tm-radius-sm;
+  padding: 0 20rpx;
+  font-size: 24rpx;
+  color: $tm-text;
 }
 .imp-title {
   font-size: 26rpx;
