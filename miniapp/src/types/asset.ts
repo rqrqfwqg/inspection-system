@@ -309,6 +309,13 @@ export interface InventoryDeviceRow {
   is_registered: boolean
   is_active: boolean
   location_desc?: string
+  /**
+   * 机身编号（可空字符串）。后端已按「fixed_assets.brand_model 抽取 → 现场观测表兜底」
+   * 顺序解析好，前端**直接取用**，不要再用正则自己抠（两边规则一致，但后端有观测数据）。
+   */
+  serial_no?: string
+  /** 机身编号取值来源，排查用：`fixed_asset` / `observation` / `''` */
+  serial_source?: string
 }
 
 /** GET /assets/rooms/{code}/devices */

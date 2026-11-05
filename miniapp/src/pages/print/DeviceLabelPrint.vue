@@ -24,6 +24,12 @@
         </view>
       </view>
       <view v-if="printer.error.value" class="err">{{ printer.error.value }}</view>
+
+      <!-- 中文自检：设备名走位图打印；打一张自检标签即可看出「位图 + 各 font 号」在本机的实际效果 -->
+      <view class="probe-bar">
+        <text class="probe-tip">标签含：二维码＋固定资产编号＋设备名＋机身编号</text>
+        <button class="mini-btn sm" :disabled="!printer.connected.value" @tap="printFontProbe">中文自检</button>
+      </view>
     </view>
 
     <!-- 导入来源 -->
@@ -182,8 +188,9 @@
 import { ref, computed, watch } from 'vue'
 import { onShow } from '@dcloudio/uni-app'
 import { usePutyPrinter } from '@/composables/usePutyPrinter'
-import { buildDualCodeLabel } from '@/utils/cpcl'
-import { extractSerialNo } from '@/utils/deviceLabel'
+import { buildDualCodeLabel, buildChineseFontProbe, measureDualCodeLabel } from '@/utils/cpcl'
+import { renderNameBitmap } from '@/utils/labelNameBitmap'
+import { extractSerialNo, splitBrandModel } from '@/utils/deviceLabel'
 import { assetRoomPage, assetRoomDevices, assetDataTables, assetTableRecords } from '@/api/asset'
 import type { AssetTableRecord, RoomDevicesResult, InventoryDeviceRow } from '@/types/asset'
 import QrCode from '@/components/QrCode.vue'
@@ -347,9 +354,11 @@ async function pickSource(id: string) {
       const roomName = res.room ? `${res.room.building || ''}${res.room.name || ''}`.trim() : ''
       candidates.value = (res.devices || []).map((d: InventoryDeviceRow) => ({
         code: d.device_code,
-        name: d.name || '',
+        // 设备名：devices.name 优先；为空再退回「品牌型号里剥掉机身编号后的型号段」
+        name: d.name || splitBrandModel(d.brand_model || '').rest,
         brandModel: d.brand_model || '',
-        serial: extractSerialNo(d.brand_model || ''),
+        // 机身编号：**后端解析值优先**（含现场观测表兜底），取不到才本地正则兜底
+        serial: d.serial_no || extractSerialNo(d.brand_model || ''),
         subsystem: d.subsystem_name || '',
         location: d.location_desc || roomName,
         source: roomName || '机房',
@@ -414,19 +423,62 @@ async function printAll() {
   const targets = filtered.value.length ? filtered.value : list.value
   showLoading(`打印中 0/${targets.length}`)
   printing.value = true
+  let nameSkipped = 0
   try {
     for (let i = 0; i < targets.length; i++) {
       const it = targets[i]
-      const bytes = buildDualCodeLabel({ code: it.code, serialNo: it.serial || undefined })
+      // 四要素标签：二维码 + 固定资产编号 + 设备名（位图）+ 机身编号
+      // 设备名必须走位图——该机 TEXT 无汉字库（见 utils/cpcl.ts 的定论注释）。
+      // 顺序：先量版式拿到「名称行可用宽 × 行高」→ 按该尺寸渲染点阵 → 最后拼指令。
+      const layout = measureDualCodeLabel({ code: it.code, name: it.name, serialNo: it.serial })
+      const bmp = it.name
+        ? renderNameBitmap(it.name, layout.nameMaxWidthDots, layout.nameDots)
+        : null
+      if (it.name && !bmp) nameSkipped += 1
+      const bytes = buildDualCodeLabel({
+        code: it.code,
+        name: it.name,
+        serialNo: it.serial,
+        nameBitmap: bmp || undefined,
+      })
       await printer.printCpcl(bytes)
       showLoading(`打印中 ${i + 1}/${targets.length}`)
       await delay(350)
     }
-    showToast('全部打印完成', 'success')
+    if (nameSkipped) {
+      // 不静默失败：位图生成不了（多为基础库过低）就说清楚，别让现场以为打全了
+      showToast(`已完成，但有 ${nameSkipped} 张设备名未打印（微信版本过低，请更新微信后重打）`, 'none')
+    } else {
+      showToast('全部打印完成', 'success')
+    }
   } catch (e: any) {
     showToast(e?.message || '打印中断', 'none')
   } finally {
     printing.value = false
+    hideLoading()
+  }
+}
+
+/**
+ * 打印「中文自检标签」：同一张纸上先打一行**位图**中文，再打 6 行不同 font 号的 TEXT 中文。
+ * 现场判读：位图行正常 + TEXT 行乱码 = 位图方案成立（生产模板走的就是这条）；
+ * 位图行也乱 = 问题不在打印机字库，需回来查 canvas 渲染。
+ */
+async function printFontProbe() {
+  if (!printer.connected.value) {
+    showToast('请先连接打印机', 'none')
+    return
+  }
+  showLoading('打印自检标签')
+  try {
+    const sample = list.value.find((x) => x.name)?.name || '潜水排污泵'
+    const layout = measureDualCodeLabel({ code: '105000620923', name: sample })
+    const bmp = renderNameBitmap(sample, layout.nameMaxWidthDots, layout.nameDots)
+    await printer.printCpcl(buildChineseFontProbe(bmp || undefined))
+    showToast('自检标签已打印', 'success')
+  } catch (e: any) {
+    showToast(e?.message || '自检标签打印失败', 'none')
+  } finally {
     hideLoading()
   }
 }
@@ -530,6 +582,21 @@ onShow(() => {
   margin-top: 12rpx;
   font-size: 24rpx;
   color: $tm-danger;
+}
+.probe-bar {
+  margin-top: 16rpx;
+  padding-top: 16rpx;
+  border-top: 1rpx solid $tm-border-light;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12rpx;
+}
+.probe-tip {
+  flex: 1;
+  font-size: 22rpx;
+  color: $tm-text-muted;
+  line-height: 1.5;
 }
 
 .imp-bar {

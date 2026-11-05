@@ -101,6 +101,35 @@ export class CpclBuilder {
     return this
   }
 
+  /**
+   * 位图（中文行专用）——CPCL `EG` 指令。
+   *
+   * 写法与**厂家 SDK** `putysdk/puty/putyCpclUtils.js#image()` 逐字对齐：
+   * ```
+   * EG <宽/8> <高> <x点> <y点>
+   * <十六进制点阵>
+   * END
+   * ```
+   * - 宽度单位是**字节**（= 横向点数 / 8，故宽必须是 8 的倍数）；
+   * - 高度 / x / y 单位是**点**（200dpi 下 1mm = 8 点），与厂家实现一致（它固定传 0 0）；
+   * - 点阵行优先、MSB 在左，`1` = 打黑。
+   *
+   * @param widthDots  位图宽（点，8 的倍数）
+   * @param heightDots 位图高（点）
+   * @param xMm,yMm    贴图左上角坐标（毫米）
+   * @param hex        十六进制点阵，每行 widthDots/8 字节
+   */
+  egImage(widthDots: number, heightDots: number, xMm: number, yMm: number, hex: string): this {
+    const wBytes = Math.max(1, Math.round(widthDots / 8))
+    const hDots = Math.max(1, Math.round(heightDots))
+    const need = wBytes * hDots * 2 // 每字节 2 个十六进制字符
+    const data = hex.length > need ? hex.slice(0, need) : hex
+    this.buf += `EG ${wBytes} ${hDots} ${mm(xMm)} ${mm(yMm)}\r\n`
+    this.buf += data + '\r\n'
+    this.buf += 'END\r\n'
+    return this
+  }
+
   /** 走纸到下一个标签间隙（间隙纸必设） */
   form(): this {
     this.buf += 'FORM\r\n'
@@ -251,13 +280,13 @@ export function buildTextProbeLabels(widthMm = DEFAULT_LABEL.widthMm, heightMm =
  * 判读表（把「哪几行正常」告诉我即可定稿）：
  *   - 只有 F24 行正常            → 维持现状，乱码另有原因（需再查）
  *   - 只有 F0 / F7 行正常        → 切到该字体号（数据量不变，最优解）
- *   - 全部乱码                   → 该机无内置汉字库，改走位图方案（见 buildDeviceLabelBitmap）
+ *   - 全部乱码                   → 该机无内置汉字库，中文必须走位图（见 utils/labelNameBitmap.ts）
  *   - 全部正常                   → 上一版乱码是偶发/内容问题，需复核真实数据
  *
  * ⚠️ 每行只放 2 个汉字（`潜水`），确保在 15mm 纸高 / 20 字节分包下不会因
  * 内容过长触发行截断，避免把「字体问题」和「长度问题」混在一起。
  */
-export function buildChineseFontProbe(): Uint8Array {
+export function buildChineseFontProbe(bitmap?: LabelBitmap): Uint8Array {
   const widthMm = LABEL_50X15.widthMm
   const heightMm = LABEL_50X15.heightMm
   const b = new CpclBuilder().init({ widthMm, heightMm, copies: 1 })
@@ -267,9 +296,19 @@ export function buildChineseFontProbe(): Uint8Array {
   const fonts = [0, 7, 16, 20, 24, 55]
   const word = '潜水' // 2 汉字 = 4 字节 GBK，足够判读且不超行
 
-  // 6 行在 120 点高度内均分：每行 20 点，字高 3mm=24 点会略挤，故用 size 0 靠上下压缩
+  // 第一行（可选）：位图版中文 —— 与下面 6 行 TEXT 版同纸对照。
+  // 判读：位图行正常 + TEXT 行乱码 = 位图方案成立（生产模板走的正是这条）；
+  //       位图行也乱 = 问题不在字库（查 canvas 渲染 / GBK 编码）。
+  let topMm = 0.3
+  if (bitmap && bitmap.heightDots > 0) {
+    b.egImage(bitmap.widthDots, bitmap.heightDots, 1, topMm, bitmap.hex)
+    topMm += bitmap.heightDots / DOT_PER_MM + 0.5
+  }
+
+  // 6 行在剩余高度内均分（带位图行时压缩行距，仍保证最后一行落在 15mm 内）
+  const step = bitmap ? 1.75 : 2.1
   fonts.forEach((f, i) => {
-    const y = 1.5 + i * 2.1
+    const y = topMm + i * step
     b.raw(`TEXT ${f} 0 ${mm(1)} ${mm(y)} F${f}:${word}`)
   })
 
@@ -555,12 +594,31 @@ export function buildDeviceLabelBigCode(spec: DeviceLabelSpec): Uint8Array {
   return b.build()
 }
 
-/** 双编号标签参数：固定资产编号 + 机身编号（均为纯 ASCII） */
+/** 设备名位图（CPCL `EG` 点阵）——由 `renderNameBitmap()`（utils/labelNameBitmap.ts）生成 */
+export interface LabelBitmap {
+  /** 位图宽（点），必须是 8 的倍数（CPCL `EG` 的宽度单位是字节） */
+  widthDots: number
+  /** 位图高（点） */
+  heightDots: number
+  /** 十六进制点阵：行优先，每行 `widthDots / 8` 字节，MSB 在左（与厂家 SDK 一致） */
+  hex: string
+}
+
+/** 双编号标签参数：固定资产编号 + 机身编号（+ 设备名位图） */
 export interface DualCodeLabelSpec {
   /** 固定资产编号（devices.device_code，105 开头 12 位数字，**100% 有效**） */
   code: string
-  /** 机身编号（从 brand_model 抽取，如 `G-1D9APt`；仅 34.7% 的设备有值，可为空） */
+  /** 机身编号（从 brand_model 抽取，如 `G-1D9APt`；可为空） */
   serialNo?: string
+  /**
+   * 设备名（中文）。
+   * - **不传（undefined）**：沿用旧「两行」版式，与改造前**逐字节一致**（兼容其它调用点）；
+   * - **传字符串（含 `''`）**：切到「四要素三行」版式，**空名也占行位**——
+   *   保证同一批标签版式一致，现场不会出现「这张三行、那张两行」的错位。
+   */
+  name?: string
+  /** 设备名点阵；缺省时名称行留白但**保留行位**（版式不塌） */
+  nameBitmap?: LabelBitmap
   /** 二维码内容；默认 `…/ops/qr/<固定资产编号>` */
   qrContent?: string
   widthMm?: number
@@ -569,133 +627,259 @@ export interface DualCodeLabelSpec {
   qrUnit?: number
 }
 
+// —— 版式常量（全部集中在 measureDualCodeLabel 里算，build 只负责落笔）——
+/** 固定资产编号「大字」档：size22（2×2 放大）= 3.0mm/字符、6.0mm 高 */
+const BIG_PER_CHAR = 3.0
+const BIG_H = 6.0
+/** 固定资产编号/机身编号「小字」档：size0（1×1）= 1.5mm/字符、3.0mm 高 */
+const SML_PER_CHAR = 1.5
+const SML_H = 3.0
+/** 左边距 / 码与文字静区间隙 / 右边距（mm） */
+const DUAL_LEFT_PAD = 0.5
+const DUAL_GAP = 2
+const DUAL_RIGHT_PAD = 0.5
+/** 固定资产编号用 URL 二维码时要求的横向余量，不足则退回纯编号二维码 */
+const DUAL_SAFE_MARGIN = 1.5
+/** 行距（mm） */
+const DUAL_LINE_GAP = 0.5
+/** 名称行高度档（点 / mm）：24 点=3mm 与编号小字同高；20/16 为压缩档 */
+const NAME_STEPS: { dots: number; hmm: number }[] = [
+  { dots: 24, hmm: 3.0 },
+  { dots: 20, hmm: 2.5 },
+  { dots: 16, hmm: 2.0 },
+]
+/** 机身编号字档：font 24 size0（1.5mm/字、3mm 高）→ font 55 size0（1mm/字、2mm 高） */
+const SERIAL_STEPS: { hmm: number; font: CpclFont; perChar: number }[] = [
+  { hmm: SML_H, font: 24, perChar: SML_PER_CHAR },
+  { hmm: 2.0, font: 55, perChar: 1.0 },
+]
+
+/** 版式几何（mm）——`measureDualCodeLabel()` 的产物，页面据此生成名称位图 */
+export interface DualCodeLabelLayout {
+  /** true = 四要素三行版式；false = 旧两行版式 */
+  threeRows: boolean
+  qrContent: string
+  qrUnit: number
+  /** 二维码物理边长（mm） */
+  qrWmm: number
+  /** 二维码 y 起点（mm，垂直居中） */
+  qrYmm: number
+  /** 文字 x 起点（mm）= 二维码右边 + 静区 */
+  textXmm: number
+  /** 文字可用宽度（mm） */
+  availMm: number
+  /** 设备名位图可用宽（点，8 的倍数） */
+  nameMaxWidthDots: number
+  /** 文字块总高（mm） */
+  totalHmm: number
+  /** 三行 y 起点（mm） */
+  y: { code: number; name: number; serial: number }
+  codeBig: boolean
+  /** 名称行高度（mm / 点）——位图必须按这个高生成 */
+  nameHmm: number
+  nameDots: number
+  serialHmm: number
+  serialFont: CpclFont
+}
+
 /**
- * 设备标签「双编号」版式 —— **只打固定资产编号 + 机身编号**（均为纯 ASCII）。
+ * 设备标签「双编号 / 四要素」版式的**几何核算**（纯函数，不产出字节流）。
  *
- * ## 为什么砍掉中文名
- * 2026-09-30 多轮真机验证：C51DC 的 `font 0/7/16/20/24/55` **全部无法正常渲染 GBK 中文**
- * （ASCII 完全正常）。厂家 SDK 的正规中文方案是走位图（`EG` 指令），但 48×15 全宽位图
- * ≈11.5KB / 578 包，蓝牙吞吐下体验不可接受。故**放弃中文名**，只打两个纯 ASCII 编号。
+ * 抽出来单独一个函数的原因：设备名要走位图，而位图的宽高必须**先**知道文字可用宽，
+ * 于是「先量版式 → 再渲染位图 → 最后拼指令」。渲染位图是异步的（要 canvas），
+ * 量版式是同步的，两者分离才能让 `buildDualCodeLabel` 保持同步、可在 node 里跑测试。
  *
- * ## 字段口径（2026-09-30 查线上库核对，用户确认）
+ * ## 字段口径（2026-10-13 查线上库核对）
  * | 标签行 | 字段 | 形态 | 覆盖率 |
  * |---|---|---|---|
- * | 固定资产编号 | `devices.device_code` | `105000620923`（105 开头 12 位数字） | **100%** |
- * | 机身编号 | `extractSerialNo(brand_model)` | `G-1D9APt` | 34.7% |
+ * | 固定资产编号 | `devices.device_code` | `105000620923` | **100%** |
+ * | 设备名 | `devices.name` | 中文，如「潜水排污泵」 | 高 |
+ * | 机身编号 | `fixed_assets.brand_model` 抽取 / `device_serial_observations` | `G-1D9APt` | ~35% |
  *
  * ⚠️ 不要用 `fixed_assets.asset_code`！该列 7 位纯数字形态（如 `0603001`）是**资产分类码**
  * （68 个码挂 5775 台，平均 84.9 台/码），打上标签同型号设备会同号、毫无区分度。
  *
- * ## 版式（50×15 横向）
+ * ## 高度预算（48×15 纸，上下各留 0.5mm → 可用 14mm）
  * ```
- * ┌──────┬────────────────────────────────┐
- * │      │ 105000620923     ← 固定资产编号（size22 大字 3mm/字）│
- * │ [QR] │ G-1D9APt         ← 机身编号（size0 小字 1.5mm/字）│
- * └──────┴────────────────────────────────┘
+ *   行1 固定资产编号  size22   6.0mm
+ *   行距                     0.5mm
+ *   行2 设备名        位图     3.0mm   ← 24 点
+ *   行距                     0.5mm
+ *   行3 机身编号      font24   3.0mm
+ *   合计                    13.0mm ≤ 14mm ✅
  * ```
- * 机身编号为空时**整行省略**，固定资产编号行自动垂直居中（实测大部分设备无此值）。
- *
- * ## 为什么两行**不**等大
- * 用户先要求「两行同样字高大小」，但几何算不通：两行等大 → 字号由**较长那行**决定
- * → 机身编号最长可达 18 字符，48mm 内最多只能 1.5mm/字 → 固定资产编号被从 3mm 拖到
- * 1.5mm，**反而比原来更小**，与用户「编号做大点」的首要诉求直接冲突。
- * 故改为：**固定资产编号保持 size22 大字，机身编号用 size0 小字**（用户已确认）。
- *
- * ## 宽度方程（决定二维码能多大）
- * `左0.5 + 二维码Q + 静区2 + 文字宽 + 右0.5 = 48`。
- * 固定资产编号固定 12 位 × 3.0mm = **36.0mm**
- * → unit=2 时二维码 7.3mm → 可用 37.8mm ✅
- *
- * ## 高度核算
- * 行1 size22 高 6mm + 行距 0.5 + 行2 size0 高 3mm = 9.5mm，垂直居中
- * `y1=2.75 → y2=9.25 → 底边 12.25mm < 15mm` ✅（多长度组合 5/5 通过）
+ * 超限时按**保留优先级**依次降档（编号大字 > 名称 > 机身编号）：
+ * 机身编号 font24→font55（3→2mm）→ 名称 24→20→16 点（3→2.5→2mm）→ 编号 size22→size0（6→3mm）。
+ * 保证「固定资产编号大字」是最后才动的——这是现场首要识别信息。
  */
-export function buildDualCodeLabel(spec: DualCodeLabelSpec): Uint8Array {
+export function measureDualCodeLabel(spec: DualCodeLabelSpec): DualCodeLabelLayout {
   const widthMm = spec.widthMm ?? LABEL_50X15.widthMm
   const heightMm = spec.heightMm ?? LABEL_50X15.heightMm
-
   const code = (spec.code || '').trim()
   const serialNo = (spec.serialNo || '').trim()
-
-  const leftPad = 0.5
-  const gapMm = 2 // 码与文字静区（二维码白边会侵占相邻区域，至少留 2mm）
-  const rightPad = 0.5
+  const threeRows = typeof spec.name !== 'undefined'
 
   // 二维码 unit 下限 2：unit=1 模块仅 0.125mm，手机扫不出（实测结论，勿降）
   const qrUnitMax = Math.min(6, Math.max(2, spec.qrUnit ?? 2))
 
-  // 行1：固定资产编号 —— size22（2×2 放大）= 3.0mm/字符、6.0mm 高（大字优先）
-  // 行2：机身编号     —— size0（1×1）  = 1.5mm/字符、3.0mm 高（能装下长串）
-  const BIG_PER_CHAR = 3.0
-  const SML_PER_CHAR = 1.5
-  const BIG_H = 6.0
-  const SML_H = 3.0
-
   /** 按内容长度与 unit 估二维码版本 → 模块数 → 边长（mm）与文字可用宽 */
-  const measure = (contentLen: number, unit: number) => {
+  const measureQr = (contentLen: number, unit: number) => {
     const ver = contentLen <= 26 ? 2 : contentLen <= 42 ? 3 : contentLen <= 62 ? 4
       : contentLen <= 84 ? 5 : 6
     const modules = 21 + (ver - 1) * 4
     const qrWmm = (modules * unit) / DOT_PER_MM
-    const textX = leftPad + qrWmm + gapMm
-    const availMm = Math.max(6, widthMm - textX - rightPad)
-    return { ver, modules, qrWmm, textX, availMm }
+    const textX = DUAL_LEFT_PAD + qrWmm + DUAL_GAP
+    const availMm = Math.max(6, widthMm - textX - DUAL_RIGHT_PAD)
+    return { qrWmm, textX, availMm }
   }
 
   // 二维码内容：默认直达链接（微信扫一扫可跳网页）。
   // ⚠️ URL 形式有 43 字符 → ver4/33 模块 → unit=2 时占 8.25mm，文字可用仅 36.75mm，
   //    而 12 位固定资产编号 size22 需 36.0mm —— **只剩 0.75mm 余量**，字体渲染稍宽即溢出。
-  //    故要求**余量 ≥ 1.5mm** 才用 URL；否则退回**纯编号**（12 字符 → ver2 → 6.25mm，
-  //    余量 2.75mm）。`parseScanPayload` 对两种形式都兼容（纯编号走兜底 return）。
-  const SAFE_MARGIN_MM = 1.5
+  //    故要求**余量 ≥ 1.5mm** 才用 URL；否则退回**纯编号**（12 字符 → ver2 → 6.25mm）。
+  //    `parseScanPayload` 对两种形式都兼容（纯编号走兜底 return）。
   const urlContent = spec.qrContent
     || `https://www.xmgl-123.cn/ops/qr/${encodeURIComponent(code || 'X')}`
   const urlOk =
-    code.length * BIG_PER_CHAR + SAFE_MARGIN_MM <= measure(urlContent.length, qrUnitMax).availMm
+    code.length * BIG_PER_CHAR + DUAL_SAFE_MARGIN <= measureQr(urlContent.length, qrUnitMax).availMm
   const qrContent = urlOk ? urlContent : (code || 'X')
 
   // 自动降 unit：若当前 unit 下编号装不下 size22，逐级下调直到装得下（下限 2）。
-  // 保证「固定资产编号始终保持大字」——这是用户的首要诉求，优先级高于二维码大小。
-  // （反正 unit=2 模块 0.25mm 已足够可扫，没必要为了更大的码牺牲编号字号。）
+  // 保证「固定资产编号始终保持大字」——用户的首要诉求，优先级高于二维码大小。
   let qrUnit = qrUnitMax
   while (
     qrUnit > 2
-    && code.length * BIG_PER_CHAR + SAFE_MARGIN_MM > measure(qrContent.length, qrUnit).availMm
+    && code.length * BIG_PER_CHAR + DUAL_SAFE_MARGIN > measureQr(qrContent.length, qrUnit).availMm
   ) {
     qrUnit -= 1
   }
 
-  const { qrWmm, textX, availMm } = measure(qrContent.length, qrUnit)
-
-  // 固定资产编号放不下 size22 时退化为小字，绝不留空白
+  const { qrWmm, textX, availMm } = measureQr(qrContent.length, qrUnit)
+  const qrYmm = Math.max(0, (heightMm - qrWmm) / 2)
   const codeBig = code.length * BIG_PER_CHAR <= availMm
-  const codePerChar = codeBig ? BIG_PER_CHAR : SML_PER_CHAR
-  const codeH = codeBig ? BIG_H : SML_H
-  const codeSize = codeBig ? 22 : 0
+  const nameMaxWidthDots = Math.max(8, Math.floor((availMm * DOT_PER_MM) / 8) * 8)
+
+  if (!threeRows) {
+    // —— 旧两行版式：与改造前完全一致（兼容其它调用点）——
+    const codeH = codeBig ? BIG_H : SML_H
+    const totalHmm = codeH + (serialNo ? DUAL_LINE_GAP + SML_H : 0)
+    const curY = Math.max(0.5, (heightMm - totalHmm) / 2)
+    return {
+      threeRows: false, qrContent, qrUnit, qrWmm, qrYmm,
+      textXmm: textX, availMm, nameMaxWidthDots, totalHmm,
+      y: { code: curY, name: curY, serial: curY + codeH + DUAL_LINE_GAP },
+      codeBig, nameHmm: 0, nameDots: 0, serialHmm: SML_H, serialFont: 24,
+    }
+  }
+
+  // —— 四要素三行版式：三行恒占位（空值留白，保证一批标签版式一致）——
+  const availH = Math.max(6, heightMm - 1.0) // 上下各留 0.5mm 安全边
+  let nameLevel = 0
+  let serialLevel = 0
+  let big = codeBig
+  const total = () =>
+    (big ? BIG_H : SML_H) + DUAL_LINE_GAP + NAME_STEPS[nameLevel].hmm
+    + DUAL_LINE_GAP + SERIAL_STEPS[serialLevel].hmm
+
+  // 降档顺序 = 保留优先级的逆序：机身编号 → 名称 → 编号大字
+  while (total() > availH) {
+    if (serialLevel < SERIAL_STEPS.length - 1) { serialLevel += 1; continue }
+    if (nameLevel < NAME_STEPS.length - 1) { nameLevel += 1; continue }
+    if (big) { big = false; continue }
+    break // 已经降到最省，仍超限就由调用方（纸高）负责，不再压
+  }
+
+  const totalHmm = total()
+  const codeH = big ? BIG_H : SML_H
+  // 垂直居中；下限 0.3mm 防浮点把首行顶出纸外
+  const curY = Math.max(0.3, (heightMm - totalHmm) / 2)
+  const nameY = curY + codeH + DUAL_LINE_GAP
+  const serialY = nameY + NAME_STEPS[nameLevel].hmm + DUAL_LINE_GAP
+
+  return {
+    threeRows: true, qrContent, qrUnit, qrWmm, qrYmm,
+    textXmm: textX, availMm, nameMaxWidthDots, totalHmm,
+    y: { code: curY, name: nameY, serial: serialY },
+    codeBig: big,
+    nameHmm: NAME_STEPS[nameLevel].hmm,
+    nameDots: NAME_STEPS[nameLevel].dots,
+    serialHmm: SERIAL_STEPS[serialLevel].hmm,
+    serialFont: SERIAL_STEPS[serialLevel].font,
+  }
+}
+
+/**
+ * 设备标签「双编号」版式 —— 固定资产编号 + 机身编号（+ 设备名）。
+ *
+ * ## 为什么设备名必须走位图（2026-10-13 定论）
+ * 2026-09-30 多轮真机验证：C51DC 的 `TEXT` 指令在 `font 0/7/16/20/24/55` 下
+ * **全部无法正常渲染 GBK 中文**（同一张纸上 ASCII 完全正常，`buildChineseFontProbe()`
+ * 就是为此留的判定标签）。厂家 SDK 的正规中文方案是 `EG` 位图指令——本函数即按此落地：
+ * 中文名由手机端 canvas 渲染成单色点阵，用 `EG` 贴到标签上，绕开打印机字库。
+ *
+ * ## 版式（50×15 横向，48mm 安全打印宽）
+ * ```
+ * ┌──────┬────────────────────────────────┐
+ * │      │ 105000620923    ← 行1 固定资产编号（size22 大字）│
+ * │ [QR] │ 潜水排污泵       ← 行2 设备名（EG 位图 24 点=3mm）│
+ * │      │ G-1D9APt        ← 行3 机身编号（font24 小字）│
+ * └──────┴────────────────────────────────┘
+ * ```
+ * 三行恒占位（变量见 `measureDualCodeLabel`），空值留白不塌版。
+ *
+ * ## 为什么两行**不**等大
+ * 用户先要求「两行同样字高大小」，但几何算不通：两行等大 → 字号由**较长那行**决定
+ * → 机身编号最长可达 18 字符，48mm 内最多只能 1.5mm/字 → 固定资产编号被从 3mm 拖到
+ * 1.5mm，**反而比原来更小**，与用户「编号做大点」的首要诉求直接冲突。
+ * 故：**固定资产编号 size22 大字，设备名与机身编号小字**（用户已确认）。
+ *
+ * ## 宽度方程（决定二维码能多大）
+ * `左0.5 + 二维码Q + 静区2 + 文字宽 + 右0.5 = 48`。
+ * 固定资产编号固定 12 位 × 3.0mm = **36.0mm** → unit=2 时二维码 7.3mm → 可用 37.8mm ✅
+ */
+export function buildDualCodeLabel(spec: DualCodeLabelSpec): Uint8Array {
+  const widthMm = spec.widthMm ?? LABEL_50X15.widthMm
+  const heightMm = spec.heightMm ?? LABEL_50X15.heightMm
+  const code = (spec.code || '').trim()
+  const serialNo = (spec.serialNo || '').trim()
+  const name = (spec.name ?? '').trim()
+  const L = measureDualCodeLabel(spec)
 
   const fit = (text: string, perChar: number): string => {
-    const maxChars = Math.max(1, Math.floor(availMm / perChar))
-    return text.length <= maxChars ? text : text.slice(0, maxChars)
+    const maxChars = Math.max(1, Math.floor(L.availMm / perChar))
+    // 截断不写死字符数，按可用宽度算；加省略号让现场知道「名字没打全」
+    return text.length <= maxChars ? text : text.slice(0, Math.max(1, maxChars - 1)) + '…'
   }
 
   const b = new CpclBuilder().init({ widthMm, heightMm, copies: 1 })
   b.align('left')
 
-  // 垂直居中：总高 = 编号行高 +（有机身编号时）行距 + 机身行高
-  const lineGap = 0.5
-  const totalH = codeH + (serialNo ? lineGap + SML_H : 0)
-  const curY = Math.max(0.5, (heightMm - totalH) / 2)
+  // —— 行 1：固定资产编号（大字，首要识别信息）——
+  b.text(24, L.codeBig ? 22 : 0, L.textXmm, L.y.code,
+    fit(code || '—', L.codeBig ? BIG_PER_CHAR : SML_PER_CHAR))
 
-  // 行 1：固定资产编号（大字）
-  b.text(24, codeSize, textX, curY, fit(code || '—', codePerChar))
-
-  // 行 2：机身编号（小字）—— 无值则整行省略，编号行垂直居中
-  if (serialNo) {
-    b.text(24, 0, textX, curY + codeH + lineGap, fit(serialNo, SML_PER_CHAR))
+  if (!L.threeRows) {
+    // —— 旧两行版式：机身编号紧跟编号行 ——
+    if (serialNo) b.text(24, 0, L.textXmm, L.y.serial, fit(serialNo, SML_PER_CHAR))
+  } else {
+    // —— 行 2：设备名（EG 位图；无位图则留白占位，版式不塌）——
+    const bmp = spec.nameBitmap
+    if (name && bmp && bmp.heightDots > 0) {
+      // 宽度必须与位图自身 stride 一致（EG 每行 = widthDots/8 字节），
+      // 所以不裁剪宽度；万一超宽（调用方没按 nameMaxWidthDots 生成）宁可留白也不出花屏。
+      if (bmp.widthDots <= L.nameMaxWidthDots) {
+        b.egImage(bmp.widthDots, Math.min(bmp.heightDots, L.nameDots),
+          L.textXmm, L.y.name, bmp.hex)
+      }
+    }
+    // —— 行 3：机身编号（小字；空值留白）——
+    if (serialNo) {
+      b.text(L.serialFont, 0, L.textXmm, L.y.serial, fit(serialNo, L.serialHmm >= 3 ? SML_PER_CHAR : 1.0))
+    }
   }
 
   // 二维码垂直居中（与文字块各自独立居中，观感更稳）
-  b.qrcode(leftPad, Math.max(0, (heightMm - qrWmm) / 2), qrContent, { unit: qrUnit, rank: 'M' })
+  b.qrcode(DUAL_LEFT_PAD, L.qrYmm, L.qrContent, { unit: L.qrUnit, rank: 'M' })
   b.form().print()
   return b.build()
 }
