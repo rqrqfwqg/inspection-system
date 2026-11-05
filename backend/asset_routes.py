@@ -5,7 +5,7 @@
   - 设备全局检索（输入设备编号 → 聚合该设备跨子系统全部资料 + 关联追溯）
   - 子系统 / 资料表 / 字段定义 / 记录 / 设备 / 关联 的增删查改
 """
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Body
 from sqlalchemy.orm import Session
 from sqlalchemy import text as sa_text, func, or_, cast as sa_cast, Text as SAText
 from typing import Optional, List, Dict, Any
@@ -16,7 +16,7 @@ import re
 import time
 import uuid
 import openpyxl
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from database import (
     get_db, User, Subsystem, Device, DataTable, FieldDef, Record, DeviceRelation,
@@ -77,6 +77,11 @@ RELATION_TYPE_SEED: List[Dict[str, Any]] = [
      "description": "设备自上级配电点取电（供电链上游追溯）", "sort_order": 12},
     {"code": "parent_dist",      "label": "上级配电", "kind": "power",   "direction": "forward",
      "description": "指向本设备的上级配电柜/母线（上游）", "sort_order": 13},
+    # --- 房间作为受电端点（2026-11-05）：from = 配电柜/配电箱 → to = 房间 code ---
+    # 为什么不复用「上级配电」：房间不是设备，而「所在机房」表达的是"设备装在房里"（容器）。
+    # 单列一个类型，房间侧才能一眼看出"这间房由哪台柜子供的电"，两种语义不会打架。
+    {"code": "power_room_feed",  "label": "供电归属", "kind": "power",   "direction": "forward",
+     "description": "房间的受电来源：由某配电房内的某配电柜供电（房间本身不建虚拟设备）", "sort_order": 14},
     # --- 冷源链路（kind=cooling：from=冷源主机 → to=用冷末端）---
     {"code": "cooling_source",   "label": "冷源",     "kind": "cooling", "direction": "forward",
      "description": "冷水机组/冷源为空调末端提供冷量", "sort_order": 20},
@@ -107,6 +112,9 @@ LEGACY_RELATION_MAP: Dict[str, str] = {
 # code → label（与 RELATION_TYPE_SEED 一致，供反查）
 RELATION_CODE_LABEL: Dict[str, str] = {r["code"]: r["label"] for r in RELATION_TYPE_SEED}
 RELATION_LABEL_KIND: Dict[str, str] = {r["label"]: r["kind"] for r in RELATION_TYPE_SEED}
+RELATION_LABEL_DIRECTION: Dict[str, str] = {r["label"]: r["direction"] for r in RELATION_TYPE_SEED}
+# 「供电归属」的受控 label（房间作为受电端点时用）
+RELATION_ROOM_FEED: str = RELATION_CODE_LABEL["power_room_feed"]
 
 
 def _seed_relation_types(db: Session):
@@ -961,6 +969,242 @@ def create_device(data: DeviceCreate, db: Session = Depends(get_db), current_use
     r.subsystem_name = _subsystem_name(db, obj.subsystem_id)
     return r
 
+# ========================= 临时编号建档 + 补录正式编号（2026-11-05） =========================
+# 背景（用户口径）：现场大量设备没有固定资产编号铭牌，而原 `POST /devices` 编号必填且全库唯一
+# → 这类设备根本建不了档，作业员只能拿别人的号顶着，污染台账。
+# 方案：允许 `TMP-<区域码>-<yyyyMMdd>-<3位流水>` 临时建档；后续拿到正式编号时，
+#       `POST /devices/{did}/rebind-code` 在**一个事务**里改写全部关联列，不留孤儿数据。
+# 识别口径：`devices.device_code` 以 `TMP-` 开头即为临时编号（不加字段，零表结构变更）。
+_TMP_PREFIX = "TMP-"
+_TMP_AREA_DEFAULT = "GTC"
+_TMP_AREA_STRIP = re.compile(r"[^A-Za-z0-9]")
+
+
+def _tmp_area_code(raw: Optional[str]) -> str:
+    """区域码归一：只留字母数字、转大写、截 8 位；空则回落 GTC（不因脏入参 500）。"""
+    s = _TMP_AREA_STRIP.sub("", (raw or "").strip().upper())[:8]
+    return s or _TMP_AREA_DEFAULT
+
+
+def _tmp_used_seqs(db: Session, prefix: str) -> set:
+    """前缀下已被占用的流水号。
+
+    🔴 三处都要查（devices / device_aliases / device_archives）：临时编号只要在任意一处
+       出现，就不能再发出去 —— 否则新建时会被 devices 防重或别名唯一索引挡下。
+    """
+    rows = db.execute(sa_text(
+        "SELECT device_code AS c FROM devices WHERE device_code LIKE :p "
+        "UNION SELECT alias_code AS c FROM device_aliases WHERE alias_code LIKE :p "
+        "UNION SELECT device_code AS c FROM device_archives WHERE device_code LIKE :p"
+    ), {"p": prefix + "%"}).fetchall()
+    used = set()
+    for row in rows:
+        code = row[0] or ""
+        if not code.startswith(prefix):
+            continue
+        tail = code[len(prefix):]
+        if tail.isdigit():
+            used.add(int(tail))
+    return used
+
+
+@router.post("/devices/temp-code")
+def next_temp_device_code(area: Optional[str] = None,
+                          db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """生成一个未被占用的临时设备编号（**只返回字符串，不落库**）。
+
+    规则：`TMP-<区域码>-<yyyyMMdd>-<3位流水>`，日期按北京时间（服务器 TZ=Asia/Shanghai，
+    这里仍显式 +8h，避免以后换环境变成 UTC 日期导致流水按日切换错位）。
+    🔴 必须查库确认不重复后再返回：现场两人同时点「暂无编号」，若各自算出同一个 001，
+       第二个人保存时会被 `POST /devices` 的防重挡下（体验断裂）。故取「当前最大流水 +1」
+       并校验三处占用。
+    """
+    area_code = _tmp_area_code(area)
+    day = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y%m%d")
+    prefix = f"{_TMP_PREFIX}{area_code}-{day}-"
+    used = _tmp_used_seqs(db, prefix)
+    seq = (max(used) + 1) if used else 1
+    while seq in used:      # 理论不可达，兜底：绝不返回已占用的号
+        seq += 1
+    return {"device_code": f"{prefix}{seq:03d}", "area": area_code, "day": day}
+
+
+# 补录编号要改写的全部关联列（顺序：先子表、后主表；SQLite 默认不强制外键，顺序仍按安全侧排）。
+# ⛔ fixed_assets 绝不在此列：固定资产源表编号以对方为准，改它等于篡改固定资产账。
+_REBIND_TARGETS: List[Dict[str, str]] = [
+    {"table": "records",                    "column": "device_code"},
+    {"table": "device_archives",            "column": "device_code"},
+    {"table": "device_photos",              "column": "device_code"},
+    {"table": "device_geo_observations",    "column": "device_code"},
+    {"table": "device_serial_observations", "column": "device_code"},
+    {"table": "inventory_status_overrides", "column": "device_code"},
+    {"table": "ba_problems",                "column": "device_code"},
+    {"table": "device_accessories",         "column": "parent_device_code"},
+    {"table": "device_aliases",             "column": "alias_code"},
+    {"table": "device_aliases",             "column": "canonical_code"},
+    {"table": "device_relations",           "column": "from_code"},
+    {"table": "device_relations",           "column": "to_code"},
+    {"table": "work_orders",                "column": "asset_device_code"},
+    {"table": "devices",                    "column": "device_code"},
+]
+
+
+def _missing_rebind_targets(db: Session) -> List[str]:
+    """校验待改写列是否都存在。
+
+    缺列必须在**动手前**失败：若边改边报错，虽然会回滚，但会把「环境没迁移好」伪装成
+    一次莫名的 500。这里一次列全，让运维一眼看出缺什么。
+    """
+    miss: List[str] = []
+    for t in _REBIND_TARGETS:
+        # 表名/列名全部来自上方常量白名单，无外部输入，故 f-string 拼接安全
+        rows = db.execute(sa_text("PRAGMA table_info(%s)" % t["table"])).fetchall()
+        names = {r[1] for r in rows}
+        if not names:
+            miss.append("%s（整表缺失）" % t["table"])
+        elif t["column"] not in names:
+            miss.append("%s.%s" % (t["table"], t["column"]))
+    return miss
+
+
+def _append_rebind_log(entry: Dict[str, Any]) -> None:
+    """补录审计日志（append-only JSONL）：谁、何时、把哪个号改成了什么、动了哪些表多少行。
+
+    🔴 落盘失败绝不影响接口结果（日志是旁证，不是流程必需）。
+    """
+    try:
+        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        with open(os.path.join(log_dir, "device_rebind.log"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _rebind_records_json(db: Session, old_code: str, new_code: str) -> int:
+    """把 `records.data` JSON 里「该设备自己的编号副本」一起改成新号，返回改了几行。
+
+    为什么必须做：现场新建设备会双写一条「现场新建设备」资料表记录
+    （`_write_site_created_record` 把编号同时写进 `records.device_code` **列** 和 `data` JSON）。
+    只改列不改 JSON，那张表的前端展示（读 data）仍显示临时编号 —— 用户补录完正式编号
+    回去看还是旧号，必然当 bug 报回来。
+
+    安全边界（按用户口径，**故意收窄**）：
+      · 只看本次设备自己的行（`device_code = new_code`，即刚被列更新过的那些）；
+      · 只动 `data` 是 dict 且 `data["device_code"] == old_code` 的键值，其它键一个不碰；
+      · JSON 解析失败（历史脏数据）→ 保留原文不动、记 warning，**绝不抛异常**
+        （不能因为一条坏数据把整次补录回滚掉）。
+    """
+    fixed = 0
+    broken = 0
+    rows = db.execute(sa_text("SELECT id, data FROM records WHERE device_code = :c"),
+                      {"c": new_code}).fetchall()
+    for rid, raw in rows:
+        if raw is None or raw == "":
+            continue
+        data = raw
+        if isinstance(data, (str, bytes)):
+            try:
+                data = json.loads(data)
+            except Exception:
+                broken += 1      # 脏数据：原样保留，不阻断补录
+                continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("device_code") != old_code:
+            continue
+        data["device_code"] = new_code
+        db.execute(sa_text("UPDATE records SET data = :d WHERE id = :i"),
+                   {"d": json.dumps(data, ensure_ascii=False), "i": rid})
+        fixed += 1
+    if broken:
+        _append_rebind_log({
+            "at": datetime.now(timezone.utc).isoformat(),
+            "old_code": old_code, "new_code": new_code, "status": "warning",
+            "warning": "%d 条 records.data 不是合法 JSON，已原样保留（不影响补录）" % broken,
+        })
+    return fixed
+
+
+@router.post("/devices/{did}/rebind-code")
+def rebind_device_code(did: int, payload: Dict[str, Any] = Body(...),
+                       db: Session = Depends(get_db), current_user: User = Depends(_get_current_user)):
+    """把临时编号补录为正式固定资产编号：**一个事务**改写全部关联列。
+
+    这是「临时编号」链条上最容易出事的一段：设备编号在 14 个列里被当外键用，漏改任何一列
+    → 该设备在对应模块里凭空消失（records 看不见、照片挂不上、关联图断边、工单丢失）。故：
+      1) 校验先做完（非空/长度/非临时号/占用/缺列），任何一项不过直接 400/409/500，**一行都不改**；
+      2) 全部 UPDATE 在同一事务，任一异常 → rollback，返回 500 且**不留半截数据**；
+      3) 成功后清编号归一器缓存 + 台账缓存（不清则 60s 内仍读到旧号）。
+    """
+    new_code = str(payload.get("new_code") or "").strip()
+    if not new_code:
+        raise HTTPException(status_code=400, detail="新编号不能为空")
+    if len(new_code) > 64:
+        raise HTTPException(status_code=400, detail="新编号过长（上限 64 字符）")
+    if new_code.upper().startswith(_TMP_PREFIX):
+        raise HTTPException(status_code=400,
+                            detail="不能用临时编号（%s）作为正式编号" % _TMP_PREFIX)
+    dev = db.query(Device).filter(Device.id == did).first()
+    if not dev:
+        raise HTTPException(status_code=404, detail="设备不存在")
+    old_code = dev.device_code or ""
+    if old_code == new_code:
+        return {"old_code": old_code, "new_code": new_code, "updated": {}, "unchanged": True}
+    # —— 占用校验：三处任一处已占用都拒绝，并说明被谁占了（409 让前端能区分「业务冲突」与「服务异常」）
+    hit_dev = db.query(Device).filter(Device.device_code == new_code).first()
+    if hit_dev:
+        raise HTTPException(status_code=409,
+                            detail="编号 %s 已被设备台账占用（%s）" % (new_code, hit_dev.name or "未命名"))
+    hit_alias = db.query(DeviceAlias).filter(DeviceAlias.alias_code == new_code).first()
+    if hit_alias:
+        raise HTTPException(status_code=409,
+                            detail="编号 %s 已被编号别名占用（属设备 %s）" % (new_code, hit_alias.canonical_code))
+    hit_arc = db.query(DeviceArchive).filter(DeviceArchive.device_code == new_code).first()
+    if hit_arc:
+        raise HTTPException(status_code=409, detail="编号 %s 已被设备档案占用" % new_code)
+    miss = _missing_rebind_targets(db)
+    if miss:
+        raise HTTPException(status_code=500, detail="补录目标列缺失，未做任何修改：" + "、".join(miss))
+
+    updated: Dict[str, int] = {}
+    json_fixed = 0
+    try:
+        for t in _REBIND_TARGETS:
+            sql = sa_text("UPDATE %s SET %s = :new WHERE %s = :old"
+                          % (t["table"], t["column"], t["column"]))
+            n = db.execute(sql, {"new": new_code, "old": old_code}).rowcount or 0
+            if n:
+                updated[t["table"]] = updated.get(t["table"], 0) + int(n)
+            # 紧跟 records.device_code 那条列更新：同一事务里把 data JSON 的编号副本也改掉
+            # （否则资料表页读 data，仍显示临时编号）
+            if t["table"] == "records" and t["column"] == "device_code":
+                json_fixed = _rebind_records_json(db, old_code, new_code)
+        db.commit()
+    except Exception as exc:      # noqa: BLE001 —— 任何异常都必须整体回滚
+        db.rollback()
+        _append_rebind_log({
+            "at": datetime.now(timezone.utc).isoformat(),
+            "operator": getattr(current_user, "name", "") or "",
+            "old_code": old_code, "new_code": new_code,
+            "status": "failed", "error": "%s: %s" % (type(exc).__name__, exc),
+            "updated": updated,
+        })
+        raise HTTPException(status_code=500,
+                            detail="补录失败，已整体回滚（数据未改动）：%s" % exc)
+    db.expire_all()      # ORM 身份映射里缓存的旧编号必须失效，否则后续查询仍读到旧值
+    reset_normalizer()   # 🔴 编号归一器有缓存：不清则仍把新号归一成旧号（关联查询会错）
+    _invalidate_ledger_cache()
+    _append_rebind_log({
+        "at": datetime.now(timezone.utc).isoformat(),
+        "operator": getattr(current_user, "name", "") or "",
+        "old_code": old_code, "new_code": new_code,
+        "status": "ok", "updated": updated, "data_json_fixed": json_fixed,
+    })
+    return {"old_code": old_code, "new_code": new_code, "updated": updated,
+            "data_json_fixed": json_fixed}
+
+
 @router.put("/devices/{did}", response_model=DeviceResponse)
 def update_device(did: int, data: DeviceUpdate, db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
     """更新设备（含扫码补录位置：room_id / building / floor / location_desc）。
@@ -1001,6 +1245,30 @@ def _resolve_device_by_code_or_alias(db: Session, code: str) -> Optional[Device]
     if alias:
         code = alias.canonical_code
     return db.query(Device).filter(Device.device_code == code).first()
+
+
+def _resolve_endpoint(db: Session, code: str):
+    """任意编号 → (kind, canonical_code)。
+
+    kind ∈ {"device", "room", "record", None}，与 `asset_link_routes._endpoint_index`
+    的口径保持一致：设备（含别名）优先 → 房间 → 资料域编号（电柜 G-* / 图纸回路）。
+
+    为什么要有它：建边原来是"两端必须是设备"，于是"房间由某台配电柜供电"这种
+    **一头是房间**的关系根本建不出来（只能给房间虚拟建一台配电柜，污染设备台账）。
+    """
+    c = (code or "").strip()
+    if not c:
+        return (None, None)
+    dev = _resolve_device_by_code_or_alias(db, c)
+    if dev:
+        return ("device", dev.device_code)
+    room = db.query(Room).filter(Room.code == c).first()
+    if room:
+        return ("room", room.code)
+    rec = db.query(Record).filter(Record.device_code == c).first()
+    if rec:
+        return ("record", rec.device_code)
+    return (None, None)
 
 
 @router.post("/devices/{did}/photos", response_model=DevicePhotoResponse)
@@ -1243,26 +1511,52 @@ def create_relation(data: DeviceRelationCreate, db: Session = Depends(get_db), _
     if not from_code or not to_code:
         raise HTTPException(status_code=400, detail="from_code / to_code 均必填")
 
-    f_dev = _resolve_device_by_code_or_alias(db, from_code)
-    t_dev = _resolve_device_by_code_or_alias(db, to_code)
-    missing = [c for c, d in ((from_code, f_dev), (to_code, t_dev)) if d is None]
+    # 2026-11-05：端点从「只能是设备」放宽为「设备 / 房间 / 资料域电柜」。
+    # 直接动机：房间的供电归属要挂到上级配电房的某台配电柜上，且不允许给房间虚拟建柜。
+    f_kind, f_code = _resolve_endpoint(db, from_code)
+    t_kind, t_code = _resolve_endpoint(db, to_code)
+    missing = [c for c, k in ((from_code, f_kind), (to_code, t_kind)) if not k]
     if missing:
         raise HTTPException(status_code=404,
-                            detail=f"设备不存在（可先在设备台账登记）：{', '.join(missing)}")
-    f_code, t_code = f_dev.device_code, t_dev.device_code
+                            detail=f"编号不存在（设备 / 房间 / 资料域电柜均可）：{', '.join(missing)}")
+    if f_kind == "room" and t_kind == "room":
+        raise HTTPException(status_code=400,
+                            detail="不支持房间到房间的关联（房间层级请用楼栋 / 楼层表达）")
     if f_code == t_code:
-        raise HTTPException(status_code=400, detail="不能建立设备到自身的关联")
+        raise HTTPException(status_code=400, detail="不能建立到自身的关联")
 
     rtype = _canonical_relation_label(data.relation_type)
+    # 房间只能出现在供电类关系里：网络 / 控制 / 管路挂房间语义不成立
+    if (f_kind == "room" or t_kind == "room") and RELATION_LABEL_KIND.get(rtype) != "power":
+        raise HTTPException(status_code=400,
+                            detail=f"房间只能参与供电类关联（当前类型：{rtype}）")
+
     dup = (db.query(DeviceRelation).filter(
         DeviceRelation.from_code == f_code, DeviceRelation.to_code == t_code,
         DeviceRelation.relation_type == rtype).first())
     if dup:
         raise HTTPException(status_code=409, detail=f"相同关联已存在（{f_code} → {t_code} · {rtype}）")
 
+    # 端点类型落进 meta：后续遍历/展示不必再反查一遍是谁
+    meta = dict(data.meta or {})
+    meta.setdefault("from_kind", f_kind)
+    meta.setdefault("to_kind", t_kind)
+    # 「供电归属」以房间为受电端点：主供电唯一，第二路必须显式标备用（meta.role=backup）
+    if t_kind == "room" and rtype == RELATION_ROOM_FEED:
+        role = str(meta.get("role") or "main").lower()
+        meta["role"] = role
+        if role != "backup":
+            for e in db.query(DeviceRelation).filter(
+                DeviceRelation.to_code == t_code,
+                DeviceRelation.relation_type == rtype).all():
+                if str((e.meta or {}).get("role") or "main").lower() != "backup":
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"该房间已有主供电归属（{e.from_code}）；如需第二路请标记为备用")
+
     obj = DeviceRelation(
         from_code=f_code, to_code=t_code, relation_type=rtype,
-        subsystem_id=data.subsystem_id, meta=data.meta or {})
+        subsystem_id=data.subsystem_id, meta=meta)
     db.add(obj); db.commit(); db.refresh(obj)
     return obj
 
@@ -2554,6 +2848,161 @@ def area_stats(
         "top_rooms": top_rooms[:15],
         "pending_by_building": [{"building": k, "count": v} for k, v in
                                 sorted(idx["fuzzy"]["by_building"].items(), key=lambda x: -x[1])],
+    }
+
+
+@router.get("/asset-ledger/by-building")
+def asset_ledger_by_building(
+    building: str,
+    floor: Optional[str] = None,
+    q: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 200,
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """楼栋设备清单（与 /areas/stats 同源的房间归属维度，根治"0 台"误答）。
+
+    计数口径与 gtc_asset_area_stats 完全一致（均来自 _area_index），并内置一致性校验：
+    清单去重设备数 == 区域统计该楼栋去重设备数。绝不返回 0（无绑定设备时返回空清单 +
+    pending 待核实计数，而非"0 台"误答）。
+    """
+    idx = _area_index(db)
+    rooms_dev: Dict[str, set] = idx["rooms"]
+    dev_meta: Dict[str, Dict[str, Any]] = idx["dev_meta"]
+    room_rows = db.query(Room).filter(Room.is_active == True).all()
+    room_rows = [r for r in room_rows if (r.building or "") == building]
+    if floor:
+        room_rows = [r for r in room_rows if (r.floor or "") == floor]
+
+    # 去重归集设备编号（同一设备跨多机房只计一次）
+    codes: List[str] = []
+    seen: set = set()
+    code_rooms: Dict[str, List[str]] = {}
+    for r in room_rows:
+        for c in sorted(rooms_dev.get(r.code, set())):
+            code_rooms.setdefault(c, []).append(r.code)
+            if c not in seen:
+                seen.add(c)
+                codes.append(c)
+
+    # 关键词过滤（编号/名称子串，大小写不敏感）
+    if q:
+        ql = q.strip().lower()
+        codes = [c for c in codes if ql in c.lower()
+                 or ql in (dev_meta.get(c, {}).get("name") or "").lower()]
+
+    total = len(codes)
+    page_size = max(1, min(int(page_size), 500))
+    page = max(1, int(page))
+    start = (page - 1) * page_size
+    page_codes = codes[start:start + page_size]
+    items = []
+    for c in page_codes:
+        m = dev_meta.get(c) or {}
+        items.append({
+            "code": c,
+            "name": m.get("name") or None,
+            "subsystem_code": m.get("subsystem_code") or None,
+            "subsystem_name": m.get("subsystem_name") or None,
+            "rooms": code_rooms.get(c, []),
+            "sources": m.get("sources", []),
+        })
+    pages = (total + page_size - 1) // page_size if total else 1
+
+    # 一致性校验：与 area_stats 同源去重计数（本楼栋 rooms 的去重设备数）
+    mapped: set = set()
+    for r in room_rows:
+        for c in rooms_dev.get(r.code, set()):
+            mapped.add(c)
+    expected = len(mapped)
+
+    # 关联待核实（fuzzy）按本楼栋归集计数（不计入主清单）
+    pending_count = idx["fuzzy"]["by_building"].get(building, 0)
+
+    return {
+        "building": building,
+        "floor": floor,
+        "q": q,
+        "total": total,
+        "returned": len(items),
+        "page": page,
+        "page_size": page_size,
+        "pages": pages,
+        "has_more": start + page_size < total,
+        "items": items,
+        "pending_count": pending_count,
+        "expected_count_from_area_stats": expected,
+        "consistency": "match" if expected == total else "mismatch",
+        "consistency_note": (
+            f"清单去重设备数 {total} 与区域统计(房间归属维度) {expected} 一致；"
+            f"另有 {pending_count} 台固定资产为模糊匹配归属、待现场核实，未计入本清单。"
+        ) if pending_count else (
+            f"清单去重设备数 {total} 与区域统计(房间归属维度) {expected} 一致；无待核实模糊归属。"
+        ),
+        "data_source": "区域索引·房间归属维度（与 gtc_asset_area_stats 同源，非设备自有 building 字段）",
+    }
+
+
+
+
+# ==================== 审计日志查询（Phase D · 铁律 14.3 可读端） ====================
+@router.get("/audit/query")
+def audit_query(
+    route_id: Optional[int] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    actor: Optional[str] = None,
+    action: Optional[str] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    _: User = Depends(_get_current_user),
+):
+    """审计日志查询（铁律 14.3 落库审计的可读端，只读，不修改任何数据）。
+
+    数据源：inspection_route_node_history（2026-10-26 加固的改前/改后快照表）。
+    Phase C 受控写启用后，upsert/dispatch/node_edit 等写操作均落此表，查询即覆盖全量审计。
+    """
+    sql = (
+        "SELECT id, route_id, operator_id, source, before_count, after_count, created_at "
+        "FROM inspection_route_node_history WHERE 1=1"
+    )
+    params: dict = {}
+    if route_id is not None:
+        sql += " AND route_id = :route_id"
+        params["route_id"] = route_id
+    if actor is not None:
+        sql += " AND operator_id = :actor"
+        params["actor"] = actor
+    if action is not None:
+        sql += " AND source LIKE :action"
+        params["action"] = f"%{action}%"
+    if date_from is not None:
+        sql += " AND created_at >= :date_from"
+        params["date_from"] = date_from
+    if date_to is not None:
+        sql += " AND created_at <= :date_to"
+        params["date_to"] = date_to
+    sql += " ORDER BY created_at DESC LIMIT :limit"
+    params["limit"] = limit
+    rows = db.execute(sa_text(sql), params).fetchall()
+    records = [
+        {
+            "id": r[0],
+            "route_id": r[1],
+            "operator_id": r[2],
+            "source": r[3],
+            "before_count": r[4],
+            "after_count": r[5],
+            "created_at": str(r[6]),
+        }
+        for r in rows
+    ]
+    return {
+        "total": len(records),
+        "records": records,
+        "_source_table": "inspection_route_node_history",
+        "_note": "当前写审计落库自 2026-10-26 加固；Phase C 受控写启用后覆盖 upsert/dispatch/node_edit。",
     }
 
 
@@ -4288,6 +4737,31 @@ def _inventory_device_rows(db: Session, codes: set) -> List[Dict[str, Any]]:
             "location_desc": (d.location_desc if d else "") or "",
         })
     return rows
+
+
+@router.get("/rooms/search")
+def search_rooms(keyword: str = "", limit: int = 20,
+                 db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """房间搜索（关联建边选择器用）：按编号 / 名称 / 楼栋 / 楼层模糊匹配。
+
+    为什么不复用 GET /rooms：全量 938 间一次拉太重，选择器只要前 N 条命中。
+    """
+    kw = (keyword or "").strip()
+    q = db.query(Room)
+    if kw:
+        like = f"%{kw}%"
+        q = q.filter(or_(Room.code.like(like), Room.name.like(like),
+                         Room.building.like(like), Room.floor.like(like)))
+    try:
+        n = max(1, min(int(limit or 20), 50))
+    except Exception:
+        n = 20
+    rows = q.order_by(Room.building, Room.floor, Room.code).limit(n).all()
+    return [{
+        "code": r.code, "name": r.name, "building": r.building, "floor": r.floor,
+        "room_type": r.room_type,
+        "address": "·".join([x for x in (r.building, r.floor, r.name) if x]),
+    } for r in rows]
 
 
 @router.get("/rooms/inventory/overview")
