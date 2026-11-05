@@ -22,8 +22,10 @@ from database import (
     get_db, User, Subsystem, Device, DataTable, FieldDef, Record, DeviceRelation,
     BaSystemMap, EquipmentCategory, DeviceAlias, ImportBatch,
     FixedAsset, DeviceArchive, DeviceAccessory, BaProblem, Room, DevicePhoto,
-    RelationType, RoomInventoryRecord,
+    RelationType, RoomInventoryRecord, DeviceSerialObservation,
 )
+# 机身编号抽取规则（与前端 utils/deviceLabel.ts#extractSerialNo 逐条镜像）
+from asset_code_match import extract_serial_from_brand
 from asset_schemas import (
     SubsystemCreate, SubsystemUpdate, SubsystemResponse,
     DeviceCreate, DeviceUpdate, DeviceResponse,
@@ -4746,8 +4748,58 @@ def _brand_model_map(db: Session, codes: List[str]) -> Dict[str, str]:
     return out
 
 
+def _serial_no_map(db: Session, codes: List[str],
+                   bm_map: Dict[str, str]) -> Dict[str, Dict[str, str]]:
+    """设备编号 → {"serial_no": 机身编号, "serial_source": 来源}。
+
+    ## 为什么需要（2026-10-13 现场反馈）
+    标签要印「设备名 + 机身编号」，但 `devices` 表**没有**机身编号列，
+    前端只能拿 brand_model 自己正则抠；抠不到的设备在现场表现为「机身编号是空的」。
+    本函数把「抽取 + 兜底查询」收敛到后端一处，前端直接用返回值。
+
+    ## 取值优先级（与前端 deviceLabel.ts 规则同源，不另立规则）
+    1. `fixed_assets.brand_model` / `device_archives.brand_model`（已在 bm_map 里逐级兜底）
+       → `extract_serial_from_brand()` 抽取 → serial_source=`fixed_asset`；
+    2. 抽不到 → `device_serial_observations` 中该设备 **status='active'** 的
+       最新一条观测（按 observed_at/created_at 倒序）→ serial_source=`observation`；
+       为什么只认 active：rejected=现场已撤销、quarantined=跨设备冲突隔离，取了就是错值。
+    3. 都没有 → 空串 + serial_source=''。
+
+    ## 铁律
+    只读，不写任何表；`fixed_assets` 是甲方权威台账，绝不在本路径改动。
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    pending: List[str] = []
+    for code in codes:
+        serial = extract_serial_from_brand(bm_map.get(code, ""))
+        if serial:
+            out[code] = {"serial_no": serial, "serial_source": "fixed_asset"}
+        else:
+            pending.append(code)
+
+    if pending:
+        obs_at = func.coalesce(DeviceSerialObservation.observed_at,
+                               DeviceSerialObservation.created_at)
+        rows = (db.query(DeviceSerialObservation)
+                .filter(DeviceSerialObservation.device_code.in_(pending),
+                        DeviceSerialObservation.status == "active")
+                .order_by(obs_at.desc(), DeviceSerialObservation.id.desc())
+                .all())
+        for o in rows:
+            if o.device_code in out:
+                continue
+            raw = (o.serial_raw or "").strip()
+            if not raw:
+                continue
+            out[o.device_code] = {"serial_no": raw, "serial_source": "observation"}
+
+    for code in codes:
+        out.setdefault(code, {"serial_no": "", "serial_source": ""})
+    return out
+
+
 def _inventory_device_rows(db: Session, codes: set) -> List[Dict[str, Any]]:
-    """设备编号集合 → 盘点行（名称/子系统/品牌型号/是否已登记/位置描述，逐级兜底）。"""
+    """设备编号集合 → 盘点行（名称/子系统/品牌型号/机身编号/是否已登记/位置描述，逐级兜底）。"""
     if not codes:
         return []
     code_list = sorted(codes)
@@ -4755,6 +4807,7 @@ def _inventory_device_rows(db: Session, codes: set) -> List[Dict[str, Any]]:
                for d in db.query(Device).filter(Device.device_code.in_(code_list)).all()}
     sub_by_id = {s.id: s.name for s in db.query(Subsystem).all()}
     bm_map = _brand_model_map(db, code_list)
+    serial_map = _serial_no_map(db, code_list, bm_map)
     missing = [c for c in code_list if c not in dev_map]
     profs = _records_profiles(db, missing) if missing else {}
 
@@ -4770,6 +4823,10 @@ def _inventory_device_rows(db: Session, codes: set) -> List[Dict[str, Any]]:
             "is_registered": d is not None,
             "is_active": bool(d.is_active) if d is not None else True,
             "location_desc": (d.location_desc if d else "") or "",
+            # 机身编号（可空）：前端标签直接取用，不再靠正则硬抠
+            "serial_no": serial_map.get(code, {}).get("serial_no", ""),
+            # 取到值的来源，便于现场排查：fixed_asset / observation / 空串
+            "serial_source": serial_map.get(code, {}).get("serial_source", ""),
         })
     return rows
 
