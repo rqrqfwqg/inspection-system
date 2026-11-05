@@ -979,3 +979,58 @@ export interface AssetTableRecord {
   created_at?: string
   updated_at?: string
 }
+
+// ===== 新建设备「AI 补全」建议（POST /assets/devices/ai-suggest）=====
+
+/**
+ * 单个字段的建议值。
+ *
+ * `source`：`rule` = 纯规则算出来的（拼音缩写、楼层关键词命中、机房反查），
+ * `ai` = 大模型推断且已过白名单校验。页面据此区分提示语，绝不把模型原话当权威。
+ */
+export interface AssetAiSuggestField {
+  value?: string | number | null
+  source?: string
+  confidence?: string
+  reason?: string
+  /** 仅 subsystem_id 字段携带，用于界面展示系统名 */
+  subsystem_name?: string
+}
+
+/** 推断不出的字段：前端用琥珀色提示条逐条列出，让用户自己补 */
+export interface AssetAiMissingItem {
+  field: string
+  label: string
+  question: string
+}
+
+/** 请求体：字段都可空，但 name + location_desc 至少要有一个非空（否则后端 400） */
+export interface AssetAiSuggestPayload {
+  device_code?: string
+  name?: string
+  location_desc?: string
+  building?: string
+  floor?: string
+  room_id?: number | null
+  subsystem_id?: number | null
+}
+
+/** 接口出参（本接口只给建议、不落库） */
+export interface AssetAiSuggestResult {
+  suggest: {
+    device_code?: AssetAiSuggestField
+    device_type?: AssetAiSuggestField
+    subsystem_id?: AssetAiSuggestField
+    building?: AssetAiSuggestField
+    floor?: AssetAiSuggestField
+    room_id?: AssetAiSuggestField
+    location_desc?: AssetAiSuggestField
+    /** 机房展示名（如「配电房（GE1F-XFPD-106）」），仅展示用 */
+    room_name?: string
+  }
+  missing: AssetAiMissingItem[]
+  llm_used: boolean
+  degraded: boolean
+  degrade_reason?: string
+  elapsed_ms: number
+}

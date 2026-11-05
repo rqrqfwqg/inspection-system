@@ -47,6 +47,8 @@ import type {
   CreatedDevice,
   AssetDataTable,
   AssetTableRecord,
+  AssetAiSuggestPayload,
+  AssetAiSuggestResult,
 } from '@/types/asset'
 
 /** 巡检后端基地址（生产为 https://www.xmgl-123.cn/ops/api，与工器具同域名） */
@@ -268,6 +270,22 @@ export function assetRebindDeviceCode(
   newCode: string,
 ): Promise<{ old_code: string; new_code: string; updated: Record<string, number>; unchanged?: boolean }> {
   return assetRequest(`/assets/devices/${id}/rebind-code`, 'POST', { new_code: newCode })
+}
+
+/**
+ * POST /assets/devices/ai-suggest —— 新建设备「AI 补全」建议（只建议、不落库）。
+ *
+ * 规则口径：
+ * - **设备编号一律由服务端拼音首字母规则生成**（`<地名缩写>-<设备名缩写>-<两位尾数>`），
+ *   大模型只负责识别设备类型/所属系统/机房/规范化位置描述；
+ * - 服务端已做白名单校验与尾数唯一性校验，本函数拿到的建议值可以直接展示；
+ * - `missing` 是「推不出来、必须人工补」的字段清单，页面要显式提示用户，不许静默。
+ * - `degraded=true` 表示模型不可用、已降级为纯规则（仍返回 200，编号照常给）。
+ *
+ * 服务端限流：同一用户 1 分钟最多 6 次，超限返回 429（message 为中文提示）。
+ */
+export function assetAiSuggest(payload: AssetAiSuggestPayload): Promise<AssetAiSuggestResult> {
+  return assetRequest<AssetAiSuggestResult>('/assets/devices/ai-suggest', 'POST', payload)
 }
 
 // ===== 设备检索 / 现场建边 =====
