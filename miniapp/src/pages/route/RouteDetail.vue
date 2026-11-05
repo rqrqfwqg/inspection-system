@@ -63,11 +63,13 @@
       </view>
       <view class="empty" v-if="route && !route.nodes?.length">该线路暂无节点</view>
       <view class="empty" v-else-if="!route">加载中…</view>
+
+      <view class="picker-title">从房间添加（支持搜索）</view>
+      <RoomPicker :exclude="routeNodeRoomCodes" @select="onPickRoom" />
     </view>
 
     <view class="action-bar" v-if="route">
       <button class="ab-btn ab-scan" @tap="scanAddNode">扫码加节点</button>
-      <button class="ab-btn ab-add" @tap="pickNode">从房间选</button>
     </view>
   </view>
 </template>
@@ -75,14 +77,14 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { onLoad, onShow } from '@dcloudio/uni-app'
-import { getRoute, appendRouteNode, availableNodes } from '@/api/patrol'
+import { getRoute, appendRouteNode } from '@/api/patrol'
 import type { RouteDetail } from '@/api/patrol'
-import { parseScanPayload } from '@/api/asset'
+import RoomPicker from '@/components/RoomPicker.vue'
+import { parseScanPayload, assetListGeoObservations, assetCreateGeoObservation, assetDeleteGeoObservation } from '@/api/asset'
 import { nodeRoomGeo, isUsable } from '@/api/geo'
 import type { GeoPoint } from '@/api/geo'
 import {
   getManualNodeGeo,
-  setManualNodeGeo,
   clearManualNodeGeo,
   manualGeoHint,
 } from '@/api/manualGeo'
@@ -100,9 +102,11 @@ const id = ref(0)
 const route = ref<RouteDetail | null>(null)
 /** 节点房间 → 反推坐标（节点表本身没有经纬度字段） */
 const nodeGeo = ref<Map<string, GeoPoint>>(new Map())
-/** 节点 id → 人工选点（**本机暂存**，见 api/manualGeo.ts 顶部说明）。
- *  🔴 优先级：本机人工选点 > 「用节点房间的扫码坐标反推」。 */
+/** 节点 id → 人工选点（优先后端落库·班组共享，兼容旧版本机暂存）。
+ *  🔴 优先级：人工选点 > 「用节点房间的扫码坐标反推」。 */
 const manualNodeGeo = ref<Map<number, ManualGeoPoint>>(new Map())
+/** 节点 id → 后端 manual 观测 id（落库后用于「清除」删除；本机旧标注时为 undefined） */
+const manualNodeObsId = ref<Map<number, number>>(new Map())
 
 /** 取该节点的人工标注（无则 null） */
 function manualOf(nodeId: number): ManualGeoPoint | null {
@@ -145,34 +149,41 @@ const nodeManualCount = computed(
   () => located.value.filter((n) => !!manualOf(n.id)).length,
 )
 
+/** 线路里已有的房间编号（传给 RoomPicker 过滤，避免重复添加；room_code 可能为空需剔掉） */
+const routeNodeRoomCodes = computed(() =>
+  (route.value?.nodes || [])
+    .map((n) => n.room_code)
+    .filter((c): c is string => !!c),
+)
+
 const mapMarkers = computed<MiniMapMarker[]>(() =>
   located.value.flatMap((n): MiniMapMarker[] => {
     const p = pointOf(n.id, (n.room_code || '').trim())
     if (!p || !isUsable(p.latitude, p.longitude)) return []
     const manual = !!manualOf(n.id)
+    const seq = (n.seq ?? 0) + 1
     return [
       {
         id: n.id,
         latitude: p.latitude,
         longitude: p.longitude,
         title: n.snapshot_name || n.room_code || '',
-        label: String((n.seq ?? 0) + 1),
+        label: String(seq),
         alwaysShow: true,
         width: manual ? 28 : 24,
         height: manual ? 28 : 24,
-        // 人工点与反推点在地图上视觉可区分（橙色 callout + 「人」角标）
-        callout: manual
-          ? {
-              display: 'ALWAYS',
-              content: '人工选点',
-              color: '#ffffff',
-              bgColor: '#ff7d45',
-              fontSize: 11,
-              borderRadius: 4,
-              padding: 4,
-              textAlign: 'center',
-            }
-          : undefined,
+        // 🔴 序号常显（微信 map 的 label 渲染极弱，之前看不见序号）：
+        // 蓝色=房间反推点位，橙色=人工选点（打卡优先采用）
+        callout: {
+          display: 'ALWAYS',
+          content: manual ? `${seq} 人工` : String(seq),
+          color: '#ffffff',
+          bgColor: manual ? '#ff7d45' : '#1989fa',
+          fontSize: 11,
+          borderRadius: 4,
+          padding: 4,
+          textAlign: 'center',
+        },
       },
     ]
   }),
@@ -237,23 +248,59 @@ function load() {
     .catch((e) => showToast((e as any)?.message || '加载失败', 'none'))
 }
 
-/** 读本机人工选点（本机存储读取无副作用，失败一律按「无标注」处理） */
-function loadManual() {
+/** 读节点人工选点：优先读后端房间级 manual 观测（落库·班组共享），再兼容旧版本机标注 */
+async function loadManual() {
+  const backend = new Map<number, { p: ManualGeoPoint; id: number }>()
+  try {
+    const rows = await assetListGeoObservations('', 200)
+    const manu = (rows || []).filter(
+      (o) => (o.scan_source || '') === 'manual' && (o.room_code || '').trim(),
+    )
+    for (const n of route.value?.nodes || []) {
+      const rc = (n.room_code || '').trim()
+      if (!rc) continue
+      const hit = manu.find((o) => o.room_code === rc)
+      if (hit) {
+        backend.set(n.id, {
+          p: {
+            latitude: Number(hit.latitude),
+            longitude: Number(hit.longitude),
+            name: '',
+            address: '',
+            at: hit.observed_at ? Date.parse(String(hit.observed_at)) || Date.now() : Date.now(),
+            operator: hit.operator || '',
+          },
+          id: Number(hit.id),
+        })
+      }
+    }
+  } catch {
+    /* 读后端失败不阻断，回落到本机旧标注 */
+  }
   const m = new Map<number, ManualGeoPoint>()
+  const ids = new Map<number, number>()
   for (const n of route.value?.nodes || []) {
-    const hit = getManualNodeGeo(id.value, n.id)
-    if (hit) m.set(n.id, hit)
+    const b = backend.get(n.id)
+    if (b) {
+      m.set(n.id, b.p)
+      ids.set(n.id, b.id)
+    } else {
+      const hit = getManualNodeGeo(id.value, n.id)
+      if (hit) m.set(n.id, hit)
+    }
   }
   manualNodeGeo.value = m
+  manualNodeObsId.value = ids
 }
 
 /** 选点/清除的目标节点（只用到 id，字段放宽以兼容 nodes 的 nullable 类型） */
 type RouteNodeRef = { id: number }
 
-/** 单节点人工选点：wx.chooseLocation → 存本机（B 类，不落库）。取消静默。
+/** 单节点人工选点：wx.chooseLocation → **落库**（room_code + scan_source='manual'）。
+ *  取消静默。
  *
  *  ⚠️ 并发保护用共享的 choosePending（QA P2-3）；本函数**不自己置位**该标志。
- *  ⚠️ 额外挡一道：area 型节点直接拒绝（即便将来 UI 被改回去也不会写进无用的本机标注）。 */
+ *  ⚠️ 额外挡一道：area 型节点直接拒绝（即便将来 UI 被改回去也不会写进无用的标注）。 */
 async function onPickNode(n: RouteNodeRef) {
   if (!id.value || !n?.id) return
   if (choosePending.value) return
@@ -269,23 +316,26 @@ async function onPickNode(n: RouteNodeRef) {
     }
     return
   }
-  const ok = setManualNodeGeo(id.value, n.id, {
-    latitude: picked.point.latitude,
-    longitude: picked.point.longitude,
-    name: picked.point.name,
-    address: picked.point.address,
-    at: Date.now(),
-    operator: operator.value,
-  })
-  if (!ok) {
-    showToast('保存失败，请重试', 'none')
+  const rc = (node?.room_code || '').trim()
+  try {
+    await assetCreateGeoObservation({
+      device_code: '',
+      latitude: picked.point.latitude,
+      longitude: picked.point.longitude,
+      room_code: rc,
+      scan_source: 'manual',
+      operator: operator.value,
+      observed_at: new Date().toISOString(),
+    })
+  } catch (e: any) {
+    showToast((e?.message || '').trim() || '保存失败，请重试', 'none')
     return
   }
-  loadManual()
-  showToast('已保存该节点选点（本机）', 'success')
+  await loadManual()
+  showToast('已保存该节点选点（已落库·班组共享）', 'success')
 }
 
-/** 清除单节点人工标注 → 回落到扫码反推坐标 */
+/** 清除单节点人工标注 → 删后端记录，回落到扫码反推坐标 */
 async function onClearNode(n: RouteNodeRef) {
   if (!id.value || !n?.id) return
   const ok = await showModal({
@@ -294,8 +344,19 @@ async function onClearNode(n: RouteNodeRef) {
     confirmText: '清除',
   })
   if (!ok) return
-  clearManualNodeGeo(id.value, n.id)
-  loadManual()
+  const obsId = manualNodeObsId.value.get(n.id)
+  try {
+    if (obsId != null) {
+      await assetDeleteGeoObservation(obsId)
+    } else {
+      // 兼容：旧版本机标注（未落库）
+      clearManualNodeGeo(id.value, n.id)
+    }
+  } catch (e: any) {
+    showToast((e?.message || '').trim() || '清除失败，请重试', 'none')
+    return
+  }
+  await loadManual()
   showToast('已清除该节点人工选点', 'none')
 }
 
@@ -322,24 +383,10 @@ function addNode(roomCode: string, name: string) {
     })
 }
 
-/** 从房间列表选（本地过滤 available-nodes 的返回，避免再发一次请求） */
-function pickNode() {
-  availableNodes('room')
-    .then((list) => {
-      if (!list || !list.length) {
-        showToast('暂无可选房间', 'none')
-        return
-      }
-      uni.showActionSheet({
-        itemList: list.slice(0, 6).map((r: any) => `${r.snapshot_name || r.room_code}（${r.room_code}）`),
-        success: (res) => {
-          const r = list[res.tapIndex]
-          addNode(r.room_code, r.snapshot_name)
-        },
-        fail: () => {},
-      })
-    })
-    .catch(() => showToast('房间列表加载失败', 'none'))
+/** 从搜索选择器选中某房间 → 立即加入线路（后端 409 表示已在线路中，静默提示） */
+function onPickRoom(r: any) {
+  if (!r || !r.room_code) return
+  addNode(r.room_code, r.snapshot_name)
 }
 
 /** 扫码加节点：复用已验证的扫码解析；设备码需反查房间（此处先按房间码处理） */
@@ -499,6 +546,13 @@ function scanAddNode() {
   color: $tm-text-muted;
   font-size: 26rpx;
   padding: 40rpx 0;
+}
+.picker-title {
+  margin-top: 16rpx;
+  padding: 8rpx 0 4rpx;
+  font-size: 26rpx;
+  font-weight: 600;
+  color: $tm-text;
 }
 .map-note {
   margin-top: 16rpx;

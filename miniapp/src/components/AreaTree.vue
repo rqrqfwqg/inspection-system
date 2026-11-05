@@ -7,23 +7,73 @@
         :style="{ paddingLeft: depth * 28 + 16 + 'rpx' }"
         @tap="onTap(n)"
       >
-        <text v-if="n.has_children" class="caret">{{ n.expanded ? '▾' : '▸' }}</text>
-        <text v-else class="caret placeholder">{{ n.type === 'room' ? '·' : '' }}</text>
+        <text v-if="n.has_children || n.type === 'room'" class="caret">{{ n.expanded ? '▾' : '▸' }}</text>
+        <text v-else class="caret placeholder">·</text>
         <text class="node-label">{{ n.label }}</text>
         <text v-if="n.count > 0" class="node-count">{{ n.count }}</text>
       </view>
 
-      <!-- 展开子层 -->
+      <!-- 展开子层（区域：楼栋/楼层/类型组）—— 继续一层层往下钻 -->
       <view v-if="n.expanded && n.children && n.children.length" class="node-children">
         <AreaTree
           :nodes="n.children"
           :depth="depth + 1"
           :active-key="activeKey"
-          @pick="onChildPick"
+          @room="onChildRoom"
+          @device="onChildDevice"
         />
       </view>
 
-      <!-- 展开中：骨架占位（节点多的楼栋避免大片空白） -->
+      <!-- 房间展开：内联显示该房间全部设备 + 房间详情入口（不再跳走） -->
+      <view v-else-if="n.expanded && n.type === 'room'" class="room-devices">
+        <view
+          v-if="n.devicesLoading"
+          class="node-loading"
+          :style="{ paddingLeft: (depth + 1) * 28 + 40 + 'rpx' }"
+        >
+          <text class="sk sk1"></text>
+          <text class="sk sk2"></text>
+          <text class="sk sk3"></text>
+        </view>
+        <view
+          v-else-if="n.devicesError"
+          class="node-error"
+          :style="{ paddingLeft: (depth + 1) * 28 + 40 + 'rpx' }"
+          @tap="reloadDevices(n)"
+        >
+          加载失败，点击重试
+        </view>
+        <view
+          v-else-if="!n.devices || !n.devices.length"
+          class="node-empty"
+          :style="{ paddingLeft: (depth + 1) * 28 + 40 + 'rpx' }"
+        >
+          该房间暂未绑定设备
+        </view>
+        <template v-else>
+          <view
+            v-for="d in n.devices"
+            :key="d.device_code"
+            class="dev-row"
+            :style="{ paddingLeft: (depth + 1) * 28 + 16 + 'rpx' }"
+            @tap="onDeviceTap(d)"
+          >
+            <text class="dv-dot" :class="{ off: !d.is_registered }"></text>
+            <view class="dv-main">
+              <text class="dv-name">{{ d.name || d.device_code }}</text>
+              <text class="dv-code">{{ d.device_code }}</text>
+            </view>
+            <text class="dv-arrow">›</text>
+          </view>
+          <view
+            class="room-more"
+            :style="{ paddingLeft: (depth + 1) * 28 + 16 + 'rpx' }"
+            @tap="onRoomDetail(n)"
+          >房间详情 / 去盘点 ›</view>
+        </template>
+      </view>
+
+      <!-- 非房间节点展开中：骨架占位 -->
       <view
         v-else-if="n.expanded && n.loading"
         class="node-loading"
@@ -34,7 +84,7 @@
         <text class="sk sk3"></text>
       </view>
 
-      <!-- 🔴 加载失败：与「无下级」区分开，可点击重试 -->
+      <!-- 非房间节点加载失败：与「无下级」区分开，可点击重试 -->
       <view
         v-else-if="n.expanded && n.loadError"
         class="node-error"
@@ -57,8 +107,8 @@
 </template>
 
 <script setup lang="ts">
-import { assetAreaTree } from '@/api/asset'
-import type { AssetAreaNode } from '@/types/asset'
+import { assetAreaTree, assetRoomDevices } from '@/api/asset'
+import type { AssetAreaNode, InventoryDeviceRow } from '@/types/asset'
 
 defineOptions({ name: 'AreaTree' })
 
@@ -67,6 +117,9 @@ type TreeRow = AssetAreaNode & {
   loading?: boolean
   loadError?: string
   children?: AssetAreaNode[]
+  devices?: InventoryDeviceRow[]
+  devicesLoading?: boolean
+  devicesError?: string
 }
 
 withDefaults(
@@ -79,17 +132,32 @@ withDefaults(
   { depth: 0, activeKey: '' },
 )
 
-const emit = defineEmits<{ (e: 'pick', room: AssetAreaNode): void }>()
+/**
+ * 事件：
+ * - `room`   ：点「房间详情 / 去盘点」→ 由上层跳 RoomDetail（地图 + 去盘点 + 打印）
+ * - `device` ：点设备行 → 由上层跳 DeviceDetail
+ * 区域节点只负责展开下钻，不再抛出任何跳转事件。
+ */
+const emit = defineEmits<{
+  (e: 'room', room: AssetAreaNode): void
+  (e: 'device', code: string): void
+}>()
 
-function onChildPick(room: AssetAreaNode) {
-  emit('pick', room)
+function onChildRoom(room: AssetAreaNode) {
+  emit('room', room)
+}
+function onChildDevice(code: string) {
+  emit('device', code)
 }
 
 async function loadChildren(n: TreeRow) {
   n.loading = true
   n.loadError = ''
   try {
-    const rows = await assetAreaTree({ parent: n.key })
+    // 🔴 与根节点 loadTree 保持一致传 group_by_type=false：
+    // 根用四級（楼栋→楼层→机房→设备），下钻也必须四級，否则会多冒出一层「房间类型组」
+    // （设备机房/卫生间…），层级对不上、用户以为点开没内容。
+    const rows = await assetAreaTree({ parent: n.key, group_by_type: false })
     n.children = rows || []
   } catch (e: any) {
     n.children = []
@@ -99,14 +167,41 @@ async function loadChildren(n: TreeRow) {
   }
 }
 
+/**
+ * 房间节点就地展开时，拉该房间全部设备（复用 GET /assets/rooms/{code}/devices）。
+ * 首次展开才拉，之后缓存，折叠再展开不再请求。
+ */
+async function loadRoomDevices(n: TreeRow) {
+  const code = n.meta?.room_code
+  if (!code) {
+    n.devices = []
+    return
+  }
+  n.devicesLoading = true
+  n.devicesError = ''
+  try {
+    const r = await assetRoomDevices(code)
+    n.devices = r.devices || []
+  } catch (e: any) {
+    n.devices = []
+    n.devicesError = (e?.message || '').trim() || '加载失败'
+  } finally {
+    n.devicesLoading = false
+  }
+}
+
 async function onTap(n: TreeRow) {
-  // 机房节点：直接抛出，由上层决定「去盘点」
+  // 房间节点：内联展开，就地显示设备（不再 navigateTo 跳走）
   if (n.type === 'room') {
-    emit('pick', n)
+    const willExpand = !n.expanded
+    n.expanded = willExpand
+    if (willExpand && !n.devices && !n.devicesLoading) {
+      await loadRoomDevices(n)
+    }
     return
   }
   if (!n.has_children) return
-  // 懒加载：逐层展开（区域树接口不支持一次拿全树）
+  // 区域节点：懒加载逐层下钻
   const willExpand = !n.expanded
   n.expanded = willExpand
   if (willExpand && !n.children) {
@@ -114,10 +209,25 @@ async function onTap(n: TreeRow) {
   }
 }
 
-async function reload(n: TreeRow) {
+function reload(n: TreeRow) {
   n.children = undefined
   n.expanded = true
-  await loadChildren(n)
+  loadChildren(n)
+}
+
+function reloadDevices(n: TreeRow) {
+  n.devices = undefined
+  n.devicesLoading = false
+  n.devicesError = ''
+  loadRoomDevices(n)
+}
+
+function onDeviceTap(d: InventoryDeviceRow) {
+  emit('device', d.device_code)
+}
+
+function onRoomDetail(n: TreeRow) {
+  emit('room', n)
 }
 </script>
 
@@ -180,5 +290,53 @@ async function reload(n: TreeRow) {
   padding: 18rpx 0;
   font-size: 22rpx;
   color: $tm-text-muted;
+}
+
+/* ===== 房间内联设备 ===== */
+.dev-row {
+  display: flex;
+  align-items: center;
+  gap: 16rpx;
+  padding: 18rpx 16rpx;
+  border-bottom: 1rpx solid $tm-border-light;
+}
+.dev-row:active {
+  background: $tm-primary-bg;
+}
+.dv-dot {
+  width: 12rpx;
+  height: 12rpx;
+  border-radius: 50%;
+  background: $tm-success;
+  flex-shrink: 0;
+}
+.dv-dot.off {
+  background: $tm-text-muted;
+}
+.dv-main {
+  flex: 1;
+  min-width: 0;
+}
+.dv-name {
+  font-size: 27rpx;
+  color: $tm-text;
+}
+.dv-code {
+  margin-top: 4rpx;
+  font-size: 22rpx;
+  color: $tm-text-secondary;
+}
+.dv-arrow {
+  font-size: 30rpx;
+  color: $tm-text-muted;
+}
+.room-more {
+  padding: 18rpx 16rpx;
+  font-size: 26rpx;
+  color: $tm-primary;
+  background: $tm-primary-bg;
+}
+.room-more:active {
+  opacity: 0.85;
 }
 </style>

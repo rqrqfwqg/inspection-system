@@ -3,6 +3,7 @@
     <!-- 有坐标才渲染 map：<map> 传空经纬度会静默落在几内亚湾，必须挡住 -->
     <map
       v-if="hasPoint"
+      :id="MAP_ID"
       class="gm-map"
       :latitude="center.latitude"
       :longitude="center.longitude"
@@ -20,6 +21,19 @@
     <view v-else class="gm-empty" :style="{ height: height + 'rpx' }">
       <text class="gm-e-t">{{ emptyTitle }}</text>
       <text class="gm-e-d">{{ emptyDesc }}</text>
+    </view>
+    <!-- 只有「我」的坐标、没有任何业务点位时：地图照常显示，并在下方点明这是当前位置 -->
+    <view class="gm-hint" v-if="hasPoint && !hasBizPoint">
+      <text>{{ emptyTitle }} · 当前显示的是您的实时位置</text>
+    </view>
+    <!-- 一键回到我的位置（有业务点位时，用户常常拖动地图后找不到自己） -->
+    <view class="gm-locate" v-if="hasPoint && myPos" @tap="backToMyLocation">
+      <text class="gm-locate-dot"></text>
+      <text>我的位置</text>
+    </view>
+    <!-- 反过来：默认落在我的位置，需要看点位时一键跳过去（设备 / 房间 / 打卡点） -->
+    <view class="gm-focus" v-if="hasPoint && hasBizPoint" @tap="focusBiz">
+      <text>{{ focusLabel }}</text>
     </view>
   </view>
 </template>
@@ -40,7 +54,11 @@
  * 3. **精度要展示**：室内定位平均误差 150m，只给一个点会让人误以为是精确位置。
  *    所以 accuracy 一律用 circles 画出来，让误差范围肉眼可见。
  */
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { getCurrentPoint } from '@/composables/useGeolocation'
+
+/** map 组件的 id：`createMapContext` 要靠它拿到上下文（回到我的位置 / 跳到点位） */
+const MAP_ID = 'gm-map'
 
 export interface MiniMapMarker {
   id: number
@@ -91,6 +109,18 @@ const props = withDefaults(
     circles?: MiniMapCircle[]
     /** 地图中心（缺省取第一个 marker / polyline 点） */
     center?: { latitude: number; longitude: number } | null
+    /**
+     * 是否优先以「我的位置」为中心（默认 true）。
+     * 用户口径（2026-11-05）：「地图默认直接显示本机位置，不用点小图标」——
+     * 所以默认一律以本机位置为首选，**不再设距离上限**（原来 >2km 会退回点位，
+     * 结果就是打开设备详情却看到别处的定位，被当成"地图显示错"）。
+     * 需要看点位的场景改由右下角「{{ focusLabel }}」按钮一键跳过去。
+     */
+    preferMyLocation?: boolean
+    /** 「跳到点位」用的目标坐标（缺省取第一个业务点位） */
+    focusPoint?: { latitude: number; longitude: number } | null
+    /** 「跳到点位」按钮文案，按页面语义传：看设备位置 / 看打卡点 … */
+    focusLabel?: string
     scale?: number
     height?: number
     showLocation?: boolean
@@ -102,9 +132,12 @@ const props = withDefaults(
     polyline: () => [],
     circles: () => [],
     center: null,
+    preferMyLocation: true,
+    focusPoint: null,
+    focusLabel: '看点位',
     scale: 16,
     height: 420,
-    showLocation: false,
+    showLocation: true,
     emptyTitle: '暂无位置数据',
     emptyDesc: '完成扫码定位后即可在地图上显示',
   },
@@ -160,29 +193,100 @@ const circles = computed(() =>
     })),
 )
 
-const hasPoint = computed(() => markers.value.length > 0 || polyline.value.length > 0)
+/** 是否有业务点位（设备 / 房间 / 线路节点 / 打卡点） */
+const hasBizPoint = computed(() => markers.value.length > 0 || polyline.value.length > 0)
 
-/** 中心点：优先外部指定，否则取第一个可用点 */
+/**
+ * 我方实时坐标（**只用于地图视野与蓝点**）。
+ *
+ * 🔴 与打卡的关系：这里取到的坐标**绝不参与打卡判定/打卡记录**。
+ * 打卡仍按既有铁律「以用户手动获取的坐标为准」，禁自动定位（2026-10-23 定案）。
+ * 本处仅解决「地图一打开落在默认城市（广州）而不是用户身边」的观感问题。
+ *
+ * 取不到就静默降级（未授权 / 室内无解 / 隐私未声明都不弹错、不阻断页面）。
+ */
+const myPos = ref<{ latitude: number; longitude: number } | null>(null)
+onMounted(() => {
+  void (async () => {
+    const { point } = await getCurrentPoint()
+    if (point && valid(point.latitude, point.longitude)) {
+      myPos.value = { latitude: point.latitude, longitude: point.longitude }
+    }
+  })()
+})
+
+/** 有业务点位、或有我方坐标，都值得渲染地图（不再直接掉进空态） */
+const hasPoint = computed(() => hasBizPoint.value || !!myPos.value)
+
+/** 第一个业务点位（设备 / 房间 / 节点 / 打卡点），用于「跳到点位」兜底 */
+const anchorPoint = computed(() => {
+  const m = markers.value[0]
+  if (m) return { latitude: m.latitude, longitude: m.longitude }
+  const p = polyline.value[0]
+  if (p) return { latitude: p.latitude, longitude: p.longitude }
+  return null
+})
+
+/**
+ * 中心点优先级（2026-11-05 按用户口径重排）：
+ * ① 外部显式指定 → ② **我的位置**（有就一律用，不再设距离上限）
+ * → ③ 第一个业务点位 → ④ 机场兜底
+ *
+ * 为什么要去掉原来的「>2km 就退回点位」：用户的实际感受是"地图打开显示的是别处"，
+ * 那在他们眼里就是地图错了。要看设备/打卡点，右下角有「看设备位置 / 看打卡点」按钮。
+ */
 const centerPoint = computed(() => {
   const c = props.center
   if (c && valid(c.latitude, c.longitude)) {
     return { latitude: Number(c.latitude), longitude: Number(c.longitude) }
   }
-  const m = markers.value[0]
-  if (m) return { latitude: m.latitude, longitude: m.longitude }
-  const p = polyline.value[0]
-  if (p) return { latitude: p.latitude, longitude: p.longitude }
-  return { latitude: 23.3626, longitude: 113.3206 }
+  if (myPos.value && props.preferMyLocation) return myPos.value
+  if (anchorPoint.value) return anchorPoint.value
+  return myPos.value || { latitude: 23.3626, longitude: 113.3206 }
 })
 
 const center = computed(() => centerPoint.value)
 
-/** 有多个点时把 include-points 交给 map 自动缩放到刚好装下所有点 */
+/**
+ * 有多个点时把 include-points 交给 map 自动缩放到刚好装下所有点。
+ *
+ * ⚠️ 但**默认要落在我自己的位置**时不能传它：include-points 会覆盖 latitude/longitude，
+ * 微信会把视野自动缩到把所有点位都装下 —— 那就是用户看到的"很乱、显示别处"。
+ * 所以只有拿不到我的位置时，才用 include-points 兜底。
+ */
 const includePoints = computed(() => {
+  if (myPos.value && props.preferMyLocation) return undefined
   const pts = markers.value.map((m) => ({ latitude: m.latitude, longitude: m.longitude }))
   if (pts.length >= 2) return { points: pts, padding: 80 }
   return undefined
 })
+
+/** 把视野移到目标坐标（回到我的位置 / 跳到业务点位共用） */
+function moveTo(p: { latitude: number; longitude: number }): void {
+  if (!p) return
+  try {
+    const ctx: any = (uni as any).createMapContext(MAP_ID)
+    if (ctx && typeof ctx.moveToLocation === 'function') {
+      ctx.moveToLocation({ latitude: p.latitude, longitude: p.longitude })
+    }
+  } catch {
+    // 基础库/开发者工具不支持时不打扰用户，点位本身仍在图上
+  }
+}
+
+/** 一键把视野移回我方位置（地图被拖动后找回自己） */
+function backToMyLocation(): void {
+  if (!myPos.value) return
+  moveTo(myPos.value)
+}
+
+/** 一键跳到业务点位（默认本机位置时，用来查看设备 / 打卡点） */
+function focusBiz(): void {
+  const target = props.focusPoint && valid(props.focusPoint.latitude, props.focusPoint.longitude)
+    ? { latitude: Number(props.focusPoint!.latitude), longitude: Number(props.focusPoint!.longitude) }
+    : anchorPoint.value
+  if (target) moveTo(target)
+}
 
 defineExpose({ hasPoint })
 </script>
@@ -190,6 +294,51 @@ defineExpose({ hasPoint })
 <style scoped lang="scss">
 .gm {
   width: 100%;
+  position: relative;
+}
+/* 只有我方坐标时，点明「这是您的实时位置」，避免被误读成设备位置 */
+.gm-hint {
+  margin-top: 10rpx;
+  font-size: 22rpx;
+  color: $tm-text-muted;
+  line-height: 1.6;
+}
+/* 回到我的位置：右下角胶囊，半透明白底，不抢地图主体 */
+.gm-locate {
+  position: absolute;
+  right: 16rpx;
+  bottom: 16rpx;
+  display: flex;
+  align-items: center;
+  gap: 8rpx;
+  height: 56rpx;
+  padding: 0 20rpx;
+  border-radius: 28rpx;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 2rpx 10rpx rgba(0, 0, 0, 0.14);
+  font-size: 22rpx;
+  color: $tm-text-secondary;
+}
+.gm-locate-dot {
+  width: 14rpx;
+  height: 14rpx;
+  border-radius: 50%;
+  background: #1989fa;
+}
+/* 跳到业务点位：与「我的位置」左右分列，默认落在我这儿，需要时一键过去 */
+.gm-focus {
+  position: absolute;
+  left: 16rpx;
+  bottom: 16rpx;
+  display: flex;
+  align-items: center;
+  height: 56rpx;
+  padding: 0 20rpx;
+  border-radius: 28rpx;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 2rpx 10rpx rgba(0, 0, 0, 0.14);
+  font-size: 22rpx;
+  color: #1989fa;
 }
 .gm-map {
   width: 100%;

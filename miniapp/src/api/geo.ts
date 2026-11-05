@@ -53,7 +53,9 @@ export interface RoomGeoResult {
 /** 工单路线轨迹结果 */
 export interface TrackResult {
   /** 按打卡时间排序的轨迹点（已剔除无坐标记录） */
-  points: Array<GeoPoint & { id: number; nodeId: number; at?: string | null }>
+  points: Array<
+    GeoPoint & { id: number; nodeId: number; at?: string | null; out_of_range?: boolean; distance_m?: number | null }
+  >
   /** 有坐标的打卡数 */
   located: number
   /** 打卡总数（含没定位成功的） */
@@ -246,6 +248,9 @@ export async function workOrderTrack(woId: number): Promise<TrackResult> {
       latitude: Number(c.lat),
       longitude: Number(c.lng),
       at: c.checked_at,
+      // 🔴 透传超范围判定：地图要据此把打卡点画成红（超范围）/绿（正常）
+      out_of_range: !!c.out_of_range,
+      distance_m: c.distance_m,
     }))
 
   let distance = 0
@@ -266,7 +271,9 @@ export async function nodeRoomGeo(roomCodes: string[]): Promise<Map<string, GeoP
   const rows = await roomGeoBatch(roomCodes, 200)
   const out = new Map<string, GeoPoint>()
   for (const [rc, list] of rows) {
-    const p = toPoint(list[0])
+    // 🔴 manual 优先：房间级人工选点（落库后）优先于扫码反推，让地图/打卡用上人工点
+    const manual = list.find((o) => (o.scan_source || '') === 'manual')
+    const p = toPoint(manual || list[0])
     if (p) out.set(rc, p)
   }
   return out

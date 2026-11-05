@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import AppSidebar from '@/components/layout/AppSidebar.vue'
 import AppHeader from '@/components/layout/AppHeader.vue'
+import AgentDrawer from '@/components/AgentDrawer.vue'
 
 /**
  * 壳层响应式 —— 严格依据 docs/rewrite-vue/UIUX.md §6.2 的「每档行为矩阵（写死，不得即兴发挥）」：
@@ -46,6 +47,7 @@ onUnmounted(() => {
         <router-view />
       </main>
     </div>
+    <AgentDrawer />
   </div>
 </template>
 

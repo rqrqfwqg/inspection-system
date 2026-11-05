@@ -278,6 +278,10 @@ export interface Checkin {
   lng?: number | null
   remark?: string | null
   abnormal?: boolean
+  /** 超范围判定（2026-10-23）：distance_m=与房间定位基准的球面距离（米）；
+   *  out_of_range=true 表示超出设定打卡范围（>30 米），仍允许打卡，仅标记+审计+提醒。 */
+  distance_m?: number | null
+  out_of_range?: boolean
 }
 
 export interface CheckinResult {
@@ -368,13 +372,27 @@ export function deleteWorkOrder(id: number): Promise<{ success: boolean }> {
   return patrolRequest(`/work-orders/${id}`, 'DELETE')
 }
 
+/**
+ * 动作名 → 后端 URL 路径段。
+ *
+ * 🔴 唯一例外：状态机里的动作键是 `submit_review`（下划线，与 `/sync` 的
+ * PendingOp.action、事件类型一致），但 REST 路由注册的是
+ * `POST /work-orders/{id}/submit-review`（连字符）。
+ * 直接拿动作键拼路径会打到不存在的 `/submit_review` → **405 Method Not Allowed**，
+ * 表现就是「提交验收一直报错」。此处集中做一次映射，页面继续用状态机键名。
+ */
+const ACTION_PATH: Record<string, string> = {
+  submit_review: 'submit-review',
+}
+
 /** 状态流转（后端 7 个动作端点，非通用 /transition） */
 export function doAction(
   id: number,
   action: string,
   payload: Record<string, any> = {},
 ): Promise<WorkOrder> {
-  return patrolRequest<WorkOrder>(`/work-orders/${id}/${action}`, 'POST', payload)
+  const seg = ACTION_PATH[action] || action
+  return patrolRequest<WorkOrder>(`/work-orders/${id}/${seg}`, 'POST', payload)
 }
 
 /**

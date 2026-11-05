@@ -1,17 +1,13 @@
 /**
- * manualGeo —— **人工选点的本机暂存层**（房间位置 / 线路节点位置）
+ * manualGeo —— **人工选点的本机暂存层（兼容兜底用）**（房间位置 / 线路节点位置）
  *
- * 🔴 为什么这两类不进后端（本轮已核实的硬约束，不是偷懒）：
- *   - `rooms` 表**没有经纬度字段**，线上后端也没有可写入的接口；
- *   - `inspection_route_nodes` 表同样**没有经纬度字段**。
- *   加字段 + 开接口 = 改后端 + 远程部署，本轮明确不做。
- *   相比之下设备定位走 `device_geo_observations`（现成接口，本轮复用，见 useGeolocation）。
+ * 🔴 现状（2026-10-22 起）：房间 / 线路节点的人工选点**已落库**到后端的
+ * `device_geo_observations`（room_code + scan_source='manual'，ROOM:: 哨兵记录，
+ * 班组共享、换设备不丢）。`RoomDetail` / `RouteDetail` 的标注与清除都已走
+ * `assetCreateGeoObservation` / `assetDeleteGeoObservation`。
  *
- * ⚠️ **这是本机暂存，换设备 / 清缓存会丢，且不参与多人共享**：
- * 同一间房在 A 手机上标过，B 手机看不到。若后续要求「班组共享房间位置」，
- * 必须改后端在 rooms / inspection_route_nodes 加字段并开写入接口，
- * 再把本模块换成 API 调用（调用方 `RoomDetail` / `RouteDetail` 的读点入口已收口，
- * 换源时只改本文件即可）。
+ * 本模块仅保留为**旧版本机标注的兼容兜底**：升级前在 A 手机本机标过的点，
+ * 后端查不到时回落到这里读取；新标注一律只写后端，不再写本机。
  *
  * key 命名统一 `manual_` 前缀区分来源，绝不与后端同步类 key 混用：
  *   - `manual_room_geo_<roomCode>`
@@ -109,12 +105,12 @@ export function clearManualNodeGeo(routeId: number | string, nodeId: number | st
   removeStore(nodeKey(routeId, nodeId))
 }
 
-/** 「本机标注 · 时间」小字（页面如实告知用户这是本机数据用） */
+/** 「人工标注 · 时间」小字（落库后无需强调本机；保留操作人与时间便于追溯） */
 export function manualGeoHint(p?: ManualGeoPoint | null): string {
   if (!p) return ''
   const d = new Date(p.at)
-  if (isNaN(d.getTime())) return '人工标注（本机数据）'
+  if (isNaN(d.getTime())) return '人工标注'
   const pad = (n: number) => String(n).padStart(2, '0')
   const when = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-  return `人工标注（本机数据）${p.operator ? '· ' + p.operator : ''} ${when}`
+  return `人工标注${p.operator ? '· ' + p.operator : ''} ${when}`
 }

@@ -233,12 +233,12 @@ export function assetUnbindDevice(roomCode: string, deviceCode: string): Promise
 
 /** GET /assets/subsystems —— 子系统下拉（新建设备所属系统） */
 export function assetSubsystems(): Promise<AssetSubsystem[]> {
-  return assetRequest<AssetSubsystem[]>('/subsystems')
+  return assetRequest<AssetSubsystem[]>('/assets/subsystems')
 }
 
 /** POST /assets/devices —— 现场新建设备（凭空建档；device_code 后端防重） */
 export function assetCreateDevice(payload: CreateDevicePayload): Promise<CreatedDevice> {
-  return assetRequest<CreatedDevice>('/devices', 'POST', payload)
+  return assetRequest<CreatedDevice>('/assets/devices', 'POST', payload)
 }
 
 // ===== 设备检索 / 现场建边 =====
@@ -333,6 +333,23 @@ export function assetCreateRelation(payload: CreateAssetRelationPayload): Promis
 /** DELETE /assets/relations/{rid} —— 删除一条关联（现场误建纠错） */
 export function assetDeleteRelation(rid: number): Promise<{ success: boolean; message?: string }> {
   return assetRequest<{ success: boolean; message?: string }>(`/assets/relations/${rid}`, 'DELETE')
+}
+
+/** 房间搜索命中行（关联建边时选「房间」作为目标） */
+export interface AssetRoomHit {
+  code: string
+  name: string
+  building: string
+  floor: string
+  room_type?: string
+  /** 形如「东停车楼·负二层·配电房」 */
+  address: string
+}
+
+/** GET /assets/rooms/search —— 关联建边时搜索房间（编号/名称/楼栋/楼层） */
+export function assetRoomSearch(keyword: string, limit = 20): Promise<AssetRoomHit[]> {
+  const kw = encodeURIComponent(keyword || '')
+  return assetRequest<AssetRoomHit[]>(`/assets/rooms/search?keyword=${kw}&limit=${limit}`)
 }
 
 // ===== 设备现场照片 =====
@@ -568,6 +585,21 @@ export function assetListGeoObservations(
   )
 }
 
+/**
+ * DELETE /assets/asset-ledger/geo-observations/{oid} —— 删除一条定位观测（物理删）。
+ * 用于清除「人工选点」标注（房间 / 线路节点）：传该观测的 id 即可。
+ * ⚠️ 该表无 status 列，故用物理删除（仅用于房间/节点级人工标注，
+ *    设备 camera 证据的保留逻辑不受影响）。
+ */
+export function assetDeleteGeoObservation(
+  oid: number,
+): Promise<{ success: boolean; id: number; status: string }> {
+  return assetRequest<{ success: boolean; id: number; status: string }>(
+    `/assets/asset-ledger/geo-observations/${oid}`,
+    'DELETE',
+  )
+}
+
 // ===== 设备管理页（区域树 / 区域概览）=====
 
 /**
@@ -598,6 +630,61 @@ export function assetAreaTree(
 /** GET /assets/areas/stats —— 区域概览（设备总数 / 机房数 / 有设备机房间数） */
 export function assetAreaStats(): Promise<AssetAreaStats> {
   return assetRequest<AssetAreaStats>('/assets/areas/stats')
+}
+
+// ===== 已盘点设备（分页 · 资产页「仅已盘点」主数据源）=====
+
+/** 已盘点设备单行 */
+export interface InspectedDeviceItem {
+  device_code: string
+  name: string
+  device_name: string
+  subsystem_id: number | null
+  subsystem_name: string
+  brand_model: string
+  location: string
+  building: string
+  floor: string
+  area: string
+  room_code: string
+  inventory_room_code: string
+  inventory_confirmed_at: string | null
+  inventory_confirmed_by: string
+  is_active: boolean
+  source: string
+  source_kind: string
+}
+
+/** 已盘点设备分页结果（一次请求返回当前页 + 总数 + 子系统计数） */
+export interface InspectedDevicesResult {
+  items: InspectedDeviceItem[]
+  total: number
+  page: number
+  page_size: number
+  categories: Array<{ subsystem_name: string; count: number }>
+}
+
+/**
+ * GET /assets/inspected-devices —— 已盘点设备分页列表（后端一次返回，前端分批渲染）。
+ *
+ * 取代原先「逐房间拉设备」的扇出式加载（曾一次性发 ~530 个请求导致卡死）。
+ * 后端复用 60s 缓存的台账全集，筛出 inventory_status=='confirmed' 的设备，
+ * 支持关键字 / 子系统过滤 + 内存分页 + 子系统计数，单次请求即拿到当前页。
+ */
+export function assetInspectedDevices(params: {
+  page?: number
+  page_size?: number
+  subsystem_name?: string
+  keyword?: string
+} = {}): Promise<InspectedDevicesResult> {
+  const q: string[] = []
+  const page = Math.max(1, Number(params.page) || 1)
+  const size = Math.max(1, Math.min(Number(params.page_size) || 50, 200))
+  q.push(`page=${page}`)
+  q.push(`page_size=${size}`)
+  if (params.subsystem_name) q.push(`subsystem_name=${encodeURIComponent(params.subsystem_name)}`)
+  if (params.keyword) q.push(`keyword=${encodeURIComponent(params.keyword)}`)
+  return assetRequest<InspectedDevicesResult>(`/assets/inspected-devices?${q.join('&')}`)
 }
 
 // ===== 数据表（批量打印「从数据表导入」源）=====

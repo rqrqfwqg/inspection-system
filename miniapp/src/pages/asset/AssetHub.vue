@@ -24,16 +24,15 @@
     <scroll-view class="cat-scroll" scroll-x enable-flex :show-scrollbar="false">
       <view class="cat-row">
         <view class="cat" :class="{ active: !catName }" @tap="pickCat('')">
-          全部{{ catCounts.__all ? `(${catCounts.__all})` : '' }}
+          全部{{ total ? `(${total})` : '' }}
         </view>
         <view
           v-for="c in categories"
-          :key="c"
+          :key="c.subsystem_name"
           class="cat"
-          :class="{ active: catName === c }"
-          @tap="pickCat(c)"
-        >{{ c }}{{ catCounts[c] != null ? `(${catCounts[c]})` : '' }}</view>
-        <view v-if="loadCats" class="cat cat-tip">筛选加载中…</view>
+          :class="{ active: catName === c.subsystem_name }"
+          @tap="pickCat(c.subsystem_name)"
+        >{{ c.subsystem_name }}{{ c.count != null ? `(${c.count})` : '' }}</view>
       </view>
     </scroll-view>
 
@@ -43,10 +42,13 @@
     </view>
     <view class="count-hint" v-if="searched || results.length">
       <text v-if="listError" class="err">加载失败：{{ listError }}</text>
-      <text v-else>
-        共 {{ results.length }} 条{{ onlyInspected ? '（已盘点）' : '' }}
+      <text v-else-if="onlyInspected">
+        已盘点共 {{ total }} 条，已显示 {{ results.length }} 条
         <text v-if="catName">· {{ catName }}</text>
-        <text v-if="truncated" class="trunc">（仅预览前 {{ roomLimit }} 个已盘点房间）</text>
+      </text>
+      <text v-else>
+        共 {{ results.length }} 条
+        <text v-if="catName">· {{ catName }}</text>
       </text>
     </view>
 
@@ -78,6 +80,17 @@
           <text v-if="it.area" class="tag">{{ it.area }}</text>
         </view>
       </view>
+
+      <!-- 分页：加载更多 / 已加载全部（仅「仅已盘点」场景） -->
+      <view v-if="onlyInspected && results.length" class="loadmore">
+        <view v-if="loadingMore" class="hint">加载更多…</view>
+        <view
+          v-else-if="hasMore"
+          class="more-btn"
+          @tap="loadMore"
+        >加载更多（剩余 {{ total - results.length }} 条）</view>
+        <view v-else class="hint">已加载全部 {{ total }} 条</view>
+      </view>
     </view>
 
     <!-- 区域树 -->
@@ -89,7 +102,7 @@
         <text class="e-r">点击重试</text>
       </view>
       <view v-else-if="!rootNodes.length" class="hint">暂无区域数据</view>
-      <AreaTree v-else :nodes="rootNodes" :active-key="activeRoomKey" @pick="onPickRoom" />
+      <AreaTree v-else :nodes="rootNodes" :active-key="activeRoomKey" @room="onPickRoomDetail" @device="onPickDevice" />
     </view>
 
     <!-- 最近查看 -->
@@ -110,24 +123,24 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { onShow } from '@dcloudio/uni-app'
+import { onShow, onReachBottom } from '@dcloudio/uni-app'
 import { assetMatchLedger, assetAreaTree } from '@/api/asset'
-import type { AssetLedgerItem, AssetAreaNode } from '@/types/asset'
+import type { AssetAreaNode } from '@/types/asset'
 import AreaTree from '@/components/AreaTree.vue'
 import { getJSON, set as setStore } from '@/utils/storage'
 import { showToast } from '@/utils/feedback'
 import {
-  assetListInspected,
-  assetListCategories,
-  assetListCategoryCounts,
+  fetchInspectedFirstPage,
+  fetchInspectedPage,
   assetListInvalidate,
+  type AssetListItem,
 } from '@/api/assetlist'
 
 type TreeNode = AssetAreaNode & { expanded?: boolean; loading?: boolean; children?: AssetAreaNode[] }
 
 const keyword = ref('')
 const tab = ref<'search' | 'tree' | 'recent'>('search')
-const results = ref<AssetLedgerItem[]>([])
+const results = ref<AssetListItem[]>([])
 const searching = ref(false)
 const searched = ref(false)
 const rootNodes = ref<TreeNode[]>([])
@@ -141,17 +154,18 @@ const activeRoomKey = ref('')
 // 故障被伪装成「无数据」，用户无从判断是重试还是换关键词。
 const listError = ref('')
 
-// 类别（子系统名）+ 各分类计数（口径与列表一致）
-const categories = ref<string[]>([])
-const catCounts = ref<Record<string, number>>({})
-const loadCats = ref(false)
+// 类别（子系统名）+ 各分类计数（来自分页接口，口径与列表一致）
+const categories = ref<Array<{ subsystem_name: string; count: number }>>([])
 const catName = ref('')
 
 // 仅显示已盘点（默认开）
 const onlyInspected = ref(true)
-// 一次最多拉多少个房间的设备（防一次拉爆）
-const roomLimit = ref(40)
-const truncated = ref(false)
+
+// 分页状态（取代原先「一次拉爆全量」的扇出式加载）
+const total = ref(0)
+const page = ref(1)
+const loadingMore = ref(false)
+const hasMore = ref(false)
 
 const emptyHint = computed(() => {
   if (catName.value && keyword.value.trim()) return `没有「${catName.value}」里匹配「${keyword.value.trim()}」的已盘点资产`
@@ -160,64 +174,74 @@ const emptyHint = computed(() => {
   return '未找到匹配设备，换个关键词试试'
 })
 
-/** 类别 chip 与计数一起拉，失败仅提示不影响主列表 */
-async function loadCategories() {
-  loadCats.value = true
+/** 当前筛选条件（类别 + 关键字） */
+function currentQuery() {
+  return {
+    subsystemName: catName.value || undefined,
+    keyword: keyword.value.trim() || undefined,
+  }
+}
+
+/**
+ * 拉「仅已盘点」第一页（重置分页）。
+ * 后端一次返回当前页 + 总数 + 子系统计数，彻底消除逐房间扇出。
+ */
+async function reloadInspected() {
+  searching.value = true
+  searched.value = true
+  listError.value = ''
+  page.value = 1
   try {
-    const [cs, counts] = await Promise.all([assetListCategories(), assetListCategoryCounts()])
-    categories.value = cs || []
-    catCounts.value = counts || {}
+    const p = await fetchInspectedFirstPage(currentQuery())
+    results.value = p.items
+    total.value = p.total
+    categories.value = p.categories
+    hasMore.value = results.value.length < total.value
   } catch (e: any) {
+    // 异常：保留提示，不要静默成空列表
+    listError.value = (e?.message || '').trim() || '网络或服务异常，请稍后重试'
+    results.value = []
+    total.value = 0
     categories.value = []
-    catCounts.value = {}
-    showToast('类别筛选加载失败', 'none')
+    hasMore.value = false
   } finally {
-    loadCats.value = false
+    searching.value = false
+  }
+}
+
+/** 加载更多（追加下一页） */
+async function loadMore() {
+  if (loadingMore.value || !hasMore.value) return
+  loadingMore.value = true
+  try {
+    const next = page.value + 1
+    const rows = await fetchInspectedPage(next, currentQuery())
+    if (!rows.length) {
+      hasMore.value = false
+      return
+    }
+    results.value = [...results.value, ...rows]
+    page.value = next
+    hasMore.value = results.value.length < total.value
+  } catch (e: any) {
+    showToast('加载更多失败，请稍后重试', 'none')
+  } finally {
+    loadingMore.value = false
   }
 }
 
 function pickCat(name: string) {
   catName.value = name
   if (tab.value !== 'search') return
-  if (onlyInspected.value) loadInspectedList()
+  if (onlyInspected.value) reloadInspected()
   else if (keyword.value.trim()) onSearch()
 }
 
 function onSwitchInspected(e: Event) {
   const val = !!(e as unknown as { detail?: { value?: boolean } }).detail?.value
   onlyInspected.value = val
-  if (val) loadInspectedList()
+  if (val) reloadInspected()
   else if (keyword.value.trim()) onSearch()
-}
-
-/** 拉「仅已盘点」列表（按类别 + 关键字过滤） */
-async function loadInspectedList() {
-  searching.value = true
-  searched.value = true
-  listError.value = ''
-  try {
-    const list = await assetListInspected({
-      subsystemName: catName.value || undefined,
-      keyword: keyword.value.trim() || undefined,
-      maxRooms: roomLimit.value,
-    })
-    truncated.value = false
-    // 映射成搜索结果同构形状，模板不用改
-    results.value = list.map((r) => ({
-      device_code: r.deviceCode,
-      name: r.deviceName,
-      subsystem_name: r.subsystemName,
-      building: r.building,
-      floor: r.floor,
-      area: r.roomName,
-    })) as AssetLedgerItem[]
-  } catch (e: any) {
-    // 异常：保留提示，不要静默成空列表
-    listError.value = (e?.message || '').trim() || '网络或服务异常，请稍后重试'
-    results.value = []
-  } finally {
-    searching.value = false
-  }
 }
 
 function loadRecent() {
@@ -249,7 +273,7 @@ async function onSearch() {
   }
   // 开着「仅已盘点」时，走已盘点资产列表，保证筛选口径一致
   if (onlyInspected.value) {
-    await loadInspectedList()
+    await reloadInspected()
     return
   }
   searching.value = true
@@ -262,7 +286,22 @@ async function onSearch() {
     if (catName.value) {
       items = items.filter((i) => i.subsystem_name === catName.value)
     }
-    results.value = items
+    // 映射成 AssetListItem（snake_case，与卡片模板对齐）
+    results.value = items.map((i) => ({
+      device_code: i.device_code,
+      name: i.name || '',
+      asset_name: i.asset_name || '',
+      subsystem_name: i.subsystem_name || '',
+      room_code: i.room_code || '',
+      building: i.building || '',
+      floor: i.floor || '',
+      area: i.area || '',
+      brand_model: i.brand_model || '',
+      location: i.location || '',
+    }))
+    total.value = results.value.length
+    categories.value = []
+    hasMore.value = false
   } catch (e: any) {
     listError.value = (e?.message || '').trim() || '搜索失败，请稍后重试'
     results.value = []
@@ -278,7 +317,9 @@ async function loadTree(force = false) {
   treeLoading.value = true
   treeError.value = ''
   try {
-    const rows = await assetAreaTree({})
+    // 🔴 固定「楼栋 → 楼层 → 房间」三级（group_by_type=false 压掉「房间类型 / 设备」两级），
+    // 房间作为叶子节点，点一下即跳房间详情，逐级展开不再卡死。
+    const rows = await assetAreaTree({ group_by_type: false })
     rootNodes.value = (rows || []) as TreeNode[]
   } catch (e: any) {
     treeError.value = (e?.message || '').trim() || '区域数据获取失败'
@@ -292,13 +333,16 @@ function retryTree() {
   loadTree(true)
 }
 
+/** 点设备行 → 设备详情 */
+function onPickDevice(code: string) {
+  uni.navigateTo({ url: `/pages/asset/DeviceDetail?code=${encodeURIComponent(code)}` })
+}
+
 /**
- * 点机房节点：进房间详情（可看房间定位地图 + 房内设备），
- * 详情页里再点「去盘点这间房」跳盘点。
- * 🔴 原先这里直接 switchTab 去盘点 —— 那样「看房间在哪」这个诉求完全没有入口，
- * 而盘点页只做盘点，两件事混在一起会互相顶掉。
+ * 点「房间详情 / 去盘点」→ 进 RoomDetail（房间定位地图 + 房内设备 + 去盘点 + 打印）。
+ * 区域树里房间节点已改为「就地展开列设备」，不再跳走；这入口保留看地图 / 做盘点 / 批量打印的能力。
  */
-function onPickRoom(room: AssetAreaNode) {
+function onPickRoomDetail(room: AssetAreaNode) {
   const code = room.meta?.room_code
   if (!code) {
     showToast('该节点无房间编号', 'none')
@@ -330,20 +374,23 @@ watch(tab, (k) => {
 function retry() {
   // 盘点状态可能已变，顺带把资产列表缓存清掉
   assetListInvalidate()
-  loadCategories()
-  if (onlyInspected.value) loadInspectedList()
+  if (onlyInspected.value) reloadInspected()
   else if (keyword.value.trim()) onSearch()
 }
 
 onShow(() => {
   loadRecent()
-  loadCategories()
   if (tab.value === 'tree') {
     loadTree()
     return
   }
   // 默认进入即展示「已盘点」列表，而不是空页面
-  if (onlyInspected.value) loadInspectedList()
+  if (onlyInspected.value) reloadInspected()
+})
+
+/** 触底自动加载更多（仅「仅已盘点」列表场景，搜索场景由后端分页控制） */
+onReachBottom(() => {
+  if (tab.value === 'search' && onlyInspected.value) loadMore()
 })
 </script>
 
@@ -538,5 +585,20 @@ onShow(() => {
   background: $tm-primary-bg;
   padding: 4rpx 14rpx;
   border-radius: 8rpx;
+}
+.loadmore {
+  margin-top: 8rpx;
+}
+.more-btn {
+  text-align: center;
+  font-size: 26rpx;
+  color: #fff;
+  background: $tm-primary;
+  border-radius: 40rpx;
+  padding: 18rpx 0;
+  margin: 16rpx 0;
+}
+.more-btn:active {
+  opacity: 0.85;
 }
 </style>

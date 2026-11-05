@@ -33,9 +33,11 @@
           v-model="form.name"
         />
       </view>
+      <!-- 机型只读提示（扫码回填，不落库） -->
+      <view class="model-hint" v-if="modelHint">机型：{{ modelHint }}</view>
 
       <!-- 所属系统 -->
-      <picker mode="selector" :range="subLabels" @change="onSub">
+      <picker mode="selector" :range="subLabels" :value="subIndex" @change="onSub">
         <view class="fld">
           <text class="lbl">所属系统</text>
           <text class="inp val">{{ form.subsystem_id ? subNameOf(form.subsystem_id) : '未指定' }}</text>
@@ -43,18 +45,47 @@
         </view>
       </picker>
 
-      <!-- 楼栋 / 楼层（级联） -->
-      <picker mode="selector" :range="bldLabels" @change="onBuilding">
-        <view class="fld">
-          <text class="lbl">所属楼栋</text>
-          <text class="inp val">{{ form.building || '未指定' }}</text>
-          <text class="arrow">›</text>
+      <!-- 楼栋（模糊搜索 + 选择确认） -->
+      <view class="fld col">
+        <text class="lbl">所属楼栋</text>
+        <input
+          class="inp bld-inp"
+          placeholder="输入楼栋关键字，如：GTC / 6号仓"
+          placeholder-class="ph"
+          :value="form.building"
+          @input="onBldInput"
+          @focus="onBldFocus"
+          @blur="onBldBlur"
+        />
+        <view class="sug" v-if="bldOpen && bldFiltered.length">
+          <view
+            class="sug-item"
+            v-for="(b, i) in bldFiltered"
+            :key="i"
+            @tap="selectBuilding(b)"
+          >{{ b }}</view>
         </view>
-      </picker>
-      <picker mode="selector" :range="floorLabels" @change="onFloor">
+        <text class="sug-tip" v-if="bldOpen && bldQuery && !bldFiltered.length">无匹配楼栋，将以上述文字作为楼栋名</text>
+      </view>
+      <picker mode="selector" :range="floorLabels" :value="floorIndex" @change="onFloor">
         <view class="fld" :class="{ muted: !form.building }">
           <text class="lbl">所属楼层</text>
           <text class="inp val">{{ form.floor || (form.building ? '未指定' : '请先选楼栋') }}</text>
+          <text class="arrow">›</text>
+        </view>
+      </picker>
+
+      <!-- 机房（依赖楼栋 + 楼层；级联筛选） -->
+      <picker
+        mode="selector"
+        :range="roomLabels"
+        :value="roomIndex"
+        :disabled="!form.building || !form.floor"
+        @change="onRoom"
+      >
+        <view class="fld" :class="{ muted: !form.building || !form.floor }">
+          <text class="lbl">机房</text>
+          <text class="inp val">{{ roomLabel }}</text>
           <text class="arrow">›</text>
         </view>
       </picker>
@@ -84,7 +115,13 @@
 <script setup lang="ts">
 import { reactive, ref, computed } from 'vue'
 import { onLoad } from '@dcloudio/uni-app'
-import { assetCreateDevice, assetSubsystems, assetRooms, parseScanPayload } from '@/api/asset'
+import {
+  assetCreateDevice,
+  assetSubsystems,
+  assetRooms,
+  parseScanPayload,
+  assetSearchDevice,
+} from '@/api/asset'
 import type { AssetSubsystem, AssetRoom } from '@/types/asset'
 import { useScanner } from '@/composables/useScanner'
 import { showToast, showLoading, hideLoading } from '@/utils/feedback'
@@ -102,6 +139,7 @@ const form = reactive({
   building: '',
   floor: '',
   location_desc: '',
+  room_id: null as number | null,
 })
 
 const subsystems = ref<AssetSubsystem[]>([])
@@ -112,6 +150,8 @@ const checking = ref(false)
 const checkMsg = ref('')
 /** 从扫码/预填带进来的编号不允许手改，避免建错档 */
 const lockedCode = ref(false)
+/** 扫码回填的固定资产机型（brand_model），仅作只读提示，不落库 */
+const modelHint = ref('')
 
 const subLabels = computed(() => ['未指定'].concat(subsystems.value.map((s) => s.name)))
 const bldLabels = computed(() => {
@@ -125,6 +165,70 @@ const floorLabels = computed(() => {
     if (r.building === form.building && r.floor) set.add(r.floor)
   }
   return ['未指定'].concat(Array.from(set).sort())
+})
+
+/** 机房候选：仅限当前楼栋 + 楼层命中的机房（首位「未指定」用于清空） */
+const roomLabels = computed(() => {
+  const matched = rooms.value.filter(
+    (r) => r.building === form.building && r.floor === form.floor,
+  )
+  return ['未指定'].concat(matched.map((r) => `${r.name}（${r.code}）`))
+})
+
+/** 当前已选机房展示名（按 room_id 反查） */
+const roomLabel = computed(() => {
+  if (form.room_id == null) return '未指定'
+  const rm = rooms.value.find((r) => r.id === form.room_id)
+  return rm ? `${rm.name}（${rm.code}）` : '未指定'
+})
+
+/** 楼栋模糊搜索：候选 = 去重楼栋列表（剔除「未指定」），按输入关键字子串过滤 */
+const bldQuery = ref('')
+const bldOpen = ref(false)
+const bldFiltered = computed(() => {
+  const all = bldLabels.value.filter((b) => b && b !== '未指定')
+  const q = (bldQuery.value || '').trim().toLowerCase()
+  if (!q) return all
+  return all.filter((b) => b.toLowerCase().includes(q))
+})
+function onBldInput(e: any) {
+  const v = (e.detail.value || '').trim()
+  bldQuery.value = v
+  form.building = v
+  bldOpen.value = true
+}
+function onBldFocus() {
+  bldOpen.value = true
+}
+function onBldBlur() {
+  // 延迟关闭：确保点击候选项时先触发选中，而非先失焦把列表关掉
+  setTimeout(() => { bldOpen.value = false }, 150)
+}
+/** 从候选里点选确认楼栋：回填 + 触发级联重置（楼层/机房随之失效，避免错配） */
+function selectBuilding(name: string) {
+  form.building = name
+  bldQuery.value = name
+  bldOpen.value = false
+  form.floor = ''
+  form.room_id = null
+}
+const floorIndex = computed(() => {
+  const i = form.floor ? floorLabels.value.indexOf(form.floor) : 0
+  return i < 0 ? 0 : i
+})
+const roomIndex = computed(() => {
+  if (form.room_id == null) return 0
+  const matched = rooms.value.filter(
+    (r) => r.building === form.building && r.floor === form.floor,
+  )
+  const i = matched.findIndex((r) => r.id === form.room_id)
+  return i < 0 ? 0 : i + 1
+})
+/** 所属系统 picker 的 :value（subLabels 首位为「未指定」，故 +1 偏移） */
+const subIndex = computed(() => {
+  if (form.subsystem_id == null) return 0
+  const i = subsystems.value.findIndex((s) => s.id === form.subsystem_id)
+  return i < 0 ? 0 : i + 1
 })
 
 function subNameOf(id: number) {
@@ -152,18 +256,26 @@ function onSub(e: any) {
   const i = Number(e.detail.value) || 0
   form.subsystem_id = i === 0 ? null : subsystems.value[i - 1]?.id ?? null
 }
-function onBuilding(e: any) {
-  const i = Number(e.detail.value) || 0
-  form.building = i === 0 ? '' : bldLabels.value[i]
-  // 楼栋变了，楼层必须清空，否则会出现「A栋-3F」这种错配
-  form.floor = ''
-}
 function onFloor(e: any) {
   const i = Number(e.detail.value) || 0
   form.floor = i === 0 ? '' : floorLabels.value[i]
+  // 楼层变了，机房候选随之变化，已选机房失效
+  form.room_id = null
+}
+/** 机房下拉：range 第 0 项为「未指定」→ null，其余按 roomLabels 偏移反查 room.id */
+function onRoom(e: any) {
+  const i = Number(e.detail.value) || 0
+  form.room_id = i === 0 ? null : roomIdOf(i)
+}
+function roomIdOf(index: number): number | null {
+  if (index <= 0) return null
+  const matched = rooms.value.filter(
+    (r) => r.building === form.building && r.floor === form.floor,
+  )
+  return matched[index - 1]?.id ?? null
 }
 
-/** 扫码填编号（锁定不可改，防止扫完又被改错） */
+/** 扫码填编号（锁定不可改，防止扫完又被改错）；命中台账则跳详情，否则预填 */
 async function onScan() {
   const r = await scanner.scan()
   if (!r) return
@@ -172,8 +284,80 @@ async function onScan() {
     showToast('无法识别该码，请手动输入', 'none')
     return
   }
+  // 不直接写进输入框：先让用户确认识别到的编号，避免误扫到别的设备建错档
+  const ok = await new Promise<boolean>((resolve) => {
+    uni.showModal({
+      title: '确认设备编号',
+      content: `识别到固定资产编号：\n${code}\n\n确认录入该设备？`,
+      confirmText: '确认录入',
+      cancelText: '重新扫描',
+      success: (m) => resolve(!!m.confirm),
+      fail: () => resolve(false),
+    })
+  })
+  if (!ok) return
   form.device_code = code
   lockedCode.value = true
+  try {
+    const res = await assetSearchDevice(code, 1)
+    // 已在 devices 台账（target.id 非空）→ 直接跳详情，不预填、不建档
+    if (res.target && res.target.id) {
+      showToast('该设备已在台账，跳转详情', 'success')
+      // 延迟跳转：让 toast 先显示出来（navigateTo 可返回本页，不销毁预填表单）
+      setTimeout(() => {
+        uni.navigateTo({ url: `/pages/asset/DeviceDetail?code=${encodeURIComponent(code)}` })
+      }, 250)
+      return
+    }
+    // 进入预填分支先整体重置，避免连续扫两台设备时上一台的楼栋/机房残留（串味）
+    form.name = ''
+    form.subsystem_id = null
+    form.building = ''
+    form.floor = ''
+    form.room_id = null
+    modelHint.value = ''
+    // 预填名称：台账名优先，其次固定资产名；都为空则留空（由用户手动填）
+    form.name = (res.target?.name) || (res.fixed_asset?.asset_name) || ''
+    // 预填子系统：按子系统名称匹配本地字典（早退分支后 target 恒为空，不能再依赖 target.subsystem_id）
+    const subName = (res.profile?.subsystem_name) || (res.target?.subsystem_name) || ''
+    if (subName) {
+      const hit = subsystems.value.find((s) => s.name === subName)
+      if (hit) form.subsystem_id = hit.id
+    }
+    // 机房匹配：候选 code 优先取 room 块，其次固定资产 room_code
+    const candidateRoomCode = (res.room?.room_code) || (res.fixed_asset?.room_code) || ''
+    if (candidateRoomCode) {
+      const room = rooms.value.find((rm) => rm.code === candidateRoomCode)
+      if (room) {
+        // 命中机房：楼栋/楼层一律按 room 回填（保证与楼层选择器口径一致）
+        form.building = room.building
+        form.floor = room.floor
+        // fuzzy = 系统推断的机房归属，不自动选中，提示现场核实后手选
+        const isFuzzy = String(res.fixed_asset?.room_match_method || '') === 'fuzzy'
+        if (isFuzzy) {
+          form.room_id = null
+          showToast('该机房为系统推断，请核实后手动选择', 'none')
+        } else {
+          form.room_id = room.id
+        }
+      } else {
+        // 降级：仅当 room 块自带楼栋/楼层时回填，机房留空并提示手动选
+        if (res.room?.building) form.building = res.room.building
+        if (res.room?.floor) form.floor = res.room.floor
+        form.room_id = null
+        showToast('未能自动匹配机房，请手动选择', 'none')
+      }
+    }
+    // 兜底：机房信息缺失时，用档案（profile）的楼栋/楼层回填，但不猜机房（room_id 保持空）
+    if (!form.building && res.profile?.building) form.building = res.profile.building
+    if (!form.floor && res.profile?.floor) form.floor = res.profile.floor
+    // 机型只读提示（固定资产 brand_model，不落库）
+    modelHint.value = res.fixed_asset?.brand_model || ''
+  } catch (e: any) {
+    // 检索失败不阻断建档：编号已锁，用户可手动补全其余字段
+    showToast(e?.message || '设备信息检索失败，请手动填写', 'none')
+  }
+  // 保留原查重逻辑，给即时占用提示（已在台账分支已提前 return，不会重复跳转）
   dupCheck(code)
 }
 
@@ -186,7 +370,6 @@ async function dupCheck(code: string) {
   checking.value = true
   checkMsg.value = '正在校验编号…'
   try {
-    const { assetSearchDevice } = await import('@/api/asset')
     const res = await assetSearchDevice(code, 1)
     const target = res && res.target
     if (target && target.device_code) {
@@ -231,6 +414,7 @@ async function submit() {
       building: form.building || undefined,
       floor: form.floor || undefined,
       location_desc: form.location_desc.trim() || undefined,
+      room_id: form.room_id ?? undefined,
     })
     hideLoading()
     submitting.value = false
@@ -311,6 +495,28 @@ async function submit() {
   color: $tm-text-secondary;
 }
 .ph { color: $tm-text-muted; }
+.bld-inp { padding: 16rpx 0; }
+.sug {
+  margin-top: 8rpx;
+  border: 1rpx solid $tm-border-light;
+  border-radius: 12rpx;
+  background: $tm-card-bg;
+  max-height: 360rpx;
+  overflow-y: auto;
+}
+.sug-item {
+  padding: 20rpx 24rpx;
+  font-size: 27rpx;
+  color: $tm-text;
+  border-bottom: 1rpx solid $tm-border-light;
+}
+.sug-item:last-child { border-bottom: none; }
+.sug-item:active { background: $tm-primary-bg; }
+.sug-tip {
+  margin-top: 8rpx;
+  font-size: 22rpx;
+  color: $tm-text-muted;
+}
 .scan {
   flex-shrink: 0;
   margin-left: 16rpx;
@@ -325,6 +531,11 @@ async function submit() {
   margin-left: 12rpx;
   color: $tm-text-muted;
   font-size: 30rpx;
+}
+.model-hint {
+  padding: 0 0 18rpx;
+  font-size: 22rpx;
+  color: $tm-text-muted;
 }
 .chk {
   padding: 0 0 16rpx;

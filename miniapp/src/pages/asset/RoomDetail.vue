@@ -18,6 +18,7 @@
         :markers="mapMarkers"
         :circles="mapCircles"
         :height="400"
+        focus-label="看房间位置"
         empty-title="该房间暂无定位记录"
         empty-desc="现场扫码盘点这间房的设备后，会自动记下房间位置；也可以直接用下方「人工标注房间位置」在地图上标点"
       />
@@ -34,7 +35,7 @@
       <view class="geo-meta" v-if="displayPoint">
         <view class="gm-row" v-if="manualRoom">
           <text class="gm-k">位置来源</text>
-          <text class="gm-v">人工标注（本机数据）</text>
+          <text class="gm-v">人工标注（已落库·班组共享）</text>
         </view>
         <view class="gm-row" v-else-if="geo.point">
           <text class="gm-k">最近观测</text>
@@ -45,8 +46,7 @@
           <text class="gm-v">{{ geo.samples }} 条 / {{ geo.devices }} 台设备</text>
         </view>
         <view class="gm-note" v-if="manualRoom">
-          此位置为人工在本机标注，优先于扫码自动推算的位置。
-          人工标注仅存在本机，换设备或清缓存会丢失；需要班组共享须由后端加字段与接口。
+          此位置为人工标注并**已落库**，班组内所有手机共享、换设备不丢，优先于扫码自动推算的位置。
         </view>
         <view class="gm-note" v-else-if="geo.point">
           淡色小点是房内各设备被扫到时的位置，深色点是最近一次观测。
@@ -82,6 +82,21 @@
       <view class="empty" v-else-if="loading">加载中…</view>
     </view>
 
+    <!-- 供电来源（房间作为受电端点，反查上级配电柜） -->
+    <view class="section-title">供电来源</view>
+    <view class="card">
+      <view v-if="powerLoading" class="empty">加载中…</view>
+      <view v-else-if="!powerSources.length" class="empty">尚未登记供电来源（可在上级配电柜的设备详情里添加「供电归属」）</view>
+      <view class="ps-item" v-for="s in powerSources" :key="s.id">
+        <view class="ps-main">
+          <text class="ps-type">{{ s.relation_type }}</text>
+          <text class="ps-code">{{ s.other_code }}</text>
+        </view>
+        <text class="ps-name" v-if="s.other_name">{{ s.other_name }}</text>
+        <text class="ps-src">{{ s.source === 'auto' ? '自动' : '人工' }}</text>
+      </view>
+    </view>
+
     <view class="actions">
       <button class="act act-primary" @tap="goInventory">去盘点这间房</button>
       <button class="act act-outline" @tap="goPrint">批量打印二维码</button>
@@ -101,19 +116,18 @@
  */
 import { ref, computed } from 'vue'
 import { onLoad } from '@dcloudio/uni-app'
-import { assetRoomDevices, assetListGeoObservations } from '@/api/asset'
+import { assetRoomDevices, assetListGeoObservations, assetCreateGeoObservation, assetDeleteGeoObservation, assetDeviceLink } from '@/api/asset'
 import { roomGeo, isUsable } from '@/api/geo'
 import type { RoomGeoResult } from '@/api/geo'
 import type { GeoPoint } from '@/api/geo'
 import {
   getManualRoomGeo,
-  setManualRoomGeo,
   clearManualRoomGeo,
   manualGeoHint,
 } from '@/api/manualGeo'
 import type { ManualGeoPoint } from '@/api/manualGeo'
 import { chooseLocation, chooseFailText, choosePending } from '@/composables/useChooseLocation'
-import type { AssetRoomBrief, InventoryDeviceRow } from '@/types/asset'
+import type { AssetRoomBrief, InventoryDeviceRow, AssetDeviceLinkEdge } from '@/types/asset'
 import type { DeviceGeoObservation } from '@/types/asset'
 import MiniMap from '@/components/MiniMap.vue'
 import type { MiniMapCircle, MiniMapMarker } from '@/components/MiniMap.vue'
@@ -137,6 +151,8 @@ const devicePoints = ref<DeviceGeoObservation[]>([])
  * 优先级：本机人工标注 > 扫码观测自动推算的代表点。
  */
 const manualRoom = ref<ManualGeoPoint | null>(null)
+/** 后端 manual 观测 id（落库后用于「清除」删除；本机旧标注时为 null） */
+const manualObsId = ref<number | null>(null)
 
 const manualHint = computed(() => manualGeoHint(manualRoom.value))
 
@@ -233,6 +249,7 @@ onLoad((opts: any) => {
   loadManual()
   load()
   loadGeo()
+  void loadPowerSources()
 })
 
 async function load() {
@@ -273,7 +290,8 @@ async function loadDevicePoints() {
 }
 
 /**
- * 人工标注房间位置：wx.chooseLocation 选点→ 存**本机**（B 类，不落库）。
+ * 人工标注房间位置：wx.chooseLocation 选点 → **落库**（走 assetCreateGeoObservation，
+ * room_code + scan_source='manual'，后端用 ROOM:: 哨兵记录，班组共享）。
  * 取消选点静默返回；失败只提示，绝不阻断页面。
  *
  * ⚠️ 并发保护用共享的 choosePending（QA P2-3）：chooseLocation 打开微信原生界面，
@@ -288,23 +306,26 @@ async function onMarkRoom() {
     }
     return
   }
-  const ok = setManualRoomGeo(code.value, {
-    latitude: picked.point.latitude,
-    longitude: picked.point.longitude,
-    name: picked.point.name,
-    address: picked.point.address,
-    at: Date.now(),
-    operator: operator.value,
-  })
-  if (!ok) {
-    showToast('保存失败，请重试', 'none')
+  try {
+    const res = await assetCreateGeoObservation({
+      device_code: '',
+      latitude: picked.point.latitude,
+      longitude: picked.point.longitude,
+      room_code: code.value,
+      scan_source: 'manual',
+      operator: operator.value,
+      observed_at: new Date().toISOString(),
+    })
+    manualObsId.value = Number(res.id)
+  } catch (e: any) {
+    showToast((e?.message || '').trim() || '保存失败，请重试', 'none')
     return
   }
-  loadManual()
-  showToast('已标注房间位置（本机）', 'success')
+  await loadManual()
+  showToast('已标注房间位置（已落库·班组共享）', 'success')
 }
 
-/** 清除人工标注 → 回落到扫码观测自动推算的位置 */
+/** 清除人工标注 → 删后端记录，回落到扫码观测自动推算的位置 */
 async function onClearRoom() {
   const ok = await showModal({
     title: '清除人工标注',
@@ -312,13 +333,80 @@ async function onClearRoom() {
     confirmText: '清除',
   })
   if (!ok) return
-  clearManualRoomGeo(code.value)
-  loadManual()
+  try {
+    if (manualObsId.value != null) {
+      await assetDeleteGeoObservation(manualObsId.value)
+    } else {
+      // 兼容：旧版本机标注（未落库）直接清本机
+      clearManualRoomGeo(code.value)
+    }
+  } catch (e: any) {
+    showToast((e?.message || '').trim() || '清除失败，请重试', 'none')
+    return
+  }
+  manualObsId.value = null
+  manualRoom.value = null
+  await loadManual()
   showToast('已清除人工标注', 'none')
 }
 
-function loadManual() {
-  manualRoom.value = getManualRoomGeo(code.value)
+/**
+ * 读房间人工标注：优先读后端房间级 manual 观测（落库·班组共享），
+ * 没有则兼容旧版本机标注（getManualRoomGeo）。
+ */
+async function loadManual() {
+  try {
+    const rows = await assetListGeoObservations('', 200)
+    const manual = (rows || []).find(
+      (o) => o.room_code === code.value && (o.scan_source || '') === 'manual',
+    )
+    if (manual) {
+      manualRoom.value = {
+        latitude: Number(manual.latitude),
+        longitude: Number(manual.longitude),
+        name: '',
+        address: '',
+        at: manual.observed_at ? Date.parse(String(manual.observed_at)) || Date.now() : Date.now(),
+        operator: manual.operator || '',
+      }
+      manualObsId.value = Number(manual.id)
+      return
+    }
+  } catch {
+    /* 读后端失败不阻断，回落到本机旧标注 */
+  }
+  // 兼容：旧版本机标注（未落库）
+  const local = getManualRoomGeo(code.value)
+  manualRoom.value = local
+  manualObsId.value = null
+}
+
+// ===== 供电来源 =====
+/**
+ * 供电来源：房间作为受电端点，边的方向是「配电柜(from) → 房间(to)」，
+ * 故取 direction==='in' 的供电类边。kind 缺失时按关系名兜底判断（老数据兼容）。
+ */
+const POWER_TYPE_LABELS = ['供电', '供配电', '取电', '上级配电', '供电归属']
+const powerSources = ref<AssetDeviceLinkEdge[]>([])
+const powerLoading = ref(false)
+
+async function loadPowerSources() {
+  if (!code.value) return
+  powerLoading.value = true
+  try {
+    const r = await assetDeviceLink(code.value)
+    const edges = r?.edges || []
+    powerSources.value = edges.filter(
+      (e) =>
+        e.direction === 'in' &&
+        (e.kind === 'power' ||
+          (!!e.other_kind && e.other_kind !== 'room' && POWER_TYPE_LABELS.includes(e.relation_type))),
+    )
+  } catch {
+    powerSources.value = []
+  } finally {
+    powerLoading.value = false
+  }
 }
 
 function openDevice(c: string) {
@@ -543,4 +631,11 @@ function goPrint() {
   color: $tm-primary;
   border: 1rpx solid $tm-primary;
 }
+.ps-item { display: flex; flex-direction: column; padding: 18rpx 0; border-bottom: 1rpx solid $tm-border-light; }
+.ps-item:last-child { border-bottom: none; }
+.ps-main { display: flex; align-items: center; gap: 12rpx; }
+.ps-type { font-size: 22rpx; color: $tm-text-secondary; background: $tm-bg; padding: 2rpx 10rpx; border-radius: 6rpx; }
+.ps-code { font-size: 28rpx; color: $tm-text; font-weight: 600; word-break: break-all; }
+.ps-name { font-size: 22rpx; color: $tm-text-muted; margin-top: 4rpx; }
+.ps-src { font-size: 20rpx; color: $tm-text-muted; margin-top: 4rpx; }
 </style>

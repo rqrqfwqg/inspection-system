@@ -61,6 +61,10 @@ export interface FixedAssetBlock {
   /** 资产序列号（≠ 机身编号） */
   serial_no?: string
   location?: string
+  /** 固定资产台账归属机房编号（可能是系统推断值） */
+  room_code?: string | null
+  /** 机房归属来源：exact / fuzzy（fuzzy = 系统推断，需现场核实） */
+  room_match_method?: string | null
   [key: string]: unknown
 }
 
@@ -185,6 +189,12 @@ export interface AssetDeviceLinkEdge {
   /** device / room / record / unknown */
   other_kind: string
   other_name?: string | null
+  /** 房间端点的物理地址（楼栋·楼层·房间名），仅 other_kind==='room' 时有值 */
+  other_address?: string | null
+  /** 房间端点的房间类型（设备机房 / 配电房 …） */
+  other_room_type?: string | null
+  /** 边的附加属性（role=main/backup、from_kind、to_kind 等） */
+  meta?: Record<string, any> | null
   relation_type: string
   kind?: string
   /** out = 本设备为 from（对方在下游）；in = 本设备为 to（对方在上游） */
@@ -925,6 +935,8 @@ export interface CreateDevicePayload {
   building?: string
   floor?: string
   location_desc?: string
+  /** 所属机房（devices 表已支持 room_id，零迁移） */
+  room_id?: number | null
   parent_device_id?: number | null
 }
 

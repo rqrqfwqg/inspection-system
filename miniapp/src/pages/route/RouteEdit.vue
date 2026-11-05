@@ -26,10 +26,12 @@
         <text class="n-del" @tap="removeNode(i)">移除</text>
       </view>
       <view class="empty" v-if="!form.nodes.length">暂无节点</view>
+
+      <view class="picker-title">从房间添加（支持搜索）</view>
+      <RoomPicker :exclude="form.nodes.map((n) => n.room_code)" @select="onPickRoom" />
     </view>
 
     <view class="action-bar">
-      <button class="ab-btn ab-add" @tap="addByPick">添加房间节点</button>
       <button class="ab-btn" @tap="submit">{{ isEdit() ? '保存修改' : '创建线路' }}</button>
     </view>
   </view>
@@ -38,7 +40,8 @@
 <script setup lang="ts">
 import { reactive, ref } from 'vue'
 import { onLoad } from '@dcloudio/uni-app'
-import { createRoute, updateRoute, getRoute, availableNodes } from '@/api/patrol'
+import { createRoute, updateRoute, getRoute } from '@/api/patrol'
+import RoomPicker from '@/components/RoomPicker.vue'
 import { showToast, showLoading, hideLoading } from '@/utils/feedback'
 
 const routeId = ref(0)
@@ -81,34 +84,19 @@ onLoad((opt) => {
   }
 })
 
-function addByPick() {
-  availableNodes('room')
-    .then((list) => {
-      if (!list || !list.length) {
-        showToast('暂无可选房间', 'none')
-        return
-      }
-      const used = new Set(form.nodes.map((n) => n.room_code))
-      const avail = list.filter((r: any) => !used.has(r.room_code)).slice(0, 6)
-      if (!avail.length) {
-        showToast('已添加的都在列表前6个内', 'none')
-        return
-      }
-      uni.showActionSheet({
-        itemList: avail.map((r: any) => `${r.snapshot_name || r.room_code}（${r.room_code}）`),
-        success: (res) => {
-          const r = avail[res.tapIndex]
-          form.nodes.push({
-            node_type: 'room',
-            room_code: r.room_code,
-            snapshot_name: r.snapshot_name || '',
-            require_checkin: true,
-          })
-        },
-        fail: () => {},
-      })
-    })
-    .catch(() => showToast('房间列表加载失败', 'none'))
+/** 从搜索选择器选中某房间 → 加入线路草稿（编辑模式提交时全量替换） */
+function onPickRoom(r: any) {
+  if (!r || !r.room_code) return
+  if (form.nodes.some((n) => n.room_code === r.room_code)) {
+    showToast('该房间已在节点列表中', 'none')
+    return
+  }
+  form.nodes.push({
+    node_type: 'room',
+    room_code: r.room_code,
+    snapshot_name: r.snapshot_name || '',
+    require_checkin: true,
+  })
 }
 
 function removeNode(i: number) {
@@ -254,6 +242,13 @@ function submit() {
   color: $tm-text-muted;
   font-size: 26rpx;
   padding: 30rpx 0;
+}
+.picker-title {
+  margin-top: 16rpx;
+  padding: 8rpx 0 4rpx;
+  font-size: 26rpx;
+  font-weight: 600;
+  color: $tm-text;
 }
 .action-bar {
   position: fixed;

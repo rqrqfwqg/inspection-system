@@ -36,6 +36,7 @@
           :markers="geoMarkers"
           :circles="geoCircles"
           :height="380"
+          focus-label="看设备位置"
           empty-title="该设备暂无定位记录"
           empty-desc="用「扫码定位绑定」扫一次这台设备，就会记录它当时的位置；也可以直接用下方「手动修正位置」在地图上标点"
         />
@@ -139,6 +140,100 @@
         <view class="stat"><view class="num">{{ (detail.relations || []).length }}</view><view class="lbl">关联关系</view></view>
       </view>
 
+      <!-- 设备关联：相互关联 + 上下游 -->
+      <view class="section-title">设备关联</view>
+      <view class="card">
+        <view class="rel-tabs">
+          <view :class="['rel-tab', { active: relTab === 'mutual' }]" @tap="relTab = 'mutual'">相互关联</view>
+          <view :class="['rel-tab', { active: relTab === 'chain' }]" @tap="relTab = 'chain'">上下游</view>
+        </view>
+
+        <block v-if="relTab === 'mutual'">
+          <view class="rel-head">
+            <text class="rel-count">{{ mutualRels.length }} 条</text>
+            <text class="rel-add" @tap="openAdd('mutual')">+ 添加</text>
+          </view>
+          <view v-if="!mutualRels.length" class="rel-empty">暂无相互关联</view>
+          <view class="rel-item" v-for="e in mutualRels" :key="e.id">
+            <view class="rel-main">
+              <text class="rel-code">{{ relOtherCode(e) }}</text>
+              <text class="rel-type">{{ e.relation_type }}</text>
+            </view>
+            <view class="rel-sub" v-if="relOtherName(e) || relSourceTag(e)">
+              <text v-if="relOtherName(e)" class="rel-name">{{ relOtherName(e) }}</text>
+              <text v-if="relSourceTag(e)" :class="['rel-src', e.source]">{{ relSourceTag(e) }}</text>
+            </view>
+            <text class="rel-del" @tap="removeRel(e.id)">删除</text>
+          </view>
+        </block>
+
+        <block v-if="relTab === 'chain'">
+          <view class="rel-head">
+            <text class="rel-count">{{ chainRels.length }} 条</text>
+            <text class="rel-add" @tap="openAdd('chain')">+ 添加</text>
+          </view>
+          <view v-if="!chainRels.length" class="rel-empty">暂无上下游关联</view>
+          <view class="rel-item" v-for="e in chainRels" :key="e.id">
+            <view class="rel-main">
+              <text :class="['rel-dir', e.direction]">{{ relDirectionTag(e) }}</text>
+              <text class="rel-code">{{ relOtherCode(e) }}</text>
+              <text class="rel-type">{{ e.relation_type }}</text>
+            </view>
+            <view class="rel-sub" v-if="relOtherName(e) || relSourceTag(e)">
+              <text v-if="relOtherName(e)" class="rel-name">{{ relOtherName(e) }}</text>
+              <text v-if="relSourceTag(e)" :class="['rel-src', e.source]">{{ relSourceTag(e) }}</text>
+            </view>
+            <text class="rel-del" @tap="removeRel(e.id)">删除</text>
+          </view>
+        </block>
+      </view>
+
+      <!-- 添加关联弹层 -->
+      <view v-if="showAdd" class="sheet-mask" @tap="showAdd = false">
+        <view class="sheet" @tap.stop>
+          <view class="sheet-title">{{ targetKind === 'room' ? '登记房间供电归属' : (addTab === 'mutual' ? '添加相互关联' : '添加上下游关联') }}</view>
+          <view class="sheet-row">
+            <text class="sr-k">目标类型</text>
+            <view class="sr-seg">
+              <text :class="['seg-i', { on: targetKind === 'device' }]" @tap="setTargetKind('device')">设备</text>
+              <text :class="['seg-i', { on: targetKind === 'room' }]" @tap="setTargetKind('room')">房间</text>
+            </view>
+          </view>
+          <view class="sheet-row">
+            <text class="sr-k">关系类型</text>
+            <picker class="sr-picker" :value="typePickerIndex" :range="addTypeList"
+              range-key="label" @change="onTypePick">
+              <view class="sr-pv">{{ addType || '请选择' }}</view>
+            </picker>
+          </view>
+          <view class="sheet-row" v-if="targetKind === 'device'">
+            <text class="sr-k">对方编号</text>
+            <input class="sr-inp" v-model="addOther" placeholder="输入或扫码编号" />
+            <text class="sr-scan" @tap="scanOther">扫码</text>
+          </view>
+          <block v-else>
+            <view class="sheet-row">
+              <text class="sr-k">目标房间</text>
+              <input class="sr-inp" :value="roomKw" placeholder="搜编号 / 房间名 / 楼栋 / 楼层" @input="onRoomInput" />
+            </view>
+            <view class="room-tip" v-if="roomSearching">搜索中…</view>
+            <view class="room-hits" v-if="roomHits.length">
+              <view class="rh-item" v-for="r in roomHits" :key="r.code" @tap="pickRoom(r)">
+                <text class="rh-addr">{{ r.address }}</text>
+                <text class="rh-code">{{ r.code }}</text>
+              </view>
+            </view>
+            <view class="room-picked" v-else-if="addOther">
+              <text>已选房间：{{ addOther }}</text>
+            </view>
+            <view class="room-tip">登记该房间由哪台配电柜供电；房间不会被建成设备，不影响设备台账。</view>
+          </block>
+          <view class="sheet-ok" :class="{ disabled: addSaving }" @tap="submitAdd">
+            {{ addSaving ? '保存中…' : '确认添加' }}
+          </view>
+        </view>
+      </view>
+
       <view class="actions">
         <button class="act act-primary" @tap="goScanBind">扫码定位绑定</button>
         <button class="act act-outline" @tap="goPrint">加入打印清单</button>
@@ -150,8 +245,15 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { onLoad } from '@dcloudio/uni-app'
-import { assetLedgerDetail } from '@/api/asset'
-import type { AssetLedgerDetail } from '@/types/asset'
+import {
+  assetLedgerDetail, assetDeviceLink, assetRelationTypes,
+  assetRelations, assetCreateRelation, assetDeleteRelation, parseScanPayload,
+  assetRoomSearch,
+} from '@/api/asset'
+import type { AssetRoomHit } from '@/api/asset'
+import type {
+  AssetLedgerDetail, AssetRelationType, DeviceRelationItem, AssetDeviceLinkEdge,
+} from '@/types/asset'
 import { deviceGeo, fmtAgo, isUsable, reportManualDeviceGeo } from '@/api/geo'
 import type { DeviceGeoResult } from '@/api/geo'
 import { chooseLocation, chooseFailText, choosePending } from '@/composables/useChooseLocation'
@@ -294,6 +396,8 @@ onLoad((opts: any) => {
   code.value = c
   load()
   loadGeo()
+  loadRelTypes()
+  loadRelations()
 })
 
 async function load() {
@@ -338,6 +442,193 @@ async function loadGeo() {
  * 人工点不设有效期（用户拍板：永不过期），所以唯一让用户自己判断可信度的手段
  * 就是把这个时间差明晃晃摆出来。
  */
+
+// ===== 设备关联（相互关联 + 上下游）=====
+const relTypes = ref<AssetRelationType[]>([])
+const edges = ref<AssetDeviceLinkEdge[]>([])
+const relTab = ref<'mutual' | 'chain'>('mutual')
+const relLoading = ref(false)
+const relError = ref('')
+
+const showAdd = ref(false)
+const addTab = ref<'mutual' | 'chain'>('mutual')
+const addType = ref('')
+const addOther = ref('')
+const addSaving = ref(false)
+
+const mutualTypeOptions = computed(() => relTypes.value.filter((t) => t.direction !== 'forward'))
+const chainTypeOptions = computed(() => relTypes.value.filter((t) => t.direction === 'forward'))
+const dirOf = computed(() => {
+  const m: Record<string, string> = {}
+  relTypes.value.forEach((t) => (m[t.label] = t.direction))
+  return m
+})
+
+// 目标类型：设备（原有）/ 房间（新增，用于登记「供电归属」，不给房间虚拟建设备）
+const targetKind = ref<'device' | 'room'>('device')
+const roomKw = ref('')
+const roomHits = ref<AssetRoomHit[]>([])
+const roomSearching = ref(false)
+let roomTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 房间模式只能选供电类关系（后端同样限制），默认「供电归属」 */
+const roomTypeOptions = computed(() =>
+  relTypes.value.filter((t) => (t.kind || '') === 'power'),
+)
+
+/** 当前弹层实际可选的类型列表（设备模式看 tab，房间模式只看供电类） */
+const addTypeList = computed(() =>
+  targetKind.value === 'room'
+    ? roomTypeOptions.value
+    : (addTab.value === 'mutual' ? mutualTypeOptions.value : chainTypeOptions.value),
+)
+
+/** picker 的 :value —— 本项目硬规则：不绑会在打开时触发 change 清空选择 */
+const typePickerIndex = computed(() => {
+  const i = addTypeList.value.findIndex((t) => t.label === addType.value)
+  return i < 0 ? 0 : i
+})
+
+function setTargetKind(k: 'device' | 'room') {
+  if (targetKind.value === k) return
+  targetKind.value = k
+  addOther.value = ''
+  roomKw.value = ''
+  roomHits.value = []
+  if (k === 'room') {
+    addTab.value = 'chain'
+    addType.value =
+      roomTypeOptions.value.find((t) => t.label === '供电归属')?.label ||
+      roomTypeOptions.value[0]?.label || '供电归属'
+  } else {
+    addType.value = chainTypeOptions.value[0]?.label || mutualTypeOptions.value[0]?.label || ''
+  }
+}
+
+function onRoomInput(e: any) {
+  roomKw.value = (e.detail.value || '').trim()
+  // 关键词一变就作废此前选中的房间：否则「搜了新词但没点选」会按旧房间静默提交，
+  // 现场就会把「供电归属」登记到错误的房间上（数据写错比提示多一步贵得多）。
+  if (addOther.value) addOther.value = ''
+  if (roomTimer) clearTimeout(roomTimer)
+  roomTimer = setTimeout(() => { void searchRooms() }, 300)
+}
+
+async function searchRooms() {
+  const kw = roomKw.value
+  if (!kw) { roomHits.value = []; return }
+  roomSearching.value = true
+  try {
+    const rows = await assetRoomSearch(kw, 20)
+    roomHits.value = rows || []
+  } catch {
+    roomHits.value = []
+  } finally {
+    roomSearching.value = false
+  }
+}
+
+function pickRoom(r: AssetRoomHit) {
+  addOther.value = r.code
+  roomKw.value = r.address || r.code
+  roomHits.value = []
+}
+
+const mutualRels = computed(() =>
+  edges.value.filter((e) => (dirOf.value[e.relation_type] ?? 'none') !== 'forward'))
+const chainRels = computed(() =>
+  edges.value.filter((e) => dirOf.value[e.relation_type] === 'forward'))
+
+function relOtherCode(e: AssetDeviceLinkEdge): string {
+  return e.other_code || (e.direction === 'out' ? e.to_code : e.from_code)
+}
+function relDirectionTag(e: AssetDeviceLinkEdge): string {
+  if (dirOf.value[e.relation_type] === 'forward') return e.direction === 'out' ? '上游' : '下游'
+  return ''
+}
+function relSourceTag(e: AssetDeviceLinkEdge): string {
+  return e.source === 'auto' ? '自动' : e.source === 'manual' ? '人工' : ''
+}
+function relOtherName(e: AssetDeviceLinkEdge): string {
+  // 房间端点优先显示物理地址（楼栋·楼层·房间名）：光有房间编号现场认不出是哪间房
+  if (e.other_kind === 'room') return e.other_address || e.other_name || '房间'
+  return e.other_name || ''
+}
+
+async function loadRelTypes() {
+  try { relTypes.value = await assetRelationTypes() } catch { relTypes.value = [] }
+}
+async function loadRelations() {
+  relLoading.value = true
+  relError.value = ''
+  try {
+    const r = await assetDeviceLink(code.value)
+    if (r && r.edges) { edges.value = r.edges; return }
+    // 兜底：仅资料表设备的 404
+    const [a, b] = await Promise.all([
+      assetRelations({ from_code: code.value }),
+      assetRelations({ to_code: code.value }),
+    ])
+    const map = new Map<number, DeviceRelationItem>()
+    a.concat(b).forEach((e) => map.set(e.id, e))
+    edges.value = Array.from(map.values()).map((e) => ({
+      id: e.id, from_code: e.from_code, to_code: e.to_code,
+      relation_type: e.relation_type, direction: e.from_code === code.value ? 'out' : 'in',
+      source: (e.meta && (e.meta as any).source) || 'manual', other_code: '', other_kind: '',
+    }))
+  } catch (e: any) {
+    relError.value = e?.message || '关联加载失败'
+  } finally { relLoading.value = false }
+}
+
+function openAdd(tab: 'mutual' | 'chain') {
+  addTab.value = tab
+  targetKind.value = 'device'
+  roomKw.value = ''
+  roomHits.value = []
+  addType.value = tab === 'mutual'
+    ? (mutualTypeOptions.value[0]?.label || '关联')
+    : (chainTypeOptions.value[0]?.label || '')
+  addOther.value = ''
+  showAdd.value = true
+}
+function onTypePick(e: any) {
+  const item = addTypeList.value[Number(e.detail.value)]
+  if (item) addType.value = item.label
+}
+async function scanOther() {
+  try {
+    const r: any = await uni.scanCode({ onlyFromCamera: false })
+    if (r && r.result) addOther.value = parseScanPayload(r.result) || r.result
+  } catch { /* 取消扫码，静默 */ }
+}
+async function submitAdd() {
+  const other = (addOther.value || '').trim()
+  if (targetKind.value === 'room' && !other) {
+    showToast('请先搜索并选择目标房间', 'none'); return
+  }
+  if (!other) { showToast('请输入或扫码对方设备编号', 'none'); return }
+  if (!addType.value) { showToast('请选择关系类型', 'none'); return }
+  addSaving.value = true
+  try {
+    await assetCreateRelation({ from_code: code.value, to_code: other, relation_type: addType.value })
+    showToast('关联已添加', 'success')
+    showAdd.value = false
+    await loadRelations()
+  } catch (e: any) {
+    showToast(e?.message || '添加失败', 'none')
+  } finally { addSaving.value = false }
+}
+async function removeRel(id: number) {
+  try {
+    await assetDeleteRelation(id)
+    showToast('关联已删除', 'success')
+    await loadRelations()
+  } catch (e: any) {
+    showToast(e?.message || '删除失败', 'none')
+  }
+}
+
 const manualAgo = computed(() => (geo.value.manual ? fmtAgo(geo.value.manualAt) : ''))
 
 /** 人工标注自带精度且>400 米 → 必须显式警示（线上有一条 1134米的旧记录） */
@@ -635,4 +926,59 @@ function goPrint() {
   color: $tm-primary;
   border: 1rpx solid $tm-primary;
 }
+.rel-tabs { display: flex; gap: 16rpx; margin-bottom: 16rpx; }
+.rel-tab { flex: 1; text-align: center; height: 72rpx; line-height: 72rpx; font-size: 26rpx;
+  color: $tm-text-secondary; background: $tm-bg; border-radius: 36rpx; }
+.rel-tab.active { color: #fff; background: $tm-primary; font-weight: 600; }
+.rel-head { display: flex; justify-content: space-between; align-items: center; padding: 8rpx 0 12rpx; }
+.rel-count { font-size: 24rpx; color: $tm-text-muted; }
+.rel-add { font-size: 26rpx; color: $tm-primary; font-weight: 600; }
+.rel-empty { text-align: center; color: $tm-text-muted; font-size: 26rpx; padding: 24rpx 0; }
+.rel-item { display: flex; align-items: center; gap: 16rpx; padding: 18rpx 0;
+  border-bottom: 1rpx solid $tm-border-light; }
+.rel-main { flex: 1; display: flex; align-items: center; gap: 12rpx; flex-wrap: wrap; }
+.rel-dir { font-size: 22rpx; color: #fff; padding: 2rpx 12rpx; border-radius: 6rpx; }
+.rel-dir.out { background: #2f7cf6; }
+.rel-dir.in { background: #f0883e; }
+.rel-code { font-size: 28rpx; color: $tm-text; font-weight: 600; word-break: break-all; }
+.rel-type { font-size: 22rpx; color: $tm-text-secondary; background: $tm-bg;
+  padding: 2rpx 10rpx; border-radius: 6rpx; }
+.rel-sub { flex-basis: 100%; display: flex; gap: 12rpx; align-items: center; }
+.rel-name { font-size: 22rpx; color: $tm-text-muted; }
+.rel-src { font-size: 20rpx; padding: 1rpx 10rpx; border-radius: 6rpx; }
+.rel-src.auto { color: #2f7cf6; background: #eaf2ff; }
+.rel-src.manual { color: #f0883e; background: #fff1e6; }
+.rel-del { font-size: 24rpx; color: #e54848; flex-shrink: 0; padding-left: 12rpx; }
+.sheet-mask { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 50;
+  display: flex; align-items: flex-end; }
+.sheet { width: 100%; background: $tm-card-bg; border-radius: 24rpx 24rpx 0 0; padding: 32rpx 24rpx
+  calc(env(safe-area-inset-bottom) + 32rpx); }
+.sheet-title { font-size: 30rpx; font-weight: 700; color: $tm-text; margin-bottom: 24rpx; }
+.sheet-row { display: flex; align-items: center; gap: 16rpx; margin-bottom: 24rpx; }
+.sr-k { font-size: 26rpx; color: $tm-text-secondary; width: 150rpx; flex-shrink: 0; }
+.sr-picker { flex: 1; }
+.sr-pv { height: 80rpx; line-height: 80rpx; background: $tm-bg; border-radius: 12rpx;
+  padding: 0 20rpx; font-size: 28rpx; color: $tm-text; }
+.sr-inp { flex: 1; height: 80rpx; background: $tm-bg; border-radius: 12rpx; padding: 0 20rpx;
+  font-size: 28rpx; color: $tm-text; }
+.sr-scan { font-size: 26rpx; color: $tm-primary; font-weight: 600; padding: 0 12rpx; flex-shrink: 0; }
+.sheet-ok { height: 88rpx; line-height: 88rpx; text-align: center; border-radius: 44rpx;
+  background: $tm-primary; color: #fff; font-size: 30rpx; font-weight: 600; }
+.sheet-ok.disabled { opacity: 0.6; }
+.sr-seg { flex: 1; display: flex; gap: 12rpx; }
+.seg-i {
+  flex: 1; height: 68rpx; line-height: 68rpx; text-align: center;
+  font-size: 26rpx; color: $tm-text-secondary; background: $tm-bg; border-radius: 12rpx;
+}
+.seg-i.on { color: #fff; background: $tm-primary; font-weight: 600; }
+.room-hits { max-height: 420rpx; overflow-y: auto; margin-bottom: 20rpx; }
+.rh-item {
+  display: flex; flex-direction: column; padding: 16rpx 18rpx;
+  border-bottom: 1rpx solid $tm-border-light;
+}
+.rh-addr { font-size: 27rpx; color: $tm-text; }
+.rh-code { font-size: 22rpx; color: $tm-text-muted; margin-top: 4rpx; }
+.room-picked { font-size: 24rpx; color: $tm-success; margin-bottom: 16rpx; }
+.room-tip { font-size: 22rpx; color: $tm-text-muted; line-height: 1.6; margin-bottom: 20rpx; }
+
 </style>
