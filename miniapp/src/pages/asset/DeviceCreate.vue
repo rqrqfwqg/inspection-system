@@ -3,7 +3,7 @@
     <!-- 说明：仅内部授权人员可建档，不对外开放 -->
     <view class="tip-bar">
       <text class="tb-t">现场新建设备</text>
-      <text class="tb-d">仅限已登记人员；编号须与现场铭牌一致，重复编号无法保存</text>
+      <text class="tb-d">仅限已登记人员；编号优先填铭牌上的固定资产编号；现场没有铭牌或铭牌损坏，点「暂无编号」生成临时编号，事后再补录</text>
     </view>
 
     <view class="card">
@@ -18,9 +18,14 @@
           :disabled="lockedCode"
         />
         <text class="scan" @tap="onScan">扫码</text>
+        <text class="scan tmp" @tap="onTempCode">{{ tempLoading ? '取号…' : '暂无编号' }}</text>
       </view>
       <view class="chk" v-if="checking">
         <text class="c-tip">{{ checkMsg }}</text>
+        <text class="c-link" v-if="dupCode" @tap="goDup">查看该设备 ›</text>
+      </view>
+      <view class="chk" v-if="tempHint">
+        <text class="c-tip">{{ tempHint }}</text>
       </view>
 
       <!-- 设备名称 -->
@@ -121,6 +126,7 @@ import {
   assetRooms,
   parseScanPayload,
   assetSearchDevice,
+  assetTempCode,
 } from '@/api/asset'
 import type { AssetSubsystem, AssetRoom } from '@/types/asset'
 import { useScanner } from '@/composables/useScanner'
@@ -152,6 +158,12 @@ const checkMsg = ref('')
 const lockedCode = ref(false)
 /** 扫码回填的固定资产机型（brand_model），仅作只读提示，不落库 */
 const modelHint = ref('')
+/** 「暂无编号」取号中（防重复点击） */
+const tempLoading = ref(false)
+/** 临时编号提示（取到 TMP- 号后显示，避免用户以为这就是铭牌上的固定资产编号） */
+const tempHint = ref('')
+/** 查重命中的既有设备编号：非空时给出「查看该设备」入口 */
+const dupCode = ref('')
 
 const subLabels = computed(() => ['未指定'].concat(subsystems.value.map((s) => s.name)))
 const bldLabels = computed(() => {
@@ -275,6 +287,39 @@ function roomIdOf(index: number): number | null {
   return matched[index - 1]?.id ?? null
 }
 
+/**
+ * 「暂无编号」：向服务端取一个未被占用的临时编号并锁定。
+ *
+ * 现场大量设备没有固定资产编号铭牌（或铭牌被油污/掉漆看不清），
+ * 强拦编号 = 逼作业员拿别人的号顶着，台账从此不可信。故给一条「先建档、后补录」的正路：
+ * 取 `TMP-<区域>-<日期>-<流水>` 存入编号框（锁定，防手改成别的号），
+ * 后续在设备详情页补录正式编号时，后端会把全部关联处一起改写。
+ */
+async function onTempCode() {
+  if (tempLoading.value) return
+  tempLoading.value = true
+  try {
+    const r = await assetTempCode()
+    if (!r?.device_code) throw new Error('未取到临时编号')
+    form.device_code = r.device_code
+    lockedCode.value = true
+    dupCode.value = ''
+    checkMsg.value = ''
+    tempHint.value = '临时编号，后续可补录正式编号'
+  } catch (e: any) {
+    // 不许静默：取号失败用户必须知道，否则会以为编号已填好
+    showToast((e?.message || '').trim() || '取临时编号失败，请稍后重试', 'none', 2500)
+  } finally {
+    tempLoading.value = false
+  }
+}
+
+/** 查重命中 → 跳到该设备详情（原文案「继续保存将新增一条记录」与后端 400 拒绝自相矛盾） */
+function goDup() {
+  if (!dupCode.value) return
+  uni.navigateTo({ url: `/pages/asset/DeviceDetail?code=${encodeURIComponent(dupCode.value)}` })
+}
+
 /** 扫码填编号（锁定不可改，防止扫完又被改错）；命中台账则跳详情，否则预填 */
 async function onScan() {
   const r = await scanner.scan()
@@ -298,6 +343,7 @@ async function onScan() {
   if (!ok) return
   form.device_code = code
   lockedCode.value = true
+  tempHint.value = ''
   try {
     const res = await assetSearchDevice(code, 1)
     // 已在 devices 台账（target.id 非空）→ 直接跳详情，不预填、不建档
@@ -373,8 +419,12 @@ async function dupCheck(code: string) {
     const res = await assetSearchDevice(code, 1)
     const target = res && res.target
     if (target && target.device_code) {
-      checkMsg.value = `⚠ 台账已存在该编号（${target.name || '未命名'}），继续保存将新增一条记录`
+      // 🔴 旧文案「继续保存将新增一条记录」是错的：后端对重复编号直接 400 拒绝。
+      // 提示必须与后端一致（不能重复创建），并给出「查看该设备」的出口。
+      dupCode.value = target.device_code
+      checkMsg.value = `⚠ 该编号已在台账（${target.name || '未命名'}），不能重复创建`
     } else {
+      dupCode.value = ''
       checkMsg.value = '✓ 编号未被占用'
     }
   } catch {
@@ -403,6 +453,21 @@ async function submit() {
     submitErr.value = bad
     showToast(bad, 'none')
     return
+  }
+  // 位置为空只做**二次确认**、不硬拦：有些设备确实跨层/临时摆放，
+  // 强填机房会逼作业员随手选一个 → 位置数据比空着更糟。但要让他知道后果。
+  if (!form.room_id && !form.building) {
+    const goOn = await new Promise<boolean>((resolve) => {
+      uni.showModal({
+        title: '位置未填写',
+        content: '该设备将无法在巡检地图上定位，仍要保存？',
+        confirmText: '仍要保存',
+        cancelText: '返回填写',
+        success: (m) => resolve(!!m.confirm),
+        fail: () => resolve(false),
+      })
+    })
+    if (!goOn) return
   }
   submitting.value = true
   showLoading('提交中')
@@ -525,6 +590,16 @@ async function submit() {
   color: $tm-primary;
   background: $tm-primary-bg;
   border-radius: 28rpx;
+}
+/* 「暂无编号」：与扫码并列的备选路径，弱化配色以示不是主路径 */
+.scan.tmp {
+  color: $tm-text-secondary;
+  background: $tm-bg;
+}
+.c-link {
+  margin-left: 12rpx;
+  font-size: 22rpx;
+  color: $tm-primary;
 }
 .arrow {
   flex-shrink: 0;

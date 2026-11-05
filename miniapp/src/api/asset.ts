@@ -241,6 +241,35 @@ export function assetCreateDevice(payload: CreateDevicePayload): Promise<Created
   return assetRequest<CreatedDevice>('/assets/devices', 'POST', payload)
 }
 
+/**
+ * POST /assets/devices/temp-code —— 取一个临时设备编号（`TMP-<区域>-<yyyyMMdd>-<流水>`）。
+ *
+ * 现场很多设备没有固定资产编号铭牌，而建档案要求编号必填且全库唯一
+ * → 这类设备原先根本建不了档。后端只返回字符串、**不落库**，
+ * 保存设备时才真正占用该编号；已被占用的流水号后端会自己 +1，所以拿到的号可直接用。
+ */
+export function assetTempCode(area?: string): Promise<{ device_code: string; area: string; day: string }> {
+  const q = area ? `?area=${encodeURIComponent(area)}` : ''
+  return assetRequest('/assets/devices/temp-code' + q, 'POST')
+}
+
+/**
+ * POST /assets/devices/{id}/rebind-code —— 临时编号补录为正式固定资产编号。
+ *
+ * 后端在**一个事务**里把该编号在 14 个关联列（设备主表 / 资料记录 / 设备档案 / 现场照片 /
+ * 定位观测 / 机身观测 / 盘点覆盖 / BA 问题 / 配件 / 编号别名两列 / 关联边两端 / 工单）全部改写，
+ * 成功后清编号归一器与台账缓存。错误语义：
+ * - 400：编号为空 / 超长 / 仍是 TMP- 临时号；
+ * - 409：新编号已被占用（message 里说明被谁占了）；
+ * - 500：整事务已回滚，**数据一处都没改**。
+ */
+export function assetRebindDeviceCode(
+  id: number,
+  newCode: string,
+): Promise<{ old_code: string; new_code: string; updated: Record<string, number>; unchanged?: boolean }> {
+  return assetRequest(`/assets/devices/${id}/rebind-code`, 'POST', { new_code: newCode })
+}
+
 // ===== 设备检索 / 现场建边 =====
 
 /**

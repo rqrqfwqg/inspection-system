@@ -40,6 +40,11 @@
       <text class="sw-label">仅显示已盘点资产</text>
       <switch :checked="onlyInspected" color="#1989fa" @change="onSwitchInspected" />
     </view>
+    <!-- 待补录清单入口：不新做页面，直接按临时编号前缀 TMP- 搜台账 -->
+    <view class="pending-bar">
+      <text class="pending-t">现场没编号的设备？</text>
+      <text class="pending-btn" @tap="goPendingRebind">待补录编号 ›</text>
+    </view>
     <view class="count-hint" v-if="searched || results.length">
       <text v-if="listError" class="err">加载失败：{{ listError }}</text>
       <text v-else-if="onlyInspected">
@@ -263,6 +268,19 @@ function openDetail(code: string, name: string) {
 /** 新增设备入口 */
 function goCreate() {
   uni.navigateTo({ url: '/pages/asset/DeviceCreate' })
+}
+
+/**
+ * 待补录清单：按临时编号前缀 `TMP-` 搜台账，复用现成的搜索结果列表。
+ *
+ * 🔴 必须关掉「仅已盘点」：临时编号设备是刚建的，还没做过盘点，
+ *    开着这个开关搜出来永远是 0 条（用户会以为功能坏了）。
+ */
+function goPendingRebind() {
+  tab.value = 'search'
+  onlyInspected.value = false
+  keyword.value = 'TMP-'
+  onSearch()
 }
 
 async function onSearch() {
@@ -600,5 +618,24 @@ onReachBottom(() => {
 }
 .more-btn:active {
   opacity: 0.85;
+}
+/* 待补录编号入口 */
+.pending-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #fff;
+  border-radius: $tm-radius-sm;
+  padding: 16rpx 24rpx;
+  margin-bottom: 16rpx;
+}
+.pending-t {
+  font-size: 26rpx;
+  color: $tm-text-secondary;
+}
+.pending-btn {
+  font-size: 26rpx;
+  color: $tm-primary;
+  font-weight: 600;
 }
 </style>

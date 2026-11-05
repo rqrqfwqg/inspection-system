@@ -10,6 +10,13 @@
     </block>
 
     <block v-else>
+      <!-- 临时编号红条（识别口径：编号以 TMP- 开头）：不显眼地放着，用户会以为这就是固定资产编号 -->
+      <view class="tmp-bar" v-if="isTempCode">
+        <view class="tmp-bar-t">本设备为临时编号，补录后自动归档</view>
+        <view class="tmp-bar-d">补录时资料记录、照片、关联关系、工单会一并改挂到新编号</view>
+        <view class="tmp-bar-btn" @tap="openRebind">补录编号</view>
+      </view>
+
       <!-- 头部二维码 -->
       <view class="card qr-card">
         <view class="qr-title">设备二维码</view>
@@ -234,6 +241,21 @@
         </view>
       </view>
 
+      <!-- 补录编号弹层 -->
+      <view v-if="showRebind" class="sheet-mask" @tap="showRebind = false">
+        <view class="sheet" @tap.stop>
+          <view class="sheet-title">补录正式编号</view>
+          <view class="sheet-row">
+            <text class="sr-k">新编号</text>
+            <input class="sr-inp" v-model="rebindCode" placeholder="输入固定资产编号" />
+          </view>
+          <view class="rebind-tip">临时编号 {{ code }} 将被替换；资料记录 / 照片 / 关联关系 / 工单会一并改挂到新编号。</view>
+          <view class="sheet-ok" :class="{ disabled: rebindSaving }" @tap="submitRebind">
+            {{ rebindSaving ? '补录中…' : '确认补录' }}
+          </view>
+        </view>
+      </view>
+
       <view class="actions">
         <button class="act act-primary" @tap="goScanBind">扫码定位绑定</button>
         <button class="act act-outline" @tap="goPrint">加入打印清单</button>
@@ -248,7 +270,7 @@ import { onLoad } from '@dcloudio/uni-app'
 import {
   assetLedgerDetail, assetDeviceLink, assetRelationTypes,
   assetRelations, assetCreateRelation, assetDeleteRelation, parseScanPayload,
-  assetRoomSearch,
+  assetRoomSearch, assetRebindDeviceCode,
 } from '@/api/asset'
 import type { AssetRoomHit } from '@/api/asset'
 import type {
@@ -379,6 +401,48 @@ const serialNo = computed(() => {
   return bm ? extractSerialNo(bm) : ''
 })
 const qrContent = computed(() => `https://www.xmgl-123.cn/ops/qr/${encodeURIComponent(code.value || 'X')}`)
+
+/** 临时编号（TMP- 前缀）：拿到正式编号前不能当固定资产编号用，故顶部红条常驻提示 */
+const isTempCode = computed(() => (code.value || '').toUpperCase().startsWith('TMP-'))
+const showRebind = ref(false)
+const rebindCode = ref('')
+const rebindSaving = ref(false)
+
+function openRebind() {
+  rebindCode.value = ''
+  showRebind.value = true
+}
+
+/**
+ * 提交补录：后端在一个事务里改写全部关联列（资料记录/档案/照片/观测/盘点/BA/配件/别名/关联边/工单）。
+ *
+ * 🔴 成功后必须**用新号重新加载**：旧号在库里已不存在，继续用旧号查询会得到空页，
+ *    用户会以为「补录把设备弄丢了」。
+ */
+async function submitRebind() {
+  if (rebindSaving.value) return
+  const nc = (rebindCode.value || '').trim()
+  if (!nc) { showToast('请输入新编号', 'none'); return }
+  if (nc.length > 64) { showToast('编号过长（上限 64 字符）', 'none'); return }
+  if (nc.toUpperCase().startsWith('TMP-')) { showToast('不能用临时编号作为正式编号', 'none'); return }
+  const did = detail.value?.device?.id
+  if (did == null) { showToast('该设备缺少台账主键，无法补录', 'none'); return }
+  rebindSaving.value = true
+  try {
+    const r = await assetRebindDeviceCode(did, nc)
+    showRebind.value = false
+    code.value = r.new_code
+    showToast('已补录为 ' + r.new_code, 'success')
+    await load()
+    loadGeo()
+    loadRelations()
+  } catch (e: any) {
+    // 409 = 新编号已被占用（后端说明被谁占了）；500 = 已整体回滚，数据一处都没改
+    showToast((e?.message || '').trim() || '补录失败，请稍后重试', 'none', 2500)
+  } finally {
+    rebindSaving.value = false
+  }
+}
 
 /** 空态引导：带着当前编号去建档 */
 function goCreate() {
@@ -981,4 +1045,37 @@ function goPrint() {
 .room-picked { font-size: 24rpx; color: $tm-success; margin-bottom: 16rpx; }
 .room-tip { font-size: 22rpx; color: $tm-text-muted; line-height: 1.6; margin-bottom: 20rpx; }
 
+/* 临时编号红条 */
+.tmp-bar {
+  background: $tm-danger-bg;
+  border: 1rpx solid $tm-danger;
+  border-radius: $tm-radius-sm;
+  padding: 20rpx 24rpx;
+  margin-bottom: 20rpx;
+}
+.tmp-bar-t {
+  font-size: 27rpx;
+  font-weight: 600;
+  color: $tm-danger;
+}
+.tmp-bar-d {
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  color: $tm-text-secondary;
+}
+.tmp-bar-btn {
+  margin-top: 14rpx;
+  display: inline-block;
+  padding: 10rpx 28rpx;
+  font-size: 25rpx;
+  color: #fff;
+  background: $tm-danger;
+  border-radius: 30rpx;
+}
+.rebind-tip {
+  margin-top: 12rpx;
+  font-size: 22rpx;
+  line-height: 1.6;
+  color: $tm-text-secondary;
+}
 </style>
