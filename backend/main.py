@@ -1,5 +1,5 @@
 from fastapi import FastAPI, APIRouter, Depends, HTTPException, status, UploadFile, File, Header, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -14,6 +14,7 @@ import time
 from collections import defaultdict
 from dotenv import load_dotenv
 
+import tools_user_sync  # 巡检用户 → 工器具用户库双写同步（小程序登录用）
 from database import get_db, init_db, User, Room
 from schemas import (
     UserCreate, UserLogin, FastLoginRequest, UserResponse, UserUpdate, UserPasswordUpdate,
@@ -41,6 +42,9 @@ from contextlib import asynccontextmanager
 
 # 加载 .env 环境变量（必须在所有 os.getenv 调用之前）
 load_dotenv()
+
+# Agent 模块必须在 load_dotenv() 之后导入：agent_tools 在导入时读取 AGENT_OPS_BASE_URL
+from agent_routes import router as agent_router  # noqa: E402
 
 # 默认管理员初始密码（首次启动创建时使用，应通过环境变量覆盖）
 DEFAULT_ADMIN_PASSWORD = os.getenv("ADMIN_INIT_PASSWORD", "ChangeMe123!")
@@ -124,6 +128,7 @@ api_router.include_router(work_order_router)    # /ops/api/work-orders...（工�
 api_router.include_router(parts_router)         # /ops/api/parts | /ops/api/inventory（命名空间别名）
 api_router.include_router(patrol_router)   # /ops/api/routes | /stats/patrol | 工单 PUT/DELETE/打卡
 api_router.include_router(inventory_router)  # /ops/api/rooms/{code}/inventory/{start,scan,submit} | /inventory/report
+api_router.include_router(agent_router)     # /ops/api/agent/chat（系统内 Agent，SSE）
 
 # ==================== 健康检查 ====================
 
@@ -240,6 +245,8 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
     db.add(user)
     db.commit()
     db.refresh(user)
+    # 双写：同步到工器具用户库，否则小程序登录报「账号不存在」（失败不阻断）
+    tools_user_sync.safe_sync(user)
     return UserResponse.model_validate(user)
 
 # ==================== 用户管理接口 ====================
@@ -301,6 +308,8 @@ def update_user(user_id: int, user_data: UserUpdate, db: Session = Depends(get_d
         setattr(user, key, value)
     db.commit()
     db.refresh(user)
+    # 双写：姓名/部门/角色/启用状态同步到工器具库
+    tools_user_sync.safe_sync(user)
     return UserResponse.model_validate(user)
 
 @api_router.delete("/users/{user_id}")
@@ -319,6 +328,8 @@ def delete_user(user_id: int, db: Session = Depends(get_db), current_user: User 
                 os.remove(avatar_path)
         except Exception:
             pass
+    # 双写：先删工器具侧账号，再删本地（失败不阻断）
+    tools_user_sync.safe_delete(user.username, user.phone, user.id)
     db.delete(user)
     db.commit()
     return {"success": True, "message": "用户已删除"}
@@ -454,6 +465,12 @@ def serve_ops_index():
 @app.get("/ops/{full_path:path}")
 def serve_ops_spa(full_path: str):
     """SPA fallback：仅兜底 /ops 空间内未匹配路由，返回 index.html（避免吞掉其它顶层路由）"""
+    # ==== API404_HARDEN_20261106 ====
+    # 加固：/ops/api/* 未匹配到任何路由 → 必须 404 JSON，绝不回落 index.html。
+    # 否则前端 uni.request 会把一段 HTML 字符串当数组用 → 静默变空列表、不报错、查不出原因。
+    # 注意：非 /ops/api 路径（网页端前端路由）仍照旧回落 index.html，避免白屏。
+    if full_path == "api" or full_path.startswith("api/"):
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
     index_path = os.path.join(DIST_DIR, "index.html")
     candidate = os.path.join(DIST_DIR, full_path)
     if os.path.isfile(candidate):

@@ -4799,6 +4799,109 @@ def search_rooms(keyword: str = "", limit: int = 20,
     } for r in rows]
 
 
+# ==== ROOMS_META_20261106 ====
+_CN_NUM = [("二十", 20), ("十九", 19), ("十八", 18), ("十七", 17), ("十六", 16),
+           ("十五", 15), ("十四", 14), ("十三", 13), ("十二", 12), ("十一", 11),
+           ("十", 10), ("九", 9), ("八", 8), ("七", 7), ("六", 6), ("五", 5),
+           ("四", 4), ("三", 3), ("二", 2), ("一", 1)]
+
+
+def _floor_sort_key(name: str):
+    """楼层排序键：B1 类地下层在前，数字/中文数字层按数值升序，其余殿后。"""
+    s = (name or "").strip()
+    if not s:
+        return (9, 9999, "")
+    m = re.search(r"(\d+)", s)
+    if s[:1].upper() == "B" and m:
+        return (0, -int(m.group(1)), s)
+    if m:
+        return (1, int(m.group(1)), s)
+    for cn, n in _CN_NUM:
+        if s.startswith(cn):
+            return (1, n, s)
+    return (5, 0, s)
+
+
+@router.get("/rooms/meta")
+def rooms_meta(db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """楼栋 / 楼层 / 房型的轻量字典（只聚合，不含房间明细，响应 < 16KB）。
+
+    为什么要有它：机房选择器只需要楼栋与楼层下拉，全量 938 间是 222KB，
+    小程序弱网下经常超时；本接口实测 < 3KB。
+    """
+    rows = db.query(Room).all()
+    bmap: Dict[str, Any] = {}
+    types = set()
+    for r in rows:
+        b = (r.building or "").strip() or "未标注楼栋"
+        f = (r.floor or "").strip() or "未标注楼层"
+        t = (r.room_type or "").strip()
+        if t:
+            types.add(t)
+        node = bmap.setdefault(b, {"name": b, "count": 0, "floors": {}})
+        node["count"] += 1
+        node["floors"][f] = node["floors"].get(f, 0) + 1
+
+    buildings = []
+    for b in sorted(bmap):
+        node = bmap[b]
+        floors = sorted(node["floors"].items(), key=lambda kv: _floor_sort_key(kv[0]))
+        buildings.append({
+            "name": node["name"],
+            "count": node["count"],
+            "floors": [{"name": f, "count": c} for f, c in floors],
+        })
+    return {"total": len(rows), "buildings": buildings,
+            "room_types": sorted(types)}
+
+
+@router.get("/rooms")
+def list_rooms(building: Optional[str] = None, floor: Optional[str] = None,
+               keyword: str = "", limit: int = 50, offset: int = 0,
+               db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
+    """房间分页列表（机房搜索选择器用）：楼栋/楼层过滤 + 关键词模糊匹配。
+
+    与 /rooms/search 的分工：本接口带 total 与 offset，供搜索层下拉分页；
+    /rooms/search 保持原契约不动（1.9.1 已在用）。
+    路由顺序：字面量 /rooms/meta、/rooms/search 与本路径同层，
+    {room_code} 只出现在 /rooms/{room_code}/devices（更深一层），互不吞并。
+    """
+    q = db.query(Room)
+    if building and building.strip():
+        q = q.filter(func.lower(Room.building) == building.strip().lower())
+    if floor and floor.strip():
+        q = q.filter(func.lower(Room.floor) == floor.strip().lower())
+    kw = (keyword or "").strip()
+    if kw:
+        like = "%" + kw.lower() + "%"
+        q = q.filter(or_(func.lower(Room.name).like(like),
+                         func.lower(Room.code).like(like),
+                         func.lower(Room.building).like(like),
+                         func.lower(Room.floor).like(like)))
+    try:
+        total = q.count()
+    except Exception:
+        total = 0
+    try:
+        n = max(1, min(int(limit or 50), 200))
+    except Exception:
+        n = 50
+    try:
+        off = max(0, int(offset or 0))
+    except Exception:
+        off = 0
+    rows = (q.order_by(Room.building, Room.floor, Room.code)
+            .offset(off).limit(n).all())
+    return {
+        "total": total, "limit": n, "offset": off,
+        "items": [{
+            "id": r.id, "code": r.code, "name": r.name, "building": r.building,
+            "floor": r.floor, "room_type": r.room_type,
+            "address": "·".join([x for x in (r.building, r.floor, r.name) if x]),
+        } for r in rows],
+    }
+
+
 @router.get("/rooms/inventory/overview")
 def rooms_inventory_overview(building: Optional[str] = None,
                              db: Session = Depends(get_db), _: User = Depends(_get_current_user)):
