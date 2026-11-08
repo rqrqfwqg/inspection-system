@@ -121,6 +121,18 @@
       "style": {
         "navigationBarTitleText": "数据表"
       }
+    },
+    {
+      "path": "pages/legal/Privacy",
+      "style": {
+        "navigationBarTitleText": "隐私政策"
+      }
+    },
+    {
+      "path": "pages/legal/Agreement",
+      "style": {
+        "navigationBarTitleText": "用户服务协议"
+      }
     }
   ],
   "globalStyle": {

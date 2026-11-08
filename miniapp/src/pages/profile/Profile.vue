@@ -32,6 +32,12 @@
       <view class="menu-item">
         <text>系统</text><text class="value">设备资产巡检</text>
       </view>
+      <view class="menu-item" @tap="goAgreement">
+        <text>用户服务协议</text><text class="arrow">›</text>
+      </view>
+      <view class="menu-item" @tap="goPrivacy">
+        <text>隐私政策</text><text class="arrow">›</text>
+      </view>
     </view>
 
     <button class="logout" @tap="onLogout">退出登录</button>
@@ -71,6 +77,12 @@ function goPrint() {
 }
 function goScanBind() {
   uni.navigateTo({ url: '/pages/print/ScanBind' })
+}
+function goAgreement() {
+  uni.navigateTo({ url: '/pages/legal/Agreement' })
+}
+function goPrivacy() {
+  uni.navigateTo({ url: '/pages/legal/Privacy' })
 }
 
 async function onLogout() {

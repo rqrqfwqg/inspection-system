@@ -31,7 +31,17 @@
       <button class="btn btn-outline" :loading="loading" @tap="onPhoneLogin">手机号登录</button>
     </view>
 
-    <view class="footer-tip">登录即表示你已获授权使用该内部系统</view>
+    <view class="agree">
+      <view class="agree-box" :class="{ 'agree-on': agreed }" @tap="agreed = !agreed">
+        <text v-if="agreed" class="agree-tick">✓</text>
+      </view>
+      <text class="agree-txt" @tap="agreed = !agreed">我已阅读并同意</text>
+      <text class="agree-link" @tap.stop="goAgreement">《用户服务协议》</text>
+      <text class="agree-txt">和</text>
+      <text class="agree-link" @tap.stop="goPrivacy">《隐私政策》</text>
+    </view>
+
+    <view class="footer-tip">本系统仅限项目管理部授权人员使用</view>
   </view>
 </template>
 
@@ -45,6 +55,22 @@ import { showToast, showLoading, hideLoading } from '@/utils/feedback'
 const auth = useAuthStore()
 const phone = ref('')
 const loading = ref(false)
+// 隐私合规：默认不勾选，用户主动勾选后才允许收集手机号/发起登录
+const agreed = ref(false)
+
+function goAgreement() {
+  uni.navigateTo({ url: '/pages/legal/Agreement' })
+}
+function goPrivacy() {
+  uni.navigateTo({ url: '/pages/legal/Privacy' })
+}
+function ensureAgreed() {
+  if (!agreed.value) {
+    showToast('请先阅读并勾选同意《用户服务协议》和《隐私政策》', 'none')
+    return false
+  }
+  return true
+}
 
 function goHome() {
   uni.reLaunch({ url: '/pages/home/Home' })
@@ -55,6 +81,7 @@ onShow(() => {
 })
 
 async function onWxLogin() {
+  if (!ensureAgreed()) return
   if (loading.value) return
   loading.value = true
   try {
@@ -72,6 +99,7 @@ async function onWxLogin() {
 }
 
 async function onPhoneLogin() {
+  if (!ensureAgreed()) return
   const p = (phone.value || '').trim()
   if (!/^1\d{10}$/.test(p)) {
     showToast('请输入有效的 11 位手机号', 'none')
@@ -219,6 +247,44 @@ async function onPhoneLogin() {
 }
 .ph {
   color: $tm-text-muted;
+}
+
+.agree {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 32rpx;
+  padding: 0 6rpx;
+}
+.agree-box {
+  width: 32rpx;
+  height: 32rpx;
+  border-radius: 6rpx;
+  border: 2rpx solid #c8c9cc;
+  margin-right: 12rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+.agree-on {
+  background: $tm-primary;
+  border-color: $tm-primary;
+}
+.agree-tick {
+  color: #fff;
+  font-size: 22rpx;
+  line-height: 1;
+}
+.agree-txt {
+  font-size: 24rpx;
+  color: $tm-text-muted;
+  line-height: 1.7;
+}
+.agree-link {
+  font-size: 24rpx;
+  color: $tm-primary;
+  line-height: 1.7;
 }
 
 .footer-tip {
