@@ -25,8 +25,11 @@
  * requiredPrivateInfos 中须声明 chooseLocation。
  * （官方文档：https://developers.weixin.qq.com/miniprogram/dev/api/location/wx.chooseLocation.html）
  *
- * ⚠️ 它打开的地图会以当前定位为中心，所以定位授权被拒时只是「初始视野不准」，
- * 仍可正常选点 —— 故本封装**不因定位未授权而拦死选点**（只把原因如实透出给调用方）。
+ * ⚠️ 不指定初始中心时，微信会以当前定位为中心 —— 机场室内定位常漂到几十公里外
+ * （线上实测有 5 条落在海珠区 23.1062,113.3245 的调试坐标），现场人员得手动拖回机场，
+ * 极易误选。故本封装**默认传入白云机场 GTC 坐标**作为初始视野。
+ * 官方 latitude/longitude 语义为「目标地经纬度」（基础库 2.9.0+，gcj02）。
+ * 定位授权被拒不影响选点，故本封装不因定位未授权而拦死选点。
  *
  * 🔴 并发保护：`chooseLocation` 会拉起微信原生界面，连续快速点击会重复拉起。
  * 本模块统一维护 `pending`（模块级单例 ref），所有调用方共用同一个标志，
@@ -34,7 +37,7 @@
  */
 
 import { ref } from 'vue'
-import { isUsable } from '@/api/geo'
+import { isUsable, GTC_CENTER } from '@/api/geo'
 
 /**
  * 全局「选点界面正在打开」标志（模块级单例）。
@@ -62,8 +65,13 @@ export type ChooseFailReason = 'cancel' | 'denied' | 'privacy' | 'unsupported' |
  * 🔴 并发保护做在这一层（而不是让每个页面各写一份 busy）：
  * 拉起期间 `choosePending` 为 true，再次调用**直接静默返回**，不会重复拉起原生界面；
  * 无论成功/取消/失败都在finally 里复位，不会漏复位把入口永久锁死。
+ *
+ * @param center 打开地图时的初始中心，默认白云机场 T3 GTC（现场口径 2026-11-14）。
+ *   用户仍可自由拖动/搜索到别处，这里只决定「一打开看到哪里」。
  */
-export function chooseLocation(): Promise<ChooseLocationResult> {
+export function chooseLocation(
+  center: { latitude: number; longitude: number } = GTC_CENTER,
+): Promise<ChooseLocationResult> {
   return new Promise((resolve) => {
     // 已在选点界面中：静默返回，不打扰用户（重复拉起才是 bug）
     if (choosePending.value) {
@@ -91,7 +99,10 @@ export function chooseLocation(): Promise<ChooseLocationResult> {
     }
     try {
       api({
-        // 不传 lat/lng：由用户在地图上自行选址，避免「默认落在自动定位点」诱导误操作
+        // 初始视野固定在白云机场 GTC：避免微信按（可能漂到海珠的）自动定位落点。
+        // 用户仍可在原生地图上自行拖动选址，这里不限制最终选点结果。
+        latitude: center.latitude,
+        longitude: center.longitude,
         success: (res: any) => {
           const lat = Number(res?.latitude)
           const lng = Number(res?.longitude)

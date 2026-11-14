@@ -24,7 +24,7 @@
     </view>
     <!-- 只有「我」的坐标、没有任何业务点位时：地图照常显示，并在下方点明这是当前位置 -->
     <view class="gm-hint" v-if="hasPoint && !hasBizPoint">
-      <text>{{ emptyTitle }} · 当前显示的是您的实时位置</text>
+      <text>{{ hintText }}</text>
     </view>
     <!-- 一键回到我的位置（有业务点位时，用户常常拖动地图后找不到自己） -->
     <view class="gm-locate" v-if="hasPoint && myPos" @tap="backToMyLocation">
@@ -56,6 +56,7 @@
  */
 import { computed, onMounted, ref } from 'vue'
 import { getCurrentPoint } from '@/composables/useGeolocation'
+import { GTC_CENTER, isNearGTC } from '@/api/geo'
 
 /** map 组件的 id：`createMapContext` 要靠它拿到上下文（回到我的位置 / 跳到点位） */
 const MAP_ID = 'gm-map'
@@ -110,11 +111,10 @@ const props = withDefaults(
     /** 地图中心（缺省取第一个 marker / polyline 点） */
     center?: { latitude: number; longitude: number } | null
     /**
-     * 是否优先以「我的位置」为中心（默认 true）。
-     * 用户口径（2026-11-05）：「地图默认直接显示本机位置，不用点小图标」——
-     * 所以默认一律以本机位置为首选，**不再设距离上限**（原来 >2km 会退回点位，
-     * 结果就是打开设备详情却看到别处的定位，被当成"地图显示错"）。
-     * 需要看点位的场景改由右下角「{{ focusLabel }}」按钮一键跳过去。
+     * 是否优先以「我的位置」为中心（默认 **false**）。
+     * 用户口径（2026-11-14）：「设备定了定位就固定，打开就是设备位置；起码默认白云机场」——
+     * 所以默认一律以业务点位为首选，我的位置只作右下角一键跳转。
+     * 需要「打开就看到自己」的页面才显式传 true。
      */
     preferMyLocation?: boolean
     /** 「跳到点位」用的目标坐标（缺省取第一个业务点位） */
@@ -132,7 +132,7 @@ const props = withDefaults(
     polyline: () => [],
     circles: () => [],
     center: null,
-    preferMyLocation: true,
+    preferMyLocation: false,
     focusPoint: null,
     focusLabel: '看点位',
     scale: 16,
@@ -152,6 +152,17 @@ function valid(lat?: number | null, lng?: number | null): boolean {
   // GTC 在东经 113 / 北纬 23，明显越界的坐标同样是脏数据
   if (a < -90 || a > 90 || b < -180 || b > 180) return false
   return true
+}
+
+/**
+ * 是否落在 GTC 现场合理范围（排除离群脏点）。
+ *
+ * 线上混入过 5 条海珠区坐标（23.1062,113.3245，开发者工具模拟定位），
+ * 一旦参与定中心 / 自动缩放，整张地图会被拉到 30km 外 —— 现场看到的就是「飘到海珠」。
+ * 离群点仍照常画在图上（不隐藏真实数据），只是**不参与视野计算**。
+ */
+function inScope(lat?: number | null, lng?: number | null): boolean {
+  return valid(lat, lng) && isNearGTC(lat, lng)
 }
 
 const markers = computed(() =>
@@ -204,6 +215,9 @@ const hasBizPoint = computed(() => markers.value.length > 0 || polyline.value.le
  * 本处仅解决「地图一打开落在默认城市（广州）而不是用户身边」的观感问题。
  *
  * 取不到就静默降级（未授权 / 室内无解 / 隐私未声明都不弹错、不阻断页面）。
+ *
+ * 2026-11-14 起：本坐标**只用于右下角「我的位置」一键跳转**，
+ * 默认视野由业务点位 / 白云机场 GTC 决定，不再受手机定位漂移影响。
  */
 const myPos = ref<{ latitude: number; longitude: number } | null>(null)
 onMounted(() => {
@@ -218,45 +232,58 @@ onMounted(() => {
 /** 有业务点位、或有我方坐标，都值得渲染地图（不再直接掉进空态） */
 const hasPoint = computed(() => hasBizPoint.value || !!myPos.value)
 
-/** 第一个业务点位（设备 / 房间 / 节点 / 打卡点），用于「跳到点位」兜底 */
+/** 没有业务点位时，如实说明当前显示的是自己还是机场兜底 */
+const hintText = computed(() => {
+  const me = myPos.value && inScope(myPos.value.latitude, myPos.value.longitude)
+  return `${props.emptyTitle} · 当前显示${me ? '您的实时位置' : '白云机场 GTC'}`
+})
+
+/** 第一个「现场范围内」的业务点位，用于定中心与「跳到点位」兜底 */
 const anchorPoint = computed(() => {
-  const m = markers.value[0]
+  const m = markers.value.find((x) => inScope(x.latitude, x.longitude))
   if (m) return { latitude: m.latitude, longitude: m.longitude }
-  const p = polyline.value[0]
+  const p = polyline.value.find((x) => inScope(x.latitude, x.longitude))
   if (p) return { latitude: p.latitude, longitude: p.longitude }
   return null
 })
 
 /**
- * 中心点优先级（2026-11-05 按用户口径重排）：
- * ① 外部显式指定 → ② **我的位置**（有就一律用，不再设距离上限）
- * → ③ 第一个业务点位 → ④ 机场兜底
+ * 中心点优先级（2026-11-14 按用户口径重排）：
+ * ① 外部显式指定（须在现场范围内）→ ② **业务点位**（设备/房间/打卡点）
+ * → ③ 我的位置（须在现场范围内）→ ④ 白云机场 GTC
  *
- * 为什么要去掉原来的「>2km 就退回点位」：用户的实际感受是"地图打开显示的是别处"，
- * 那在他们眼里就是地图错了。要看设备/打卡点，右下角有「看设备位置 / 看打卡点」按钮。
+ * 为什么从「我的位置优先」改回来：机场室内定位常漂移，1.9.1 起默认以手机定位为中心，
+ * 结果打开设备详情看到的是几十公里外（甚至海珠区），被当成地图坏了。
+ * 用户口径是「设备定了定位就固定，打开就是设备位置；起码默认白云机场」。
+ * 我的位置仍保留右下角一键跳转，需要时点一下即可。
  */
 const centerPoint = computed(() => {
   const c = props.center
-  if (c && valid(c.latitude, c.longitude)) {
+  if (c && inScope(c.latitude, c.longitude)) {
     return { latitude: Number(c.latitude), longitude: Number(c.longitude) }
   }
-  if (myPos.value && props.preferMyLocation) return myPos.value
+  // 手机定位漂到现场范围外时，宁可不用，也不要把地图带去海珠
+  const me =
+    myPos.value && inScope(myPos.value.latitude, myPos.value.longitude) ? myPos.value : null
+  if (me && props.preferMyLocation) return me
   if (anchorPoint.value) return anchorPoint.value
-  return myPos.value || { latitude: 23.3626, longitude: 113.3206 }
+  if (me) return me
+  return { latitude: GTC_CENTER.latitude, longitude: GTC_CENTER.longitude }
 })
 
 const center = computed(() => centerPoint.value)
 
 /**
- * 有多个点时把 include-points 交给 map 自动缩放到刚好装下所有点。
+ * 有多个点时交给 map 自动缩放到刚好装下所有**现场**点位。
  *
- * ⚠️ 但**默认要落在我自己的位置**时不能传它：include-points 会覆盖 latitude/longitude，
- * 微信会把视野自动缩到把所有点位都装下 —— 那就是用户看到的"很乱、显示别处"。
- * 所以只有拿不到我的位置时，才用 include-points 兜底。
+ * ⚠️ 只统计 inScope 的点：混入一条海珠区脏坐标就会把视野拉到 30km 外。
+ * 明确要求「我的位置优先」时不传，避免 include-points 覆盖默认中心。
  */
 const includePoints = computed(() => {
   if (myPos.value && props.preferMyLocation) return undefined
-  const pts = markers.value.map((m) => ({ latitude: m.latitude, longitude: m.longitude }))
+  const pts = markers.value
+    .filter((m) => inScope(m.latitude, m.longitude))
+    .map((m) => ({ latitude: m.latitude, longitude: m.longitude }))
   if (pts.length >= 2) return { points: pts, padding: 80 }
   return undefined
 })

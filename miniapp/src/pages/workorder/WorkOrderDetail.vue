@@ -181,7 +181,7 @@ import {
   woViewLabel, woViewColor, woViewOf, WO_VIEW,
 } from '@/api/patrol'
 import type { WorkOrder, WoNode } from '@/api/patrol'
-import { workOrderTrack, nodeRoomGeo, fmtDistance, isUsable } from '@/api/geo'
+import { workOrderTrack, nodeRoomGeo, fmtDistance, isUsable, isNearGTC } from '@/api/geo'
 import type { TrackResult, GeoPoint } from '@/api/geo'
 import MiniMap from '@/components/MiniMap.vue'
 import type { MiniMapMarker, MiniMapCircle } from '@/components/MiniMap.vue'
@@ -271,13 +271,13 @@ const isDone = computed(() => (wo.value ? woViewOf(wo.value.status) === WO_VIEW.
 /**
  * 「看打卡点」按钮的目标坐标（已完成工单专用）。
  *
- * 注意：地图**默认仍落在本机位置**（用户 2026-11-05 口径：打开就要看到自己），
+ * 注意：地图**默认落在业务点位**（用户 2026-11-14 口径：设备/打卡点位置固定），
  * 这里只作为左下角按钮的跳转目标，不再抢默认视野。
- * 打卡点一个坐标都没有时返回 null，按钮退化为跳到第一个线路节点。
+ * 只统计现场范围内的打卡点：混入海珠区等离群坐标会把「看打卡点」目标拉到半路。
  */
 const mapCenter = computed<{ latitude: number; longitude: number } | null>(() => {
   if (!isDone.value) return null
-  const pts = track.value.points
+  const pts = track.value.points.filter((p) => isNearGTC(p.latitude, p.longitude))
   if (!pts.length) return null
   let lat = 0
   let lng = 0
@@ -401,9 +401,11 @@ const routeMarkers = computed<MiniMapMarker[]>(() => {
   return out
 })
 
-/** 实际轨迹折线 */
+/** 实际轨迹折线（离群脏点不连，避免画一条通往海珠的 30km 长线） */
 const routePolyline = computed(() =>
-  track.value.points.map((p) => ({ latitude: p.latitude, longitude: p.longitude })),
+  track.value.points
+    .filter((p) => isNearGTC(p.latitude, p.longitude))
+    .map((p) => ({ latitude: p.latitude, longitude: p.longitude })),
 )
 
 /** 节点误差圆（精度不可信时不画，宁可不画也别画个误导人的大圈） */

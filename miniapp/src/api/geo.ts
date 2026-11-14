@@ -64,8 +64,15 @@ export interface TrackResult {
   distanceM: number
 }
 
-/** GTC 中心（兜底视野用，避免无点时地图乱飞） */
-export const GTC_CENTER = { latitude: 23.3626, longitude: 113.3206 }
+/**
+ * GTC 中心（白云机场 T3 GTC 交通中心现场坐标，gcj02）。
+ * 取自线上 1203 条设备定位记录里机场密集区（1144 条）的代表点；
+ * 所有地图的空视野、选点初始位置都以它为默认，不再跟手机定位跑。
+ */
+export const GTC_CENTER = { latitude: 23.3634, longitude: 113.3206 }
+
+/** 现场合理半径（米）：GTC 及整个机场区域都在 8km 内 */
+export const GTC_SCOPE_M = 8000
 
 /** 坐标是否可用：非数值、(0,0)、越界一律判否 */
 export function isUsable(lat?: number | null, lng?: number | null): boolean {
@@ -95,6 +102,25 @@ export function distanceMeters(
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) * Math.sin(dLng / 2)
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)))
+}
+
+/**
+ * 坐标是否落在 GTC 现场合理范围。
+ *
+ * 背景：线上曾混入 5 条海珠区坐标（23.1062, 113.3245，开发者工具模拟定位默认点），
+ * 这类离群脏点一旦参与定中心或自动缩放，会把整张地图拉到 30km 外，
+ * 现场看到的就是「地图飘到海珠」。离群点仍照常画在图上（不隐藏真实数据），
+ * 只是不参与视野计算。
+ */
+export function isNearGTC(
+  lat?: number | null,
+  lng?: number | null,
+  maxMeters: number = GTC_SCOPE_M,
+): boolean {
+  const a = Number(lat)
+  const b = Number(lng)
+  if (!Number.isFinite(a) || !Number.isFinite(b) || a === 0 || b === 0) return false
+  return distanceMeters({ latitude: a, longitude: b }, GTC_CENTER) <= maxMeters
 }
 
 /** 把观测记录转成地图点，非法坐标返回 null（保留观测 id，供调用方按 id 精确去重） */
