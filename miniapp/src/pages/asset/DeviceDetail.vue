@@ -235,6 +235,17 @@
             </view>
             <view class="room-tip">登记该房间由哪台配电柜供电；房间不会被建成设备，不影响设备台账。</view>
           </block>
+          <!-- 上下游关系才需要选方向：标签贴在对方编号旁，必须让用户明确谁供电给谁 -->
+          <view class="sheet-row" v-if="showOppDir">
+            <text class="sr-k">对方方位</text>
+            <view class="sr-seg">
+              <text :class="['seg-i', { on: relOppDir === 'down' }]" @tap="relOppDir = 'down'">下游</text>
+              <text :class="['seg-i', { on: relOppDir === 'up' }]" @tap="relOppDir = 'up'">上游</text>
+            </view>
+          </view>
+          <view class="room-tip" v-if="showOppDir">
+            选「下游」＝本设备供电给对方；选「上游」＝对方供电给本设备。
+          </view>
           <view class="sheet-ok" :class="{ disabled: addSaving }" @tap="submitAdd">
             {{ addSaving ? '保存中…' : '确认添加' }}
           </view>
@@ -553,6 +564,17 @@ const typePickerIndex = computed(() => {
   return i < 0 ? 0 : i
 })
 
+/**
+ * 上下游关系里「对方」是上游还是下游。
+ * 默认 down（本设备 → 对方 = 对方是下游），保持历史建边行为不变；
+ * 选 up 时对调 from/to（对方供电给本设备）。
+ */
+const relOppDir = ref<'down' | 'up'>('down')
+/** 仅设备模式的 forward 关系显示；房间「供电归属」语义固定，不显示 */
+const showOppDir = computed(
+  () => targetKind.value === 'device' && dirOf.value[addType.value] === 'forward',
+)
+
 function setTargetKind(k: 'device' | 'room') {
   if (targetKind.value === k) return
   targetKind.value = k
@@ -606,8 +628,13 @@ const chainRels = computed(() =>
 function relOtherCode(e: AssetDeviceLinkEdge): string {
   return e.other_code || (e.direction === 'out' ? e.to_code : e.from_code)
 }
+/**
+ * 上下游标签贴在**对方编号旁**：forward 边 from=上游 → to=下游，
+ * 本设备是 from（direction==='out'）时对方就是下游。旧版标成「上游」是反的，
+ * 与 PC 端 DeviceDetailDrawer 不一致，2026-11-14 修正。
+ */
 function relDirectionTag(e: AssetDeviceLinkEdge): string {
-  if (dirOf.value[e.relation_type] === 'forward') return e.direction === 'out' ? '上游' : '下游'
+  if (dirOf.value[e.relation_type] === 'forward') return e.direction === 'out' ? '下游' : '上游'
   return ''
 }
 function relSourceTag(e: AssetDeviceLinkEdge): string {
@@ -654,6 +681,7 @@ function openAdd(tab: 'mutual' | 'chain') {
     ? (mutualTypeOptions.value[0]?.label || '关联')
     : (chainTypeOptions.value[0]?.label || '')
   addOther.value = ''
+  relOppDir.value = 'down'
   showAdd.value = true
 }
 function onTypePick(e: any) {
@@ -675,7 +703,13 @@ async function submitAdd() {
   if (!addType.value) { showToast('请选择关系类型', 'none'); return }
   addSaving.value = true
   try {
-    await assetCreateRelation({ from_code: code.value, to_code: other, relation_type: addType.value })
+    // 选「对方是上游」时对调建边方向；其余一律保持本设备 → 对方（历史行为）
+    const flip = showOppDir.value && relOppDir.value === 'up'
+    await assetCreateRelation({
+      from_code: flip ? other : code.value,
+      to_code: flip ? code.value : other,
+      relation_type: addType.value,
+    })
     showToast('关联已添加', 'success')
     showAdd.value = false
     await loadRelations()
