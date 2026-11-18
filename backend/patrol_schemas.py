@@ -136,6 +136,14 @@ class CheckinCreate(BaseModel):
     abnormal: bool = False
     lat: Optional[float] = None
     lng: Optional[float] = None
+    accuracy: Optional[float] = None  # 定位精度（米），首签建基准时一并记录
+    # 蓝牙信标第二因子（2026-11-18）：小程序扫描后上报，后端比对房间绑定
+    beacon_scanned: Optional[bool] = None
+    beacon_uuid: Optional[str] = None
+    beacon_major: Optional[int] = None
+    beacon_minor: Optional[int] = None
+    beacon_rssi: Optional[int] = None
+    beacon_scan_count: Optional[int] = None
 
     @field_validator("lat")
     @classmethod
@@ -203,6 +211,16 @@ class CheckinOut(BaseModel):
     lng: Optional[float] = None
     remark: Optional[str] = None
     abnormal: bool = False
+    # 超范围判定结果（2026-10-23）：distance_m=与房间定位基准的球面距离（米）；
+    # out_of_range=True 表示超出设定打卡范围（>30 米），仍允许打卡，仅标记+审计+提醒。
+    distance_m: Optional[float] = None
+    out_of_range: bool = False
+    # 信标校验结果（2026-11-18）
+    beacon_id: Optional[int] = None
+    beacon_rssi: Optional[int] = None
+    beacon_verified: Optional[bool] = None
+    beacon_scan_count: Optional[int] = None
+    checkin_mode: Optional[str] = None
 
 
 class WoNodeOut(BaseModel):
@@ -226,6 +244,10 @@ class WoNodeOut(BaseModel):
     operator_id: Optional[int] = None
     remark: Optional[str] = None
     abnormal: bool = False
+    # 信标校验（2026-11-18）：历史打卡小字展示用（需求 §5.3）
+    beacon_verified: Optional[bool] = None
+    beacon_rssi: Optional[int] = None
+    checkin_mode: Optional[str] = None
 
 
 class CheckinResult(BaseModel):
@@ -236,6 +258,10 @@ class CheckinResult(BaseModel):
     node_done: int = 0
     all_done: bool = False
     message: Optional[str] = None
+    # 信标校验回执（2026-11-18）：true=命中 / false=已绑标未命中 / None=未绑标
+    beacon_verified: Optional[bool] = None
+    checkin_mode: Optional[str] = None
+    beacon_note: Optional[str] = None
 
 
 class PatrolStats(BaseModel):

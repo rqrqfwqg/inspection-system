@@ -18,6 +18,7 @@
    「路过/参考点」，不计入完成条件，但仍在详情里展示。
 6. 时间统一 UTC；打卡时间用 `checked_at`（可被客户端带，服务端缺省 now）。
 """
+import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,6 +26,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 import work_order_state as st
+import beacon_service  # 蓝牙信标第二因子校验（2026-11-18）
+from database import DeviceGeoObservation
 from patrol_models import InspectionCheckin, InspectionRoute, InspectionRouteNode
 from work_order_models import WorkOrder, WorkOrderEvent
 
@@ -165,8 +168,76 @@ def _build_node(route_id: int, seq: int, nd: Dict[str, Any]) -> InspectionRouteN
     )
 
 
-def update_route(db: Session, route_id: int, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """编辑线路。`nodes` 给了就**全量替换**（前端一次提交整份清单）。"""
+
+# ===== 线路节点防误清（2026-10-26 线上事故整改）=====
+# 背景：update_route 的 nodes 是「整表替换」，前端提交清单不全就会静默丢节点。
+_ROUTE_HIST_READY = False
+
+
+def _route_edit_log(rec):
+    """把每次线路节点保存/被拦截写成一行 JSON 到 backend/logs/route_edit.log。"""
+    import json as _json
+    import logging as _logging
+    import os as _os
+    base = _os.path.dirname(_os.path.abspath(__file__))
+    logdir = _os.path.join(base, 'logs')
+    try:
+        _os.makedirs(logdir, exist_ok=True)
+    except Exception:
+        pass
+    logger = _logging.getLogger('route_edit')
+    if not logger.handlers:
+        h = _logging.FileHandler(_os.path.join(logdir, 'route_edit.log'), encoding='utf-8')
+        h.setFormatter(_logging.Formatter('%(message)s'))
+        logger.addHandler(h)
+        logger.setLevel(_logging.INFO)
+        logger.propagate = False
+    try:
+        logger.info(_json.dumps(rec, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def _ensure_route_history(db):
+    """保证节点历史表存在（幂等；不依赖 init_db 的迁移）。"""
+    global _ROUTE_HIST_READY
+    if _ROUTE_HIST_READY:
+        return
+    from sqlalchemy import text as _text
+    db.execute(_text(
+        'CREATE TABLE IF NOT EXISTS inspection_route_node_history ('
+        ' id INTEGER PRIMARY KEY AUTOINCREMENT,'
+        ' route_id INTEGER NOT NULL,'
+        ' operator_id INTEGER,'
+        ' source TEXT,'
+        ' before_json TEXT,'
+        ' after_json TEXT,'
+        ' before_count INTEGER NOT NULL DEFAULT 0,'
+        ' after_count INTEGER NOT NULL DEFAULT 0,'
+        ' created_at DATETIME)'
+    ))
+    db.commit()
+    _ROUTE_HIST_READY = True
+
+
+def _node_brief(n):
+    """节点摘要。兼容 ORM 对象与 dict。"""
+    if isinstance(n, dict):
+        return {'room_code': n.get('room_code'), 'area_code': n.get('area_code'),
+                'snapshot_name': n.get('snapshot_name'), 'node_type': n.get('node_type') or 'room'}
+    return {'room_code': getattr(n, 'room_code', None), 'area_code': getattr(n, 'area_code', None),
+            'snapshot_name': getattr(n, 'snapshot_name', None),
+            'node_type': getattr(n, 'node_type', 'room')}
+
+
+def update_route(db: Session, route_id: int, payload: Dict[str, Any],
+                 operator_id: int = None) -> Optional[Dict[str, Any]]:
+    """编辑线路。`nodes` 给了就**全量替换**（前端一次提交整份清单）。
+
+    ⚠️ 2026-10-26 加固：整表替换一旦提交清单不全就会静默丢节点（线上已发生 5 个→1 个）。
+      因此：① 原有节点非空时禁止保存空清单；② 原有 ≥3 个而新清单不到一半 → 判疑似误清、直接拒绝
+      （要精简请用单删接口逐个删）；③ 每次保存都把改前/改后快照写历史表 + route_edit.log。
+    """
     r = db.get(InspectionRoute, route_id)
     if not r:
         return None
@@ -178,12 +249,46 @@ def update_route(db: Session, route_id: int, payload: Dict[str, Any]) -> Optiona
         r.status = payload["status"]
 
     if payload.get("nodes") is not None:
+        import json as _json
+        import datetime as _dt
+        from sqlalchemy import text as _text
+        _ensure_route_history(db)
+        _before = list(db.execute(
+            select(InspectionRouteNode).where(InspectionRouteNode.route_id == route_id)
+            .order_by(InspectionRouteNode.seq, InspectionRouteNode.id)
+        ).scalars())
+        _new = payload["nodes"] or []
+        _nb, _nn = len(_before), len(_new)
+        _bb = [_node_brief(x) for x in _before]
+        _ba = [_node_brief(x) for x in _new]
+        _rec = {"ts": _dt.datetime.now().isoformat(timespec="seconds"),
+                "route_id": route_id, "operator_id": operator_id,
+                "before_count": _nb, "after_count": _nn,
+                "before": _bb, "after": _ba}
+        if _nb > 0 and _nn == 0:
+            _r = dict(_rec); _r["result"] = "blocked_empty"
+            _route_edit_log(_r)
+            raise ValueError("nodes_empty")
+        if _nb >= 3 and _nn * 2 < _nb:
+            _r = dict(_rec); _r["result"] = "blocked_shrink"
+            _route_edit_log(_r)
+            raise ValueError("nodes_shrink:%d:%d" % (_nb, _nn))
+        db.execute(_text(
+            "insert into inspection_route_node_history "
+            "(route_id, operator_id, source, before_json, after_json, before_count, after_count, created_at) "
+            "values (:r,:o,:s,:bj,:aj,:bc,:ac,:ts)"),
+            {"r": route_id, "o": operator_id, "s": "update_route",
+             "bj": _json.dumps(_bb, ensure_ascii=False),
+             "aj": _json.dumps(_ba, ensure_ascii=False),
+             "bc": _nb, "ac": _nn, "ts": _dt.datetime.now()})
         # 全量替换：先删旧节点，再插新（节点本身无独立业务状态，只有打卡记录引用 node_id）
         db.query(InspectionRouteNode).filter(
             InspectionRouteNode.route_id == route_id
         ).delete(synchronize_session=False)
-        for i, nd in enumerate(payload["nodes"]):
+        for i, nd in enumerate(_new):
             db.add(_build_node(route_id, i, nd))
+        _r = dict(_rec); _r["result"] = "saved"
+        _route_edit_log(_r)
 
     db.commit()
     return get_route(db, route_id)
@@ -331,6 +436,130 @@ def _checked_node_ids(db: Session, wo_id: int) -> set:
     return set(rows)
 
 
+# ==================== 打卡范围（10 米半径） ====================
+# 用户需求（2026-10-21）：「打卡范围限定在定位附近 10 米」。
+# 基准点取「该节点所在房间的定位观测」（device_geo_observations 里 room_code 匹配、
+# 坐标可用的最新一条；人工修正 manual 优先）—— 房间定位就是现场扫码留下的真实坐标，
+# 而线路节点本身没有经纬度字段。
+CHECKIN_RADIUS_M = 30.0
+
+
+import json
+import logging
+import os
+import threading
+
+_oor_logger = None
+_oor_lock = threading.Lock()
+
+
+def _get_oor_logger():
+    global _oor_logger
+    if _oor_logger is None:
+        with _oor_lock:
+            if _oor_logger is None:
+                log_dir = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs"
+                )
+                os.makedirs(log_dir, exist_ok=True)
+                _oor_logger = logging.getLogger("checkin_oor")
+                _oor_logger.setLevel(logging.INFO)
+                if not _oor_logger.handlers:
+                    _h = logging.FileHandler(
+                        os.path.join(log_dir, "checkin_oor.log"), encoding="utf-8"
+                    )
+                    _h.setFormatter(logging.Formatter("%(message)s"))
+                    _oor_logger.addHandler(_h)
+                    _oor_logger.propagate = False
+    return _oor_logger
+
+
+def _log_oor(wo_id, node_id, operator_id, dist_m, lat, lng, ref, room_code):
+    """超范围打卡审计日志：写入结构化 JSON 一行（含工单/节点/操作人/距离/双方坐标/时间）。"""
+    rec = {
+        "ts": _utcnow().isoformat(),
+        "wo_id": wo_id,
+        "node_id": node_id,
+        "operator_id": operator_id,
+        "room_code": room_code,
+        "allowed_m": CHECKIN_RADIUS_M,
+        "distance_m": round(dist_m, 1),
+        "lat": lat,
+        "lng": lng,
+        "ref_lat": ref[0],
+        "ref_lng": ref[1],
+    }
+    _get_oor_logger().info(json.dumps(rec, ensure_ascii=False))
+
+
+def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """两点球面距离（米）。同为 gcj02 坐标系，做 30 米级判定足够。"""
+    r = 6371008.8
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = p2 - p1
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def _room_reference_point(db: Session, room_code: str) -> Optional[Tuple[float, float]]:
+    """房间定位基准点：优先最新一条人工修正（manual），否则最新一条自动观测。"""
+    code = (room_code or "").strip()
+    if not code:
+        return None
+    base = select(DeviceGeoObservation).where(
+        DeviceGeoObservation.room_code == code,
+        DeviceGeoObservation.latitude.isnot(None),
+        DeviceGeoObservation.longitude.isnot(None),
+    )
+    row = db.execute(
+        base.where(DeviceGeoObservation.scan_source == "manual")
+        .order_by(DeviceGeoObservation.id.desc()).limit(1)
+    ).scalars().first()
+    if row is None:
+        row = db.execute(
+            base.order_by(DeviceGeoObservation.id.desc()).limit(1)
+        ).scalars().first()
+    if row is None:
+        return None
+    return float(row.latitude), float(row.longitude)
+
+
+
+
+def _is_finite(x) -> bool:
+    try:
+        return x is not None and float(x) == float(x) and abs(float(x)) < 1e7
+    except (TypeError, ValueError):
+        return False
+
+
+def _seed_room_reference(db: Session, room_code: str, lat: float, lng: float,
+                         accuracy: Optional[float], operator_id: int) -> None:
+    """首签自动建基准：以本次打卡坐标作为该房间的定位基准点。
+
+    写入 device_geo_observations（device_code 用 ROOM::<code> 哨兵表示「房间级」，
+    非某台设备），scan_source='checkin_seed'。后续打卡由 _room_reference_point
+    按 room_code 取用（用户在小程序里手动标注的 manual 记录仍优先）。
+    """
+    obs = DeviceGeoObservation(
+        device_code="ROOM::%s" % room_code,
+        latitude=lat,
+        longitude=lng,
+        accuracy=(float(accuracy) if _is_finite(accuracy) else None),
+        coord_type="gcj02",
+        room_code=room_code,
+        scan_source="checkin_seed",
+        source="wechat_miniapp",
+        operator=str(operator_id),
+        observed_at=datetime.now(),
+        created_at=datetime.now(),
+    )
+    db.add(obs)
+    db.commit()
+
+
 def checkin(db: Session, wo_id: int, actor_id: int,
             payload: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """打卡。返回 (result, err_code)。err_code ∈ {not_found, node_invalid,
@@ -364,12 +593,58 @@ def checkin(db: Session, wo_id: int, actor_id: int,
     ).scalars().first():
         return None, "dup"
 
+    # ---- 打卡范围校验（用户需求：定位附近 10 米内才允许打卡）----
+    geo_note: Optional[str] = None
+    lat, lng = payload.get("lat"), payload.get("lng")
+    room_code = (node.room_code or "").strip()
+    out_of_range = False
+    dist_m = None
+    if room_code:
+        ref = _room_reference_point(db, room_code)
+        if ref is None:
+            # 房间还没有定位基准：
+            #  - 本次打卡带来有效坐标 → 首签自动以该坐标建房间基准点，之后须在 10 米内打卡；
+            #  - 连坐标都没有（室内无信号）→ 放行但不建基准、不校验，避免现场卡死。
+            if _is_finite(lat) and _is_finite(lng):
+                _seed_room_reference(db, room_code, float(lat), float(lng),
+                                     payload.get("accuracy"), actor_id)
+                geo_note = f"首次打卡：已以此位置建立该房间定位基准，后续需在 {int(CHECKIN_RADIUS_M)} 米内打卡"
+            else:
+                geo_note = "未获取到定位，本次未建立基准也未校验打卡范围（请到可获取定位处首次打卡以建立基准）"
+        else:
+            if lat is None or lng is None:
+                return None, "geo_missing"
+            dist_m = _haversine_m(float(lat), float(lng), ref[0], ref[1])
+            # 超范围判定（产品需求 2026-10-23）：以用户手动获取的坐标为准；
+            # 超出设定范围（>30 米）即记为超范围，仍允许正常打卡，但标记+写审计日志+前端提醒。
+            out_of_range = dist_m > CHECKIN_RADIUS_M
+            if out_of_range:
+                _log_oor(wo_id, node.id, actor_id, dist_m, float(lat), float(lng), ref, room_code)
+                geo_note = (
+                    f"⚠️ 本次打卡位置距目标点 {dist_m:.0f} 米，"
+                    f"超出 {int(CHECKIN_RADIUS_M)} 米打卡范围，已记为超范围打卡"
+                )
+
+    # ---- 蓝牙信标第二因子（2026-11-18）----
+    # 分级：房间未绑标 -> verified=None，只走定位；已绑标 -> 要求三元组匹配且信号达门限。
+    # enforce=true 时未命中直接拒绝；false 时放行但标记 gps+beacon_failed（应急降级）。
+    bcn = beacon_service.verify_checkin(db, room_code, payload)
+    if bcn["verified"] is False and beacon_service.BEACON_ENFORCE:
+        return None, "beacon_missed:%s" % (bcn["note"] or "未检测到本房间信标")
+
     ci = InspectionCheckin(
         work_order_id=wo_id,
         route_id=route_id,
         node_id=node.id,
         operator_id=actor_id,
         checked_at=_utcnow(),
+        distance_m=dist_m,
+        out_of_range=out_of_range,
+        beacon_id=bcn["beacon_id"],
+        beacon_rssi=(int(payload.get("beacon_rssi")) if payload.get("beacon_rssi") is not None else None),
+        beacon_verified=bcn["verified"],
+        beacon_scan_count=payload.get("beacon_scan_count"),
+        checkin_mode=bcn["mode"],
         lat=payload.get("lat"),
         lng=payload.get("lng"),
         remark=remark,
@@ -400,7 +675,9 @@ def checkin(db: Session, wo_id: int, actor_id: int,
 
     out = {c.name: getattr(ci, c.name) for c in InspectionCheckin.__table__.columns}
     return {"ok": True, "checkin": out, "node_total": total,
-            "node_done": done_count, "all_done": all_done}, None
+            "node_done": done_count, "all_done": all_done,
+            "message": geo_note, "beacon_verified": bcn["verified"],
+            "checkin_mode": bcn["mode"], "beacon_note": bcn["note"]}, None
 
 
 def list_checkins(db: Session, wo_id: int) -> List[Dict[str, Any]]:
@@ -441,6 +718,10 @@ def wo_nodes_with_checkin(db: Session, wo: WorkOrder) -> List[Dict[str, Any]]:
                 "operator_id": ci.operator_id,
                 "remark": ci.remark,
                 "abnormal": ci.abnormal,
+                # 信标校验（2026-11-18）：历史打卡小字展示用（需求 §5.3）
+                "beacon_verified": ci.beacon_verified,
+                "beacon_rssi": ci.beacon_rssi,
+                "checkin_mode": ci.checkin_mode,
             })
         else:
             d.update({"checkin_status": "pending", "checked_at": None,

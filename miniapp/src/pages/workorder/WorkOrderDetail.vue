@@ -115,6 +115,20 @@
         </view>
       </view>
 
+      <!-- 蓝牙信标状态条（2026-11-18）：打卡时的第二因子反馈，三态 + 降级入口 -->
+      <view
+        class="beacon-bar"
+        v-if="beaconState !== 'idle'"
+        :class="'bc-' + beaconTone"
+      >
+        <text class="bc-dot">{{ beaconState === 'scanning' ? '◌' : (beaconState === 'hit' ? '✓' : (beaconState === 'skip' ? '·' : '!')) }}</text>
+        <text class="bc-text">{{ beaconText }}</text>
+        <view class="bc-actions" v-if="beaconState === 'miss'">
+          <text class="bc-link" v-if="beaconCtx?.bound" @tap="beaconRetry">重试扫描</text>
+          <text class="bc-link bc-link-gray" v-if="beaconCanFallback" @tap="beaconFallback">仍要打卡</text>
+        </view>
+      </view>
+
       <!-- 节点列表（任意顺序，可任选先打） -->
       <view class="card">
         <view
@@ -139,6 +153,9 @@
               <text class="n-pend" v-else>无需打卡</text>
             </view>
             <view class="n-remark" v-if="n.remark">备注：{{ n.remark }}</view>
+            <view class="n-beacon" v-if="n.checkin_status === 'done'">
+              信标验证：{{ beaconHistoryText(n) }}
+            </view>
           </view>
           <button
             v-if="n.require_checkin && n.checkin_status !== 'done' && canCheckin"
@@ -173,20 +190,22 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { onLoad, onShow } from '@dcloudio/uni-app'
+import { onLoad, onShow, onUnload } from '@dcloudio/uni-app'
 import {
   getWorkOrder, woNodes, doAction, doCheckin, claimWorkOrder, parseTakenBy,
-  isOverdue, routeIdOf,
+  getNodeBeacon, isOverdue, routeIdOf,
   WO_STATUS_LABEL, WO_STATUS_COLOR, WO_ACTIONS, WO_CAN_CHECKIN,
   woViewLabel, woViewColor, woViewOf, WO_VIEW,
 } from '@/api/patrol'
-import type { WorkOrder, WoNode } from '@/api/patrol'
+import type { WorkOrder, WoNode, NodeBeaconContext } from '@/api/patrol'
 import { workOrderTrack, nodeRoomGeo, fmtDistance, isUsable, isNearGTC } from '@/api/geo'
 import type { TrackResult, GeoPoint } from '@/api/geo'
 import MiniMap from '@/components/MiniMap.vue'
 import type { MiniMapMarker, MiniMapCircle } from '@/components/MiniMap.vue'
 import { showToast, showInputModal, showModal } from '@/utils/feedback'
 import { getCurrentPoint, ensureLocationAuth } from '@/composables/useGeolocation'
+import { startBeaconScan, cancelBeaconScan, beaconScanning } from '@/composables/useBeacon'
+import type { BeaconScanResult } from '@/composables/useBeacon'
 
 const id = ref(0)
 const wo = ref<WorkOrder | null>(null)
@@ -212,6 +231,33 @@ const geoFetching = ref(false)
 /** 本次会话内被标记为超范围打卡的节点 id（用于列表红标；进入页面时清空） */
 const oorNodeIds = ref<number[]>([])
 
+/* ===== 蓝牙信标打卡（2026-11-18）=====
+ * 定位仍是必填主因子，信标只是叠加的第二因子。
+ * 这些状态只服务于「本次打卡」的交互反馈，打卡完成/离开页面即重置。 */
+/** 信标反馈状态条：idle=未开始 / scanning=扫描中 / hit=命中 / miss=未命中 / skip=未绑标跳过 */
+const beaconState = ref<'idle' | 'scanning' | 'hit' | 'miss' | 'skip'>('idle')
+/** 状态条文案 + 颜色档位（文案直接给用户看，大白话） */
+const beaconText = ref('')
+const beaconTone = ref<'ok' | 'warn' | 'muted'>('muted')
+/** 当前正在打卡的节点（用于「重试扫描」时复用上下文，不重新弹定位） */
+const pendingNodeId = ref<number | null>(null)
+/** 当前节点的信标上下文（不缓存到下次打卡；文档 AC-08 要求每次重取） */
+const beaconCtx = ref<NodeBeaconContext | null>(null)
+/** 是否允许「仍要打卡」降级（扫描异常时给按钮，正常命中/未命中不走这条） */
+const beaconAllowFallback = ref(false)
+/**
+ * 「仍要打卡」是否真的可点：仅当后端放行（enforce=false）时才有意义。
+ * enforce=true 时后端必定 400 拒绝，按钮点了也打不上，是假入口（2026-11-18 修）。
+ */
+const beaconCanFallback = computed(
+  () => beaconAllowFallback.value && beaconCtx.value?.enforce === false,
+)
+
+// 离开页面必须停扫描（EARS AC-07），否则退出后仍在扫、耗电且回调泄漏
+onUnload(() => {
+  cancelBeaconScan()
+})
+
 const hasRoute = computed(() => routeIdOf(wo.value) != null)
 const overdue = computed(() => isOverdue(wo.value))
 const canCheckin = computed(() => !!wo.value && WO_CAN_CHECKIN.includes(wo.value.status as string))
@@ -236,6 +282,15 @@ function prioLabel(p?: string) {
 }
 function typeLabel(t?: string) {
   return ({ preventive: '预防性巡查', corrective: '故障维修', other: '其他' } as Record<string, string>)[t || ''] || t || '其他'
+}
+/** 历史打卡记录的信标小字（§5.3）：三种取值直接映射成人话 */
+function beaconHistoryText(n: WoNode): string {
+  if (n.beacon_verified === true) {
+    return `通过${n.beacon_rssi != null ? `（${n.beacon_rssi} dBm）` : ''}`
+  }
+  if (n.beacon_verified === false) return '未通过'
+  if (n.checkin_mode && String(n.checkin_mode).includes('beacon')) return '未通过'
+  return '未绑定信标'
 }
 /** 后端返回裸 UTC（无 Z），按北京时间显示（沿用项目约定：补 Z 再转 +8） */
 function fmtTime(s?: string | null) {
@@ -525,24 +580,140 @@ function openCheckin(n: WoNode) {
   })
 }
 
-function submit(nodeId: number, remark: string, abnormal: boolean) {
-  if (geoPending.value) return
+/**
+ * 打卡主入口（2026-11-18 接入信标）：
+ *   ① 手动定位仍必填（主因子，不变）
+ *   ② 取节点信标上下文（每次重取、不缓存 —— AC-08）
+ *   ③ 未绑标 → 直接提交（AC-01，行为与改造前一致，不碰蓝牙）
+ *   ④ 已绑标 → 扫描 → 带信标字段提交（AC-02/03/04）
+ * 定位/信标任何异常都不阻断「最终能按定位打卡」，是否被拒由后端按 enforce 决定。
+ */
+async function submit(nodeId: number, remark: string, abnormal: boolean) {
+  if (geoPending.value || beaconScanning.value) return
   // 产品需求 2026-10-23：打卡位置必须以用户**主动点按**获取的坐标为准，禁止自动/第三方定位。
-  // 未手动获取定位 → 直接拒绝并提示，绝不在后台静默取位。
+  // 未手动获取定位 → 直接拒绝并提示，绝不在后台静默取位。（信标不能替代定位 —— AC-05）
   if (!manualPoint.value) {
     showToast('请先手动获取定位（点「获取当前位置」）后再打卡', 'none')
     return
   }
-  geoPending.value = true
+
+  pendingNodeId.value = nodeId
+  beaconAllowFallback.value = false
+
+  // ② 取信标上下文：失败也不能卡住打卡，按「未绑标」降级（此时后端仍按定位判定）
+  let ctx: NodeBeaconContext | null = null
+  try {
+    ctx = await getNodeBeacon(id.value, nodeId)
+  } catch {
+    ctx = null
+  }
+  beaconCtx.value = ctx
+
+  // ③ 房间未绑标 / 接口取不到 → 直接按原逻辑提交，不碰蓝牙（AC-01）
+  if (!ctx || !ctx.bound) {
+    beaconState.value = 'skip'
+    beaconText.value = '本房间未绑定信标，已按定位打卡'
+    beaconTone.value = 'muted'
+    await doSubmit(nodeId, remark, abnormal, null)
+    return
+  }
+
+  // ④ 已绑标 → 扫描（bound=true 才调用蓝牙，AC-01 保证未绑标不弹权限）
+  beaconState.value = 'scanning'
+  beaconText.value = '正在确认位置…（靠近门框信标）'
+  beaconTone.value = 'muted'
+  // 不要在这里占用 geoPending：它是 doSubmit 的提交锁，扫描前置位会导致
+  // 扫描结束后 doSubmit 直接 return，打卡请求根本发不出去，且 geoPending
+  // 永不复位 -> 之后所有打卡点击全部失效（2026-11-18 修）。
+  // 扫描期间的防重入由 submit 开头的 beaconScanning 守卫负责。
+  let scan: BeaconScanResult
+  try {
+    scan = await startBeaconScan({
+      uuid: ctx.uuid || '',
+      major: ctx.major ?? 0,
+      minor: ctx.minor ?? 0,
+      rssiThreshold: ctx.rssi_threshold ?? -80,
+      timeoutMs: ctx.scan_timeout_ms ?? 3000,
+    })
+  } catch {
+    scan = { scanned: true, matched: false, scanCount: 0, reason: 'error' }
+  }
+
+  // 扫描异常（蓝牙未开/拒绝/不支持）→ 给「仍要打卡」降级入口，不直接吞结果（§6 / AC-06）
+  if (scan.reason === 'bluetooth_off' || scan.reason === 'denied' || scan.reason === 'unsupported') {
+    // enforce=true 时后端硬拒，没有「仍按定位打卡」这条路，文案不能误导
+    const soft = ctx.enforce === false
+    const hint: Record<string, string> = {
+      bluetooth_off: soft
+        ? '蓝牙未开启。请打开手机蓝牙后重试，或仍按定位打卡。'
+        : '蓝牙未开启，请打开手机蓝牙后重试。',
+      denied: soft
+        ? '未获得蓝牙授权。请在系统设置里允许蓝牙，或仍按定位打卡。'
+        : '未获得蓝牙授权，请在系统设置里允许蓝牙后重试。',
+      unsupported: soft
+        ? '本机不支持蓝牙信标扫描，可仍按定位打卡。'
+        : '本机不支持蓝牙信标扫描，请换用支持信标的手机打卡。',
+    }
+    beaconState.value = 'miss'
+    beaconText.value = hint[scan.reason] || '信标扫描不可用'
+    beaconTone.value = 'warn'
+    beaconAllowFallback.value = true
+    return
+  }
+
+  // 命中 / 未命中都照实提交，由后端按 enforce 判定（AC-02/03/04）
+  await doSubmit(nodeId, remark, abnormal, scan)
+}
+
+/**
+ * 真正提交打卡（把信标字段拼进请求体）。
+ * @param scan null=未绑标不扫描；否则为扫描结果
+ */
+async function doSubmit(
+  nodeId: number,
+  remark: string,
+  abnormal: boolean,
+  scan: BeaconScanResult | null,
+) {
+  if (geoPending.value) return
   const mp = manualPoint.value
-  doCheckin(id.value, {
+  if (!mp) return
+  geoPending.value = true
+  const payload: Parameters<typeof doCheckin>[1] = {
     node_id: nodeId,
     remark,
     abnormal,
     lat: mp.latitude,
     lng: mp.longitude,
-  })
+  }
+  if (scan) {
+    payload.beacon_scanned = scan.scanned
+    payload.beacon_scan_count = scan.scanCount
+    if (scan.matched) {
+      payload.beacon_uuid = scan.uuid
+      payload.beacon_major = scan.major
+      payload.beacon_minor = scan.minor
+      payload.beacon_rssi = scan.rssi
+    }
+  } else {
+    payload.beacon_scanned = false
+  }
+
+  doCheckin(id.value, payload)
     .then((r) => {
+      // 信标反馈条：以服务端的判定为准（AC-02/03/04）
+      if (r.beacon_verified === true) {
+        const rssi = r.checkin?.beacon_rssi ?? scan?.rssi
+        beaconState.value = 'hit'
+        beaconText.value = `已确认到达（信标信号${rssi != null ? ` ${rssi} dBm` : ''}）`
+        beaconTone.value = 'ok'
+      } else if (r.beacon_verified === false) {
+        beaconState.value = 'miss'
+        beaconText.value = r.beacon_note || '未检测到本房间信标，请靠近门框信标后重试'
+        beaconTone.value = 'warn'
+        // enforce=false 时被后端放行，给灰色提示；enforce=true 时后端已返回 400 走 catch
+      }
+
       if (r.checkin?.out_of_range) {
         // 超范围仍已正常打卡：标记该节点 + 弹红字即时提醒（产品需求：写入日志 + 提醒通知）
         oorNodeIds.value = [...oorNodeIds.value, nodeId]
@@ -554,7 +725,8 @@ function submit(nodeId: number, remark: string, abnormal: boolean) {
           showCancel: false,
           confirmText: '我知道了',
         })
-      } else {
+      } else if (!r.beacon_verified) {
+        // 未绑标/未命中非 enforce 时，保留常规打卡成功提示
         showToast(
           r.all_done ? '全部节点已打卡完成' : `已打卡（${r.node_done}/${r.node_total}）`,
           'success',
@@ -567,6 +739,15 @@ function submit(nodeId: number, remark: string, abnormal: boolean) {
       if (err?.statusCode === 409) {
         showToast('该节点已打卡', 'none')
         loadAll()
+      } else if (err?.statusCode === 400 && /信标|beacon/i.test(err?.message || '')) {
+        // enforce=true 且未命中 → 后端 400，展示可重试提示（AC-03）
+        beaconState.value = 'miss'
+        beaconText.value = err?.message || '未检测到本房间信标，请靠近后重试'
+        beaconTone.value = 'warn'
+        beaconAllowFallback.value = true
+        if (beaconCtx.value?.enforce === false) {
+          beaconText.value += '（可选择仍按定位打卡，可能被判未通过）'
+        }
       } else {
         showToast(err?.message || '打卡失败', 'none')
       }
@@ -574,6 +755,32 @@ function submit(nodeId: number, remark: string, abnormal: boolean) {
     .finally(() => {
       geoPending.value = false
     })
+}
+
+/**
+ * 信标扫描异常处理：重试一次 或 放弃扫描按定位打卡。
+ * 文档 §5.2：自动重试不得超过 2 次；这里重试由用户手动点，最多一次显式重试。
+ */
+function beaconRetry() {
+  if (pendingNodeId.value == null) return
+  const n = nodes.value.find((x) => x.id === pendingNodeId.value)
+  if (!n) return
+  // 复走打卡流程（会重新取信标上下文 + 重新扫描，满足 AC-08 无缓存）
+  submit(pendingNodeId.value, n.remark || '', !!n.abnormal)
+}
+
+/** 仍要打卡：跳过信标，按定位直接提交（降级，是否被拒由后端 enforce 决定） */
+function beaconFallback() {
+  if (pendingNodeId.value == null) return
+  const n = nodes.value.find((x) => x.id === pendingNodeId.value)
+  if (!n) return
+  beaconAllowFallback.value = false
+  doSubmit(pendingNodeId.value, n.remark || '', !!n.abnormal, {
+    scanned: true,
+    matched: false,
+    scanCount: 0,
+    reason: 'not_found',
+  })
 }
 
 /**
@@ -1020,6 +1227,57 @@ function doAct(action: string, payload: Record<string, any>) {
   font-size: 22rpx;
   color: $tm-text-muted;
   line-height: 1.7;
+}
+
+/* ---------- 蓝牙信标状态条（2026-11-18） ---------- */
+.beacon-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 20rpx;
+  padding: 16rpx 24rpx;
+  border-radius: 12rpx;
+  font-size: 24rpx;
+  line-height: 1.5;
+  background: $tm-bg;
+  color: $tm-text-secondary;
+}
+.beacon-bar.bc-ok {
+  color: #07c160;
+  background: rgba(7, 193, 96, 0.08);
+}
+.beacon-bar.bc-warn {
+  color: #ed9516;
+  background: rgba(237, 149, 22, 0.1);
+}
+.bc-dot {
+  flex-shrink: 0;
+  margin-right: 12rpx;
+  font-size: 28rpx;
+  font-weight: bold;
+}
+.bc-text {
+  flex: 1;
+  min-width: 0;
+}
+.bc-actions {
+  flex: 0 0 100%;
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10rpx;
+}
+.bc-link {
+  margin-left: 28rpx;
+  color: $tm-primary;
+  font-size: 24rpx;
+  font-weight: 500;
+}
+.bc-link-gray { color: $tm-text-muted; }
+/* 历史打卡记录的信标小字 */
+.n-beacon {
+  margin-top: 6rpx;
+  font-size: 21rpx;
+  color: $tm-text-muted;
 }
 
 /* 节点超范围红标 */

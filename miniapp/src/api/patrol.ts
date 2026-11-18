@@ -222,6 +222,10 @@ export interface WoNode {
   operator_id?: number | null
   remark?: string | null
   abnormal?: boolean
+  /** 信标校验（2026-11-18）：需后端 wo_nodes_with_checkin 下发，当前后端待补字段 */
+  beacon_verified?: boolean | null
+  beacon_rssi?: number | null
+  checkin_mode?: string | null
 }
 
 export interface WorkOrder {
@@ -282,6 +286,12 @@ export interface Checkin {
    *  out_of_range=true 表示超出设定打卡范围（>30 米），仍允许打卡，仅标记+审计+提醒。 */
   distance_m?: number | null
   out_of_range?: boolean
+  /** 蓝牙信标校验（2026-11-18）：verified=true 命中 / false 已绑标未命中 / null 未绑标或未上报 */
+  beacon_verified?: boolean | null
+  beacon_rssi?: number | null
+  beacon_scan_count?: number | null
+  beacon_id?: number | null
+  checkin_mode?: string | null
 }
 
 export interface CheckinResult {
@@ -291,6 +301,30 @@ export interface CheckinResult {
   node_done: number
   all_done: boolean
   message?: string | null
+  /** 蓝牙信标校验结果（2026-11-18），可直接展示 beacon_note */
+  beacon_verified?: boolean | null
+  checkin_mode?: string | null
+  beacon_note?: string | null
+}
+
+/**
+ * 节点打卡前的信标上下文（2026-11-18）。
+ * ⚠️ 以线上实际响应为准：即使 bound=false，后端仍会下发 rssi_threshold/scan_timeout_ms/enforce。
+ * 每次打卡前重新请求，禁止缓存（信标可能刚被换绑）。
+ */
+export interface NodeBeaconContext {
+  wo_id?: number
+  node_id?: number
+  node_name?: string
+  room_code?: string | null
+  bound: boolean
+  /** 仅 bound=true 时保证有值 */
+  uuid?: string | null
+  major?: number | string | null
+  minor?: number | string | null
+  rssi_threshold?: number
+  scan_timeout_ms?: number
+  enforce?: boolean
 }
 
 export interface PatrolStats {
@@ -480,9 +514,30 @@ export function availableNodes(nodeType: 'room' | 'area' = 'room', q?: string): 
  */
 export function doCheckin(
   woId: number,
-  payload: { node_id: number; remark?: string | null; abnormal?: boolean; lat?: number | null; lng?: number | null },
+  payload: {
+    node_id: number
+    remark?: string | null
+    abnormal?: boolean
+    lat?: number | null
+    lng?: number | null
+    /** 蓝牙信标（2026-11-18）：未绑标房间不传；扫描异常时 beacon_scanned=true 但无 uuid */
+    beacon_scanned?: boolean
+    beacon_uuid?: string | null
+    beacon_major?: number | null
+    beacon_minor?: number | null
+    beacon_rssi?: number | null
+    beacon_scan_count?: number | null
+  },
 ): Promise<CheckinResult> {
   return patrolRequest<CheckinResult>(`/work-orders/${woId}/checkin`, 'POST', payload)
+}
+
+/**
+ * 打卡前获取本节点的信标上下文（2026-11-18）。
+ * 🔴 不要缓存——信标可能刚被换绑，缓存的 UUID 会扫不到新信标。
+ */
+export function getNodeBeacon(woId: number, nodeId: number): Promise<NodeBeaconContext> {
+  return patrolRequest<NodeBeaconContext>(`/work-orders/${woId}/nodes/${nodeId}/beacon`, 'GET')
 }
 
 export function listCheckins(woId: number): Promise<Checkin[]> {
